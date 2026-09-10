@@ -27,7 +27,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 import v41_ref as R  # noqa: E402
 
-RING = 1024  # window ring slots; must exceed window_size + max chunk length (128 + 512)
+# Window ring slots. Must exceed window_size + the longest chunk a single forward sees, because
+# `attention` gathers a query's window out of the ring AFTER writing the whole chunk into it
+# (128 + 2048 here). 4096 slots x 512 dims x bf16 x 40 layers = 167 MB.
+RING = int(os.environ.get("DSV41_RING", 4096))
+# Longest prefill chunk. Bigger chunks are strictly cheaper on this recipe: a prefill chunk streams
+# nearly every expert of every layer through the transient ring whatever its length (a 512-token
+# chunk already touches ~370 of 384), so the NVMe traffic of a prompt is ~chunks x layers x 384
+# experts and quadrupling the chunk quarters it. The ceiling is activation memory: at T=2048 the
+# gathered window+compressed KV of one layer is ~2.7 GB.
+MAX_CHUNK = int(os.environ.get("DSV41_PREFILL_CHUNK", 2048))
 
 # Chunk invariance requires every GEMM to give the same row whatever the batch length M. cuBLAS
 # picks split-K kernels for small M and, with this flag on, reduces the K-splits in bf16, so
@@ -234,6 +243,7 @@ class Model:
         if not act_quant:
             R.act_qdq_fp8 = lambda x, block=32: x.to(torch.bfloat16)
         self.stats = {"attn_s": 0.0, "moe_s": 0.0, "engram_s": 0.0, "tokens": 0}
+        self.begin_prompt()
 
     def _tap(self, name, L, t):
         if self.tap is not None:
@@ -247,8 +257,14 @@ class Model:
         return torch.where(p >= 0, p, torch.full_like(p, -1))
 
     def attention(self, x: torch.Tensor, w, L: int, S: int, sh: Shared, ring: torch.Tensor,
-                  freqs: torch.Tensor, mtp_extra=None):
-        """x: [T, d] normed input. Returns [T, d]. `ring` is this layer's window KV ring."""
+                  freqs: torch.Tensor, mtp_extra=None, win_lo: int = 0):
+        """x: [T, d] normed input. Returns [T, d]. `ring` is this layer's window KV ring.
+
+        `win_lo` is the first position whose window KV this ring actually holds. It is 0 everywhere
+        except in the decoder replay (SWA Bounded Replay, tech report 3.2.2), where the decoder
+        layers have only seen the last 128 prompt tokens and a query near the start of the replay
+        would otherwise gather whatever the ring happens to hold below it.
+        """
         a = self.args
         T = x.size(0)
         pos = torch.arange(S, S + T, device=self.dev)
@@ -269,7 +285,7 @@ class Model:
             wpos = self._window_positions(pos)  # [T, 128]
             ring[pos % RING] = kv
             wkv = ring[wpos.clamp_min(0) % RING]  # [T, 128, d]
-            wmask = wpos >= 0
+            wmask = wpos >= win_lo if win_lo else wpos >= 0
             self._tap("win_kv", L, wkv); self._tap("win_mask", L, wmask)
             kv_all, mask = wkv, wmask
             if w.ratio:
@@ -474,14 +490,15 @@ class Model:
         self.stats["moe_s"] += time.perf_counter() - t0
         return out.to(y.dtype)
 
-    def block(self, h, pre_mix, w, L, S, sh, ring, freqs, prefill, store, arena, n_experts, mtp_extra=None):
+    def block(self, h, pre_mix, w, L, S, sh, ring, freqs, prefill, store, arena, n_experts, mtp_extra=None,
+              win_lo: int = 0):
         a = self.args
         residual = h
         attn_pre, attn_post, attn_comb = R.hc_mixes(h, w.hc_attn_fn, w.hc_attn_scale, w.hc_attn_base, a)
         y = R.hc_pre(h, pre_mix)
         y = R.rmsnorm(y, w.attn_norm, a.norm_eps)
         t0 = time.perf_counter()
-        y = self.attention(y, w, L, S, sh, ring, freqs, mtp_extra)
+        y = self.attention(y, w, L, S, sh, ring, freqs, mtp_extra, win_lo=win_lo)
         self.stats["attn_s"] += time.perf_counter() - t0
         h = R.hc_post(y, residual, attn_post, attn_comb)
         residual = h
@@ -492,14 +509,100 @@ class Model:
         h = R.hc_post(y, residual, ffn_post, ffn_comb)
         return h, ffn_pre
 
+    # ------------------------------------------------------------------ SWA bounded replay
+    def begin_prompt(self):
+        """Drop whatever the previous prompt left in the replay buffer."""
+        self._rep = {"h": [], "pre_mix": [], "topk": [], "cand": []}
+        self._rep_end = 0
+
+    def _rep_keep(self, h, pre_mix, sh: Shared, S: int, T: int):
+        """Remember the last `window_size` encoder outputs of the prompt so far.
+
+        Only the tail is ever needed, so each chunk contributes at most `window_size` rows and the
+        buffer is trimmed as soon as it has more than that.
+        """
+        w = self.args.window_size
+        n = min(w, T)
+        sl = slice(T - n, T)
+        r = self._rep
+        r["h"].append(h[sl]); r["pre_mix"].append(pre_mix[sl])
+        # layers 21..23 reuse layer 20's top-k and layers 24..39 search inside layer 20's candidate
+        # pool, and both are computed per query -- so they belong to the queries, not to the caches,
+        # and the replay has to carry them across from the encoder pass instead of recomputing them.
+        r["topk"].append(sh.topk[sl])
+        r["cand"].append(sh.candidates[sl] if sh.candidates is not None else None)
+        self._rep_end = S + T
+        while sum(t.size(0) for t in r["h"]) - r["h"][0].size(0) >= w:
+            for k in r:
+                r[k].pop(0)
+
+    def _rep_tail(self):
+        w = self.args.window_size
+        r = self._rep
+        h = torch.cat(r["h"])[-w:]
+        pre_mix = torch.cat(r["pre_mix"])[-w:]
+        topk = torch.cat(r["topk"])[-w:]
+        cands = r["cand"]
+        cand = None
+        if cands and cands[0] is not None:
+            width = max(c.size(1) for c in cands)
+            # older chunks scored fewer compressed columns; a query can only ever see columns below
+            # its own position, all of which are inside its own chunk's width, so padding the rest
+            # with False changes nothing that is reachable.
+            cand = torch.cat([c if c.size(1) == width else F.pad(c, (0, width - c.size(1)), value=False)
+                              for c in cands])[-w:]
+        return h, pre_mix, topk, cand, self._rep_end - h.size(0)
+
     @torch.inference_mode()
-    def forward(self, ids: torch.Tensor, S: int, prefill: bool, need_logits: bool = True):
+    def decoder_replay(self, need_logits: bool = True):
+        """Decoder SWA Bounded Replay (tech report 2.2 / 3.2.2).
+
+        Under CED the decoder's global KV is projected from the last encoder layer's hidden state,
+        which the encoder pass has already written for every prompt position. The only thing the
+        decoder layers still owe the first decode steps is their own sliding-window KV -- so they
+        are run over the last `window_size` prompt tokens only, with SWA truncated to that segment,
+        instead of over the whole prompt. The prompt's final logits come from this pass.
+        """
+        a = self.args
+        h, pre_mix, topk, cand, S = self._rep_tail()
+        T = h.size(0)
+        sh = Shared()
+        src = a.candidate_source_layer
+        sh.ckv, sh.ik, sh.ratio = self.c.ckv[src], self.c.ik[src], self.args.compress_ratios[src]
+        sh.topk, sh.candidates = topk, cand
+        main_hiddens = []
+        for L in range(src + 1, len(self.W.layers)):
+            w = self.W.layers[L]
+            if L in a.dspark_target_layer_ids:
+                main_hiddens.append(h.float().mean(dim=1))
+            freqs = self.freqs_c if w.ratio else self.freqs_w
+            h, pre_mix = self.block(h, pre_mix, w, L, S, sh, self.c.win[L], freqs, True, self.store,
+                                    self.store.arena, a.n_routed_experts, win_lo=S)
+            self._tap("h", L, h); self._tap("pre_mix", L, pre_mix)
+        self.last_h, self.last_pre_mix = h, pre_mix
+        logits = None
+        if need_logits:
+            x = R.hc_pre(h, pre_mix)
+            x = R.rmsnorm(x, self.W.norm, a.norm_eps)
+            logits = R.mm(x.float(), self.W.head)
+        self.stats["replay_tokens"] = self.stats.get("replay_tokens", 0) + T
+        return logits, (torch.cat(main_hiddens, dim=-1) if main_hiddens else None), S
+
+    @torch.inference_mode()
+    def forward(self, ids: torch.Tensor, S: int, prefill: bool, need_logits: bool = True,
+                encoder_only: bool = False):
         """ids: [T] token ids at positions S..S+T-1. Returns (logits [T, V] fp32 or None, main_hidden [T, 15360]).
-        Caches must be valid for positions < S (self.c.len == S)."""
+        Caches must be valid for positions < S (self.c.len == S).
+
+        ``encoder_only`` stops after the candidate-source layer (the last layer that writes global
+        KV, layer 20 here): everything above it is replayed once over the prompt tail by
+        `decoder_replay`. It returns (None, None) -- there are no logits and no DSpark hidden
+        states below layer 37.
+        """
         a = self.args
         assert self.c.len == S, (self.c.len, S)
         T = ids.size(0)
-        assert T <= 512
+        assert T <= MAX_CHUNK, (T, MAX_CHUNK)
         t0 = time.perf_counter()
         hashes = self.hash_state(ids[None], S)[0] if self.hash_state is not None else None  # [T, 2, 24]
         self.stats["engram_s"] += time.perf_counter() - t0
@@ -508,7 +611,9 @@ class Model:
         pre_mix[:, 0] = 1.0
         sh = Shared()
         main_hiddens = []
-        for L in range(len(self.W.layers)):
+        n_layers = len(self.W.layers)
+        last = a.candidate_source_layer if encoder_only else n_layers - 1
+        for L in range(last + 1):
             w = self.W.layers[L]
             if L in self.W.engram:
                 t0 = time.perf_counter()
@@ -525,13 +630,16 @@ class Model:
                                     self.store.arena, a.n_routed_experts)
             self._tap("h", L, h); self._tap("pre_mix", L, pre_mix)
         self.c.len = S + T
+        self.stats["tokens"] += T
+        if encoder_only:
+            self._rep_keep(h, pre_mix, sh, S, T)
+            return None, None
         logits = None
         self.last_h, self.last_pre_mix = h, pre_mix
-        if need_logits and len(self.W.layers) == a.n_layers:
+        if need_logits and n_layers == a.n_layers:
             x = R.hc_pre(h, pre_mix)
             x = R.rmsnorm(x, self.W.norm, a.norm_eps)
             logits = R.mm(x.float(), self.W.head)
-        self.stats["tokens"] += T
         return logits, (torch.cat(main_hiddens, dim=-1) if main_hiddens else None)
 
     # ------------------------------------------------------------------ DSpark

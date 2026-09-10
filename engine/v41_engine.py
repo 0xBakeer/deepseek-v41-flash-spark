@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 
 from engine import experts as EX  # noqa: E402
 from engine.engram import EngramTable, make_hash_state  # noqa: E402
-from engine.model import Caches, Model, Weights  # noqa: E402
+from engine.model import MAX_CHUNK, Caches, Model, Weights  # noqa: E402
 import v41_ref as R  # noqa: E402
 
 
@@ -72,10 +72,13 @@ def sample_probs(logits: torch.Tensor, temperature: float, top_p: float) -> torc
 class V41Engine:
     def __init__(self, model_dir: str, max_seq: int = 32768, arena_gb: float | None = None, device: str = "cuda",
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
-                 transient_slots: int = 400, keep_free_gb: float = 20.0):
+                 transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
+                 hot_profile: str | None = None):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
+        self.swa_replay = (os.environ.get("DSV41_SWA_REPLAY", "1") != "0") if swa_replay is None else swa_replay
+        self.hot_profile = hot_profile or os.environ.get("DSV41_HOT_PROFILE", "mixed")
         self.lock = threading.Lock()
         index = json.load(open(os.path.join(model_dir, "model.safetensors.index.json")))
         self.args = R.Args.from_json(os.path.join(model_dir, "inference", "config.json"))
@@ -142,7 +145,8 @@ class V41Engine:
         self.model.hash_state = make_hash_state(model_dir, self.tokenizer, max_seq, device)
         self.tables = {L: EngramTable(model_dir, index, L, device) for L in self.args.engram_layer_ids}
         self.model.engram_rows = lambda L, h: self.tables[L].rows(h)
-        ranked = EX.rank_from_trace(trace_stats) if trace_stats else [(L, e) for e in range(384) for L in range(40)]
+        ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
+                  else [(L, e) for e in range(384) for L in range(40)])
         self.store.warm_start(ranked, log=log)
         torch.cuda.synchronize()
         self.last_stats = {}
@@ -158,7 +162,7 @@ class V41Engine:
         self.model.stats = {"attn_s": 0.0, "moe_s": 0.0, "engram_s": 0.0, "tokens": 0}
         for t in self.tables.values():
             t.stats = {"rows": 0, "seconds": 0.0, "calls": 0}
-        self.store.stats.update({"hits": 0, "misses": 0, "prefill_misses": 0, "bytes_read": 0, "read_s": 0.0})
+        self.store.stats.update(EX.ZERO_STATS)
 
     def generate(self, prompt_ids, *, max_tokens=4096, temperature=1.0, top_p=0.95, stop_token_ids=None, seed=None,
                  ignore_eos=False):
@@ -215,6 +219,13 @@ class V41Engine:
                 "engram_rows": sum(t.stats["rows"] for t in self.tables.values()),
                 "engram_s": round(sum(t.stats["seconds"] for t in self.tables.values()), 3),
                 "attn_s": round(m.stats["attn_s"], 2), "moe_s": round(m.stats["moe_s"], 2),
+                # where the MoE time actually goes: routing+slot bookkeeping, waiting for the
+                # NVMe loads of this layer, and the Triton kernel itself (moe_s minus the rest).
+                "route_s": round(st["route_s"], 2), "load_wait_s": round(st["load_s"], 2),
+                "lease_s": round(st["lease_s"], 2), "h2d_s": round(st["h2d_s"], 2),
+                "kernel_s": round(m.stats["moe_s"] - st["resolve_s"], 2),
+                "nvme_gb_per_token": round(st["bytes_read"] / 1e9 / max(n_out, 1), 3),
+                "promoted": st["promoted"],
             }
 
     def _decode_loop(self, ids, P, max_tokens, temperature, top_p, stop_ids, out_st):
@@ -223,14 +234,23 @@ class V41Engine:
         out_st["t_decode0"] = t_start
         # prefill in chunks
         logits = None
-        main_tail = None
-        for s in range(0, P, 512):
-            chunk = ids[s:s + 512]
-            last = s + len(chunk) >= P
-            logits, mh = m.forward(chunk, s, prefill=True, need_logits=last)
-            main_tail = mh if main_tail is None else torch.cat([main_tail, mh])[-256:]
+        m.begin_prompt()
+        if self.swa_replay:
+            # CED + Decoder SWA Bounded Replay: the prompt runs through the encoder half only
+            # (layers 0..20, which is everything that writes global KV), and the decoder half is
+            # replayed once over the last `window_size` prompt tokens.
+            for s in range(0, P, MAX_CHUNK):
+                m.forward(ids[s:s + MAX_CHUNK], s, prefill=True, need_logits=False, encoder_only=True)
+            logits, mh, s_rep = m.decoder_replay(need_logits=True)
             if self.spec:
-                m.dspark_seed(mh, s)
+                m.dspark_seed(mh, s_rep)
+        else:
+            for s in range(0, P, MAX_CHUNK):
+                chunk = ids[s:s + MAX_CHUNK]
+                last = s + len(chunk) >= P
+                logits, mh = m.forward(chunk, s, prefill=True, need_logits=last)
+                if self.spec:
+                    m.dspark_seed(mh, s)
         t_prefill = time.perf_counter() - t_start
         out_st["t_prefill"] = t_prefill
         p = sample_probs(logits[-1], temperature, top_p)
@@ -321,27 +341,83 @@ class V41Engine:
             "trace_stats": self.trace_stats,
             "kernel": self.kernel,
             "act_quant": self.act_quant,
+            "swa_replay": self.swa_replay,
+            "hot_profile": self.hot_profile,
+            "prefill_chunk": MAX_CHUNK,
+            "io_threads": self.store.io_threads,
+            "read_threads": self.store.read_threads,
+            "read_chunk_mb": round(self.store.read_chunk / 1024 / 1024, 2),
         }
 
     def stats(self):
         return {**self.config(), **self.last_stats}
 
     def close(self):
-        for pool in [self.store.pool] + [t.pool for t in self.tables.values()]:
+        for pool in [self.store.pool, self.store.read_pool] + [t.pool for t in self.tables.values()]:
             try:
                 pool.shutdown(wait=False)
             except Exception:  # noqa: BLE001
                 pass
 
+    # ------------------------------------------------------------------ replay verification
+    @torch.inference_mode()
+    def verify_replay(self, texts: list[str]):
+        """Full 40-layer prefill vs CED encoder + Decoder SWA Bounded Replay, same prompt, one load.
+
+        For a prompt of at most `window_size` tokens the replay covers the whole prompt and the two
+        paths are the *same* arithmetic in the same order, so the logits must agree to the last bit;
+        anything else means the state carried across the split (hidden states, the shifted HC pre-mix,
+        layer 20's top-k and candidate pool) is not what the fused pass had. For a longer prompt the
+        replay is an approximation by construction -- the decoder layers see a 128-token window
+        instead of the full prefix -- and what matters is that the next-token distribution barely
+        moves.
+        """
+        m = self.model
+        out = []
+        for text in texts:
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            P = len(ids)
+            t = torch.tensor(ids, dtype=torch.long, device=self.device)
+
+            def full():
+                self._reset(); m.begin_prompt()
+                lg, _ = m.forward(t, 0, prefill=True, need_logits=True)
+                return lg[-1].float()
+
+            def replay():
+                self._reset(); m.begin_prompt()
+                for s in range(0, P, MAX_CHUNK):
+                    m.forward(t[s:s + MAX_CHUNK], s, prefill=True, need_logits=False, encoder_only=True)
+                lg, _, _ = m.decoder_replay(need_logits=True)
+                return lg[-1].float()
+
+            a_, b_ = full(), replay()
+            la, lb = torch.log_softmax(a_, -1), torch.log_softmax(b_, -1)
+            kl = float((la.exp() * (la - lb)).sum())
+            r = {"tokens": P, "replayed": min(P, self.args.window_size),
+                 "exact_expected": P <= self.args.window_size,
+                 "max_abs_logit_delta": round(float((a_ - b_).abs().max()), 6),
+                 "top1_full": int(a_.argmax()), "top1_replay": int(b_.argmax()),
+                 "kl_nats": round(kl, 6),
+                 "nll_delta_on_full_top1": round(float(la[a_.argmax()] - lb[a_.argmax()]), 6)}
+            log(json.dumps(r))
+            out.append(r)
+        return out
+
     # ------------------------------------------------------------------ teacher forcing
     @torch.inference_mode()
-    def teacher_forced(self, corpus_path: str, max_len: int = 512):
+    def teacher_forced(self, corpus_path: str, max_len: int = 512, replay: bool = False, tail: bool = False):
         """Run every corpus sequence through `Model.forward` in ONE chunk and report mean NLL and
         top-1 next-token accuracy per category -- the same measurement
         `tools/expert_trace.py` makes with the pure-torch tracer, so the two are directly
-        comparable and any drift between `engine/model.py` and `tools/v41_ref.py` shows up here."""
+        comparable and any drift between `engine/model.py` and `tools/v41_ref.py` shows up here.
+
+        ``replay`` prefills through the CED encoder + Decoder SWA Bounded Replay path instead, which
+        only produces logits for the last `window_size` positions; ``tail`` scores only those
+        positions in either mode, so the two are measured on exactly the same predictions."""
         res = {}
         per_seq = []
+        W = self.args.window_size
         for line in open(corpus_path):
             line = line.strip()
             if not line:
@@ -350,23 +426,38 @@ class V41Engine:
             ids = self.tokenizer.encode(d["text"], add_special_tokens=False)
             assert len(ids) <= max_len, (d["id"], len(ids))
             self._reset()
+            self.model.begin_prompt()
             t0 = time.perf_counter()
-            logits, _ = self.model.forward(torch.tensor(ids, dtype=torch.long, device=self.device), 0,
-                                           prefill=True, need_logits=True)
-            tgt = torch.tensor(ids[1:], device=self.device)
+            P = len(ids)
+            t = torch.tensor(ids, dtype=torch.long, device=self.device)
+            if replay:
+                for s0 in range(0, P, MAX_CHUNK):
+                    self.model.forward(t[s0:s0 + MAX_CHUNK], s0, prefill=True, need_logits=False,
+                                       encoder_only=True)
+                logits, _, off = self.model.decoder_replay(need_logits=True)
+            else:
+                logits, _ = self.model.forward(t, 0, prefill=True, need_logits=True)
+                off = 0
+            if tail:
+                keep = max(0, P - W) - off  # first scored row inside `logits`
+                if keep > 0:
+                    logits, off = logits[keep:], off + keep
+            tgt = torch.tensor(ids[off + 1:], device=self.device)
             lp = torch.log_softmax(logits[:-1].float(), dim=-1)
             nll = -lp.gather(1, tgt[:, None]).squeeze(1)
             top1 = (logits[:-1].argmax(-1) == tgt).float()
             c = res.setdefault(d["category"], {"nll": [], "top1": []})
             c["nll"].append(nll.cpu()); c["top1"].append(top1.cpu())
-            per_seq.append({"id": d["id"], "category": d["category"], "n": len(ids),
+            per_seq.append({"id": d["id"], "category": d["category"], "n": len(ids), "scored_from": off,
+                            "nll_by_pos": [round(v, 4) for v in nll.tolist()],
                             "mean_nll": round(float(nll.mean()), 4), "top1_acc": round(float(top1.mean()), 4),
                             "seconds": round(time.perf_counter() - t0, 2)})
             log(f"{d['id']}: n={len(ids)} nll={float(nll.mean()):.4f} top1={float(top1.mean()):.4f} "
                 f"({time.perf_counter() - t0:.1f}s)")
         summary = {k: {"mean_nll": float(torch.cat(v["nll"]).mean()), "top1_acc": float(torch.cat(v["top1"]).mean()),
                        "n": int(torch.cat(v["nll"]).numel())} for k, v in res.items()}
-        return {"summary": summary, "config": self.config(), "per_seq": per_seq}
+        return {"summary": summary, "config": self.config(), "replay": replay, "tail": tail,
+                "per_seq": per_seq}
 
 
 if __name__ == "__main__":
@@ -380,24 +471,68 @@ if __name__ == "__main__":
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--no-spec", action="store_true")
+    ap.add_argument("--no-swa-replay", action="store_true",
+                    help="run all 40 layers over the whole prompt instead of CED + bounded replay")
+    ap.add_argument("--hot-profile", default=None, choices=["mixed", "coding", "general"],
+                    help="which slice of the traced corpus ranks the warm-start hot set")
     ap.add_argument("--thinking", action="store_true")
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--ignore-eos", action="store_true")
     ap.add_argument("--act-quant", action="store_true",
                     help="fake-quantize activations to fp8 like the reference (and like the tracer)")
+    ap.add_argument("--verify-replay", action="store_true",
+                    help="one load: full 40-layer prefill vs encoder + decoder SWA bounded replay")
     ap.add_argument("--teacher-forced", default=None,
                     help="corpus jsonl: run each sequence through Model.forward in one chunk and report NLL/top-1")
     ap.add_argument("--tf-out", default=None, help="write the teacher-forced result JSON here")
+    ap.add_argument("--tf-ab", action="store_true",
+                    help="with --teacher-forced: score the last window_size positions of every "
+                         "sequence twice in one load -- full 40-layer prefill vs encoder + decoder "
+                         "SWA bounded replay -- and report the NLL delta the approximation costs")
     ap.add_argument("--spec-ab", action="store_true",
                     help="one load, three runs: greedy without spec, greedy with spec (must match) and "
                          "one sampled spec run at --temperature/--top-p")
     ap.add_argument("--ab-out", default=None, help="write the --spec-ab result JSON here")
     a = ap.parse_args()
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
-                    spec=not a.no_spec, act_quant=a.act_quant)
+                    spec=not a.no_spec, act_quant=a.act_quant,
+                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile)
+    if a.verify_replay:
+        short = "def fib(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
+        res = eng.verify_replay([short, open(os.path.join(HERE, "..", "corpus", "sources", "dsv41_readme.md")).read()[:1400]])
+        print(json.dumps(res, indent=1))
+        raise SystemExit(0)
     if a.teacher_forced:
-        res = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq))
-        print(json.dumps(res["summary"], indent=1))
+        if a.tf_ab:
+            full = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq), replay=False, tail=True)
+            rep = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq), replay=True, tail=True)
+            # A bounded replay is worst at the START of the replayed window (the query at the
+            # replay start sees a one-token window) and exact-ish at the END, and only the LAST
+            # position's logits ever produce a token, so a single mean over the whole window
+            # says almost nothing about serving. Bucket the delta by distance from the end.
+            def _buckets(run):
+                out = {}
+                for k in (1, 8, 32, 128):
+                    vals = [v for r in run["per_seq"] for v in r["nll_by_pos"][-k:]]
+                    out[f"last{k}"] = (round(float(np.mean(vals)), 4), len(vals))
+                return out
+            fb, rb = _buckets(full), _buckets(rep)
+            by_dist = {k: {"full_nll": fb[k][0], "replay_nll": rb[k][0],
+                           "delta_nats": round(rb[k][0] - fb[k][0], 4), "n": fb[k][1]} for k in fb}
+            print(json.dumps({"nll_by_distance_from_end": by_dist}, indent=1))
+            delta = {k: {"full_nll": round(full["summary"][k]["mean_nll"], 4),
+                         "replay_nll": round(rep["summary"][k]["mean_nll"], 4),
+                         "delta_nats": round(rep["summary"][k]["mean_nll"] - full["summary"][k]["mean_nll"], 4),
+                         "full_top1": round(full["summary"][k]["top1_acc"], 4),
+                         "replay_top1": round(rep["summary"][k]["top1_acc"], 4),
+                         "n": full["summary"][k]["n"]}
+                     for k in full["summary"]}
+            print(json.dumps(delta, indent=1))
+            res = {"summary": delta, "nll_by_distance_from_end": by_dist, "config": eng.config(),
+                   "full": full, "replay": rep}
+        else:
+            res = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq))
+            print(json.dumps(res["summary"], indent=1))
         if a.tf_out:
             os.makedirs(os.path.dirname(os.path.abspath(a.tf_out)), exist_ok=True)
             json.dump(res, open(a.tf_out, "w"), indent=1)

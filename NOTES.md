@@ -513,3 +513,150 @@ owner's instruction (`./stop.sh` was verified earlier and not run at the end).
 one lock and only notices a dead client when it next writes a chunk, so a request that was already
 queued when its client died keeps the engine busy for its whole `max_tokens` budget. `/health`
 reports `busy: true` honestly, but there is no cancel endpoint and no queue cap. See LIMITATIONS.
+
+---
+
+## Speed work (Opus agent) -- 2026-09-10 evening
+
+Brief: make the engine faster, prefill first. Everything below is **measured on this box** with
+single short generations against the running server (`<= 64` output tokens, greedy), never a
+benchmark run. Two prompts throughout:
+
+* **short** -- "Write a Python function that returns the n-th Fibonacci number." = 16 prompt tokens.
+* **long** -- a four-section design document + one question = **1,860 prompt tokens**.
+
+### S.1 Where the time went before any change (measured, instrumented)
+
+New per-phase counters in `ExpertStore.stats` (`route_s`, `load_s`, `lease_s`, `h2d_s`) and in the
+engine's `last_stats` (`kernel_s = moe_s - resolve_s`) put numbers on the split for the first time.
+On the long prompt, of 117 s of prefill: **100.9 s waiting for expert loads**, 2.5 s routing, 2.0 s
+attention, **0.9 s in the Triton MoE kernel**, 0.8 s engram. Prefill is NVMe and nothing else.
+
+The reason is structural: a prefill chunk of any length touches ~370 of the 384 experts of every
+layer, and those misses go through the transient ring, so **the expert traffic of a prompt is
+`chunks x layers x ~7 GB`, independent of how many tokens are in the chunk**. At 512-token chunks
+the 1,860-token prompt was 4 chunks x 40 layers = 23,360 expert reads = **440 GB, i.e. 0.24 GB of
+expert weights per prompt token**.
+
+### S.2 Two changes, both aimed at that product
+
+**(a) 2,048-token prefill chunks** (`engine/model.py::MAX_CHUNK`, `DSV41_PREFILL_CHUNK`). Quartering
+the number of chunks quarters the traffic. `RING` had to grow from 1,024 to 4,096 slots (the window
+gather happens after the whole chunk is written into the ring, so `RING > window + chunk`; 40 layers
+x 4,096 x 512 x bf16 = 167 MB, which costs 34 arena slots). The engine implements the indexer, so
+chunks past 512 are ordinary work, not an approximation; peak activation at T=2,048 is the gathered
+window+compressed KV of one layer, ~2.7 GB. Measured host MemAvailable never fell below 17.4 GiB.
+
+**(b) Decoder SWA Bounded Replay** (tech report 2.2 / 3.2.2), which the reference `inference/model.py`
+does not implement: `Model.forward(..., encoder_only=True)` runs layers 0..20 -- everything that
+writes global KV -- over the whole prompt, and `Model.decoder_replay()` then runs layers 21..39 once
+over the **last 128 prompt tokens** with SWA truncated to that segment (`attention(..., win_lo=S)`),
+which is where the prompt's logits and the DSpark seed now come from. 19 of 40 layers stop paying
+for the length of the prompt.
+
+Three pieces of state have to cross the split, and they are the whole subtlety of the change:
+the residual stream and the *shifted* HC pre-mix at layer 20 (buffered for the tail only), and --
+because they are computed per query, not per cache -- layer 20's **top-k** (layers 21-23 reuse it)
+and its **candidate pool** (layers 24-39 search inside it). `Shared` carries both within a forward;
+`_rep_keep`/`_rep_tail` carry them across the two passes, padding older chunks' narrower candidate
+masks with False (a query can only reach columns below its own position, all inside its own chunk's
+width). Layer 20 itself keeps running over the whole prompt: it is the CED KV source, and running it
+in full is both simpler and strictly more exact than replaying it.
+
+Also in this batch, on the way to the numbers above (not the prefill levers, kept because they are
+measured-neutral-or-better and byte-exact):
+
+* `ShardFile.expert_runs` results are cached, and each of an expert's two file runs is cut into
+  `DSV41_READ_CHUNK_MB` (default 4 MB) aligned pieces issued on a second thread pool, so one expert
+  alone keeps ~5 O_DIRECT requests in flight instead of 2. `engine/test_expert_io.py` checks the
+  reader byte-for-byte against `safetensors.safe_open` at chunk sizes 0/1/4/20 MB -- **all exact**.
+* `ExpertStore.resolve` does its unique/LUT work in numpy on the host (one D2H copy of the 36 routed
+  ids) instead of a GPU `torch.unique` + `.tolist()` sync + a 384-entry LUT copied back and gathered.
+* A decode hit that lands in the *transient* ring is now promoted into the LRU by swapping ring
+  entries (no re-read): the ring is only a list of slot ids, so the slot joins the LRU where it lies
+  and an LRU victim's slot takes its place. Before, an expert that a prompt had loaded and that
+  decode then used repeatedly was still overwritten by the next prompt's ring wrap.
+
+### S.3 Before / after (measured, single greedy generations, same box, same arena target)
+
+"before" = the same build with `DSV41_SWA_REPLAY=0 DSV41_PREFILL_CHUNK=512 DSV41_RING=1024`
+(arena 73.8 GB / 3,925 slots); "after" = the defaults (arena 73.2 GB / 3,891 slots). DSpark on,
+temperature 0.
+
+| 1,860-token prompt, 32 output tokens | before | after | |
+|---|---|---|---|
+| **TTFT** | **118.5 s** | **33.7 s** | **3.5x** |
+| prefill | 117.11 s (15.9 tok/s) | 33.41 s (55.7 tok/s) | 3.5x |
+| prefill expert misses | 23,360 | **5,280** | 4.4x |
+| NVMe read, whole request | 488.1 GB | **127.1 GB** | 3.8x |
+| NVMe per prompt token (prefill only) | 0.237 GB | **0.054 GB** | 4.4x |
+| decode | 1.96 tok/s | **2.89 tok/s** | 1.47x |
+| decode expert hit rate | 0.877 | 0.896 | |
+| first 160 chars of the answer | identical | identical | |
+
+Splitting the two levers on the same prompt (measured separately): replay alone at 512-token chunks
+gives **69.0 s** of prefill (13,482 misses), and taking the chunk to 2,048 on top gives **33.4 s**.
+So the replay is worth -41% and the chunk size a further -52%.
+
+| 16-token prompt, 64 output tokens | before | after |
+|---|---|---|
+| TTFT | 4.2-5.4 s | 5.4 s |
+| prefill | 4.14 s | 5.38 s |
+| decode | 2.73 tok/s | 2.67 tok/s |
+
+Short prompts are a wash, as they must be: at 16 tokens the replay covers the whole prompt and does
+exactly the same work as the fused pass (see S.4), so the spread is arena/LRU state, not structure.
+Decode itself is untouched by both levers -- it still streams ~0.9 GB of expert weights per generated
+token -- except that a prompt now pushes 4x less through the transient ring, which is why the decode
+rate on the long prompt improves at all.
+
+After the change the long-prompt prefill is still ~90% NVMe wait (`load_wait_s` 26.7 s of `moe_s`
+29.9 s; `kernel_s` 0.42 s, `attn_s` 2.07 s, `route_s` 2.81 s), at ~3.8 GB/s effective against the
+5.5 GB/s the device gives at depth. The remaining prefill lever is therefore I/O overlap, not the
+model -- deliberately left for the next owner of the engine.
+
+### S.4 Is the replay correct, and what does the approximation cost?
+
+Two checks, both new modes of `engine/v41_engine.py`, both run on the full checkpoint
+(arena 73.2 GB / 3,891 slots, serving precision -- no `--act-quant`).
+
+**`--verify-replay`** runs the same prompt through the fused 40-layer prefill and through
+encoder + replay in one load and compares the last position's logits. For a prompt of at most 128
+tokens the replay covers the whole prompt, so the two paths are the *same* arithmetic in the same
+order and must agree bit for bit -- which is the real test of the state that crosses the split:
+
+| prompt | replayed | max abs logit delta | KL(full ‖ replay) | top-1 |
+|---|---|---|---|---|
+| 46 tokens | 46 | **0.000000** | **0.000000** | same |
+| 448 tokens (a dense technical document) | 128 | 4.39 | 0.995 nats | changed |
+
+So the plumbing is exact and the 448-token row is the approximation itself: the decoder layers see a
+128-token window instead of the whole prefix. One sample is not a verdict, hence:
+
+**`--teacher-forced corpus/trace_corpus.jsonl --tf-ab`** scores the last <= 128 positions of every
+one of the 50 corpus sequences twice in one load -- fused prefill vs replay -- so both are measured
+on exactly the same predictions (`results/engine-tf-20260910/tf_replay_ab.json`):
+
+| corpus | tokens scored | full NLL | replay NLL | **delta** | full top-1 | replay top-1 |
+|---|---|---|---|---|---|---|
+| coding | 1,636 | 1.8867 | 1.9369 | **+0.0502** | 0.687 | 0.675 |
+| general | 3,011 | 3.4756 | 3.5168 | **+0.0412** | 0.469 | 0.472 |
+
+By distance from the end of the prompt (the last position is the only one whose logits ever produce
+a token): last 1 **+0.0465**, last 8 **+0.0528**, last 32 **+0.0282**, last 128 **+0.0444** nats.
+Flat, i.e. the replay is not disproportionately bad at the position that matters. **Everything is
+inside the +-0.05 nats bar** this recipe uses for "same model", which is what the tech report claims
+for a checkpoint post-trained with the replay simulated -- and the greedy answer to the 1,860-token
+test prompt is character-identical with and without it. It is still an approximation and it is on by
+default; `DSV41_SWA_REPLAY=0` restores the exact path at 3.5x the TTFT.
+
+The rewritten expert reader is checked separately and byte-for-byte
+(`engine/test_expert_io.py`, chunk sizes 0/1/4/20 MB, layers 0/7/39, experts 0/1/123/383: all exact).
+
+### S.5 Not done (deliberately, handed on)
+
+Expert-miss/compute overlap and the `--hot-profile coding|general|mixed` measurement were stopped by
+the owner before they were started. The ranking helper for the profile exists and is unit-checked
+(`experts.category_counts` reads the per-category counts out of `results/trace-*/trace/layer*.npz`;
+the coding top-4,000 differs from the mixed top-4,000 in 27% of its entries) but has never ranked a
+warm start in a serving run, and `DSV41_HOT_PROFILE` defaults to `mixed`, i.e. to the old behaviour.

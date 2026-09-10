@@ -10,8 +10,10 @@ else, so the experts live in three places:
     routing trace so the hottest experts are resident before the first request.
   * NVMe: every expert is read straight out of its layer's safetensors shard with O_DIRECT
     preadv (no page-cache pollution, ~5.5 GB/s with 8+ reads in flight on this box), into a
-    pinned staging buffer, then copied into its slot. Two reads per expert, not six: see
-    `ShardFile.expert_runs`.
+    pinned staging buffer, then copied into its slot. Two runs per expert, not six: see
+    `ShardFile.expert_runs`. Each run is split into `read_chunk_mb` aligned pieces issued in
+    parallel on a second thread pool, because a decode layer misses only ~4 experts and two
+    serial 18.8 MB reads cannot keep the device busy on their own (see NOTES "Speed work").
 
 Prefill chunks touch almost every expert of a layer; letting them stream through the LRU would
 evict the hot set each prompt. So misses during prefill go through a small TRANSIENT ring of
@@ -32,6 +34,10 @@ import numpy as np
 import torch
 
 ALIGN = 4096
+# every counter reset between requests (engine/v41_engine.py::_reset) lives here
+ZERO_STATS = {"hits": 0, "misses": 0, "prefill_misses": 0, "bytes_read": 0, "read_s": 0.0,
+              "resolve_s": 0.0, "route_s": 0.0, "load_s": 0.0, "lease_s": 0.0, "h2d_s": 0.0,
+              "loads": 0, "promoted": 0}
 W13_SHAPE = (2304, 2560)
 S13_SHAPE = (2304, 160)
 W2_SHAPE = (5120, 1152)
@@ -45,6 +51,7 @@ class ShardFile:
 
     def __init__(self, path: str):
         self.path = path
+        self._runs: dict[str, list] = {}
         with open(path, "rb") as f:
             n = struct.unpack("<Q", f.read(8))[0]
             hdr = json.loads(f.read(n))
@@ -72,6 +79,9 @@ class ShardFile:
 
         Returns [(file_lo, file_hi, [(name_index, offset_in_run, nbytes), ...]), ...].
         """
+        cached = self._runs.get(prefix)
+        if cached is not None:
+            return cached
         spans = [self.spans[prefix + n] for n in NAMES]
         order = sorted(range(len(spans)), key=lambda i: spans[i][0])
         runs = []
@@ -83,12 +93,27 @@ class ShardFile:
                 runs[-1] = (lo, b, members)
             else:
                 runs.append((a, b, [(i, 0, b - a)]))
+        self._runs[prefix] = runs
         return runs
+
+
+def _pread_chunk(fd: int, view: memoryview, off: int, need: int) -> None:
+    """O_DIRECT-read `need` bytes at file offset `off` into `view` (an aligned slice of a pinned
+    buffer). The request length is always the full aligned slice -- O_DIRECT rejects unaligned
+    lengths -- and the loop stops as soon as the bytes that actually exist have arrived, which is
+    what makes the aligned tail of the last tensor in a shard safe."""
+    got = 0
+    while got < need:
+        r = os.preadv(fd, [view[got:]], off + got)
+        if r <= 0:
+            raise IOError(f"short read at {off}+{got}/{need}")
+        got += r
 
 
 class ExpertStore:
     def __init__(self, model_dir: str, index: dict, arena, n_layers: int, transient_slots: int = 400,
-                 io_threads: int = 12, mtp_prefix: str | None = None):
+                 io_threads: int = 12, mtp_prefix: str | None = None, read_threads: int | None = None,
+                 read_chunk_mb: float | None = None):
         self.model_dir = model_dir
         self.arena = arena  # tools.fp4_moe.ExpertArena or a compatible object with .slots and load_slot_bytes
         self.n_slots = arena.slots
@@ -102,15 +127,32 @@ class ExpertStore:
         self.slot_key: dict[int, tuple] = {}
         self.free_lru = list(range(self.lru_slots))
         self.transient_ring = list(range(self.lru_slots, self.n_slots))
+        self.transient_index = {s: i for i, s in enumerate(self.transient_ring)}
         self.transient_pos = 0
         self.transient_map: dict[tuple, int] = {}
-        self.pool = ThreadPoolExecutor(io_threads)
+        io_threads = int(os.environ.get("DSV41_IO_THREADS", io_threads))
+        if read_threads is None:
+            read_threads = int(os.environ.get("DSV41_READ_THREADS", 24))
+        if read_chunk_mb is None:
+            read_chunk_mb = float(os.environ.get("DSV41_READ_CHUNK_MB", 4))
+        self.io_threads = io_threads
+        self.read_threads = read_threads
+        self.read_chunk = int(read_chunk_mb * 1024 * 1024) // ALIGN * ALIGN
+        # Two pools on purpose. `pool` runs one task per expert (it owns a pinned staging buffer for
+        # the whole read + H2D); `read_pool` runs the individual aligned pieces of that expert's two
+        # file runs. A single pool would deadlock as soon as every worker sat waiting for a piece
+        # that has no worker left to run it.
+        self.pool = ThreadPoolExecutor(io_threads, thread_name_prefix="expert-io")
+        self.read_pool = ThreadPoolExecutor(max(1, read_threads), thread_name_prefix="expert-read")
         self.lock = threading.Lock()
         # pinned, aligned staging buffers, one per io thread
         self.stage = [torch.empty(EXPERT_BYTES + 8 * ALIGN, dtype=torch.uint8, pin_memory=True) for _ in range(io_threads)]
+        self.stage_mv = [memoryview(b.numpy()) for b in self.stage]
         self.stage_free = list(range(io_threads))
+        self.stage_sem = threading.Semaphore(io_threads)
         self._tls = threading.local()
-        self.stats = {"hits": 0, "misses": 0, "prefill_misses": 0, "bytes_read": 0, "read_s": 0.0}
+        self.n_experts = 384
+        self.stats = dict(ZERO_STATS)
 
     # ------------------------------------------------------------------ io
     def _shard(self, name: str) -> ShardFile:
@@ -119,48 +161,70 @@ class ExpertStore:
             self.shards[f] = ShardFile(os.path.join(self.model_dir, f))
         return self.shards[f]
 
+    def _lease(self) -> int:
+        self.stage_sem.acquire()
+        with self.lock:
+            return self.stage_free.pop()
+
+    def _release(self, sid: int) -> None:
+        with self.lock:
+            self.stage_free.append(sid)
+        self.stage_sem.release()
+
     def _read_leased(self, layer: int, expert: int, prefix: str | None, sink):
         """O_DIRECT-read one expert into a pinned staging buffer and call ``sink(views)`` while the
         buffer is still leased. ``views`` are 6 uint8 tensors that ALIAS the pinned buffer, so the
         sink must be done with them before it returns.
 
-        One aligned read per tensor: the six tensors of an expert are not adjacent in the shard.
+        The expert's two contiguous file runs (see `ShardFile.expert_runs`) are cut into
+        `self.read_chunk`-sized aligned pieces and all but the first are handed to `read_pool`, so
+        one expert alone keeps ~5 requests in flight. A decode layer misses ~4 experts; at two
+        serial reads each the queue depth was ~4-8 and the device only gave ~2.6 GB/s of its
+        5.5 GB/s, which is the whole reason decode was slower than its byte count implies.
         """
         p = prefix or f"layers.{layer}.ffn.experts.{expert}."
         sh = self._shard(p + "w1.weight")
         runs = sh.expert_runs(p)
-        with self.lock:
-            sid = self.stage_free.pop()
+        t_lease = time.perf_counter()
+        sid = self._lease()
+        self.stats["lease_s"] += time.perf_counter() - t_lease
         buf = self.stage[sid]
         try:
-            mv = memoryview(buf.numpy())
+            mv = self.stage_mv[sid]
             base_addr = buf.data_ptr()
             cur = (-base_addr) % ALIGN
             out = [None] * len(NAMES)
+            jobs = []
+            nbytes = 0
             t0 = time.perf_counter()
             for (a, b, members) in runs:
                 alo = a - a % ALIGN
                 ahi = (b + ALIGN - 1) // ALIGN * ALIGN
                 n = ahi - alo
-                view = mv[cur:cur + n]
-                got = 0
-                need = b - alo  # the aligned tail may run past EOF on the last tensor of a shard
-                while got < need:
-                    r = os.preadv(sh.fd, [view[got:]], alo + got)
-                    if r <= 0:
-                        raise IOError(f"short read {p} {got}/{need}")
-                    got += r
-                self.stats["bytes_read"] += n
+                step = self.read_chunk if 0 < self.read_chunk < n else n
+                off = 0
+                while off < n:
+                    m = min(step, n - off)
+                    need = min(b - alo - off, m)  # the aligned tail may run past EOF
+                    if need > 0:
+                        jobs.append((sh.fd, mv[cur + off: cur + off + m], alo + off, need))
+                    off += m
+                nbytes += n
                 base = cur + (a - alo)
-                for (i, off, nb) in members:
-                    out[i] = buf[base + off: base + off + nb]
+                for (i, o, nb) in members:
+                    out[i] = buf[base + o: base + o + nb]
                 cur += n
+            futs = [self.read_pool.submit(_pread_chunk, *j) for j in jobs[1:]]
+            _pread_chunk(*jobs[0])
+            for f in futs:
+                f.result()
             assert all(t is not None for t in out)
+            self.stats["bytes_read"] += nbytes
             self.stats["read_s"] += time.perf_counter() - t0
+            self.stats["loads"] += 1
             return sink(out)
         finally:
-            with self.lock:
-                self.stage_free.append(sid)
+            self._release(sid)
 
     def read_expert(self, layer: int, expert: int, prefix: str | None = None):
         """The 6 tensors (CPU uint8) of one expert, copied out of the staging buffer."""
@@ -191,6 +255,7 @@ class ExpertStore:
         compute = torch.cuda.current_stream()  # capture OUTSIDE the `with`, where it is still ours
 
         def sink(v):
+            t0 = time.perf_counter()
             w1, s1, w2, s2, w3, s3 = v
             with torch.cuda.stream(stream):
                 stream.wait_stream(compute)
@@ -198,6 +263,7 @@ class ExpertStore:
                                      s2.view(*S2_SHAPE), w3.view(*W13_SHAPE), s3.view(*S13_SHAPE),
                                      non_blocking=True)
             stream.synchronize()  # the staging buffer is leased to another expert right after
+            self.stats["h2d_s"] += time.perf_counter() - t0
             return slot
 
         return self._read_leased(key[0], key[1], prefix, sink)
@@ -246,10 +312,54 @@ class ExpertStore:
         self.slot_key[slot] = key
         return slot
 
+    def _promote_transient(self, key: tuple, slot: int, used: set) -> bool:
+        """Give a transient-ring slot to the LRU without re-reading its 18.8 MB.
+
+        A prefill chunk loads almost every expert of a layer into the transient ring; when decode
+        then routes to one of those the old code counted a hit, used the slot, and left it in the
+        ring -- so the ring wrapped over it a few requests later and the expert was read again even
+        though it was demonstrably hot at decode time. The ring is only a list of slot ids, so the
+        fix is a pointer swap: this slot joins the LRU where it lies, and an LRU victim's slot takes
+        its place in the ring.
+        """
+        i = self.transient_index.get(slot)
+        if i is None:
+            return False
+        if self.free_lru:
+            donor = self.free_lru.pop()
+        else:
+            donor, parked = None, []
+            while self.lru:
+                k2, s2 = self.lru.popitem(last=False)
+                if s2 not in used and s2 != slot:
+                    self.slot_key.pop(s2, None)
+                    donor = s2
+                    break
+                parked.append((k2, s2))
+            for k2, s2 in reversed(parked):
+                self.lru[k2] = s2
+                self.lru.move_to_end(k2, last=False)
+            if donor is None:
+                return False
+        self.transient_ring[i] = donor
+        self.transient_index.pop(slot, None)
+        self.transient_index[donor] = i
+        self.transient_map.pop(key, None)
+        self.lru[key] = slot
+        self.slot_key[slot] = key
+        self.stats["promoted"] += 1
+        return True
+
     def resolve(self, layer: int, experts: torch.Tensor, prefill: bool) -> torch.Tensor:
         """experts: int tensor [T, K] of expert ids for `layer`. Returns the slot ids [T, K],
         loading misses (in parallel) first."""
-        uniq = torch.unique(experts).tolist()
+        t_res = time.perf_counter()
+        # One device->host copy, and the set/LUT work in numpy on the host. The old path ran
+        # torch.unique on the GPU, synchronised on .tolist(), built a 384-entry LUT, copied that
+        # back up and gathered it there: two extra launches and a second sync per layer, 40 layers
+        # per token, for 36 numbers.
+        ex = experts.to("cpu", dtype=torch.int32, non_blocking=False).numpy()
+        uniq = np.unique(ex)
         slot_of = {}
         to_load = []
         used: set[int] = set()  # slots already promised in this call -- never recycle one of them
@@ -257,11 +367,13 @@ class ExpertStore:
         # running the transient ring over a slot an earlier hit is already using (which used to
         # give two experts the same slot: the second load overwrote the first expert's weights and
         # the duplicate index in moe_forward's `y[t] +=` dropped one contribution).
-        for e in uniq:
+        for e in uniq.tolist():
             key = (layer, e)
             s = self.lru.get(key)
             if s is None:
                 s = self.transient_map.get(key)
+                if s is not None and not prefill:
+                    self._promote_transient(key, s, used)
             else:
                 self.lru.move_to_end(key)
             if s is not None:
@@ -269,7 +381,7 @@ class ExpertStore:
                 used.add(s)
                 self.stats["hits"] += 1
         # pass 2: misses
-        for e in uniq:
+        for e in uniq.tolist():
             if e in slot_of:
                 continue
             key = (layer, e)
@@ -283,12 +395,17 @@ class ExpertStore:
             used.add(s)
             to_load.append((key, s))
         assert len(set(slot_of.values())) == len(slot_of), "slot collision in resolve()"
-        if to_load:
-            list(self.pool.map(lambda ks: self._load_into_slot(*ks), to_load))
-        lut = torch.full((384,), -1, dtype=torch.int32)
+        lut = np.full(self.n_experts, -1, dtype=np.int32)
         for e, s in slot_of.items():
             lut[e] = s
-        return lut.to(experts.device)[experts.long()].to(torch.int32)
+        slots = torch.from_numpy(lut[ex.astype(np.intp)]).to(experts.device)
+        self.stats["route_s"] += time.perf_counter() - t_res
+        if to_load:
+            t0 = time.perf_counter()
+            list(self.pool.map(lambda ks: self._load_into_slot(*ks), to_load))
+            self.stats["load_s"] += time.perf_counter() - t0
+        self.stats["resolve_s"] += time.perf_counter() - t_res
+        return slots
 
     def warm_start(self, ranked_keys: list[tuple], log=print):
         """Fill the LRU with `ranked_keys` (most important first) up to capacity."""
@@ -309,17 +426,51 @@ class ExpertStore:
         return h / max(1, h + m)
 
 
-def rank_from_trace(trace_stats_json: str, n_layers: int = 40, fallback_uniform: bool = True) -> list[tuple]:
+def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384) -> dict[int, np.ndarray]:
+    """Per-layer expert histogram restricted to one corpus category.
+
+    `coverage.json` only carries the mixed histogram (`counts`) plus the two coverage *curves*, so a
+    workload-specific hot set has to be recomputed from the raw traces the stats were made from:
+    `results/<name>/trace/layer<L>.npz` with `indices` [tokens, 6] and `category` [tokens].
+    """
+    trace_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(trace_stats_json))), "trace")
+    out: dict[int, np.ndarray] = {}
+    if not os.path.isdir(trace_dir):
+        return out
+    import glob
+    import re
+    for path in glob.glob(os.path.join(trace_dir, "layer*.npz")):
+        L = int(re.search(r"layer(\d+)", os.path.basename(path)).group(1))
+        z = np.load(path)
+        idx, cat = z["indices"], z["category"]
+        sel = idx[cat.astype("U") == profile]
+        if sel.size == 0:
+            continue
+        out[L] = np.bincount(sel.reshape(-1).astype(np.int64), minlength=n_experts).astype(np.float64)
+    return out
+
+
+def rank_from_trace(trace_stats_json: str, n_layers: int = 40, fallback_uniform: bool = True,
+                    profile: str = "mixed") -> list[tuple]:
     """(layer, expert) ranked by frequency from tools/expert_stats.py coverage.json. Layers not in the
-    trace get their experts appended in a round-robin so every layer has some residents."""
+    trace get their experts appended in a round-robin so every layer has some residents.
+
+    `profile` picks which slice of the traced corpus ranks the experts: "mixed" (the whole corpus,
+    the default and what the coverage.json histogram is), "coding" or "general". The coding and
+    general top-25% sets overlap by only 0.18-0.31 Jaccard, so the profile is a real lever on the
+    hit rate of a workload that is all one kind.
+    """
     ranked = []
     counts = {}
-    try:
-        d = json.load(open(trace_stats_json))
-        for L, v in d["per_layer"].items():
-            counts[int(L)] = np.array(v["counts"], dtype=np.float64)
-    except Exception:  # noqa: BLE001
-        pass
+    if profile and profile != "mixed":
+        counts = category_counts(trace_stats_json, profile)
+    if not counts:
+        try:
+            d = json.load(open(trace_stats_json))
+            for L, v in d["per_layer"].items():
+                counts[int(L)] = np.array(v["counts"], dtype=np.float64)
+        except Exception:  # noqa: BLE001
+            pass
     known = sorted(counts)
     if known:
         # normalize per layer so a layer with more traced tokens is not favoured

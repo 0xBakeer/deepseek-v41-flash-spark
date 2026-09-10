@@ -20,10 +20,21 @@ are in RESULTS.md. What follows is what is still missing or broken.
   prefetching is not possible layer-to-layer (layer L+1's routing does not exist until layer L has
   run), but a router-lookahead or a speculative prefetch of the DSpark block's likely experts was
   never attempted.
-* **Prefill has no Decoder SWA Bounded Replay.** The engine runs all 40 layers over the prompt like
-  the reference does; CED means layers 21-39 only need the last 128 prompt tokens, so a correct
-  implementation would roughly halve prefill expert traffic (NOTES.md 0.2). Not implemented, so
-  TTFT is about twice what it should be.
+* **Prefill is 3.5x faster since 2026-09-10 evening but still NVMe-bound.** Decoder SWA Bounded
+  Replay and 2,048-token prefill chunks took a 1,860-token prompt from 118 s to 34 s of TTFT
+  (NOTES.md "Speed work"). What is left is I/O efficiency: prefill still spends ~90% of its wall
+  time waiting for expert reads, at ~3.8 GB/s against the 5.5 GB/s the device gives at depth.
+* **Decoder SWA Bounded Replay is an approximation, and it is on by default** (`DSV41_SWA_REPLAY=0`
+  turns it off). For a prompt of at most 128 tokens it is bit-exact -- verified, `--verify-replay`
+  reports a max logit delta of 0.0 -- but above that the decoder layers see a 128-token window
+  instead of the whole prefix, so the prompt's own logits change: on a 448-token document the
+  next-token KL was 0.995 nats and the top-1 token changed. The model was post-trained with this
+  replay simulated and the tech report calls the impact negligible; greedy answers to the 1,860-token
+  test prompt are character-identical with and without it. Still, this is the one place in the
+  engine where output is deliberately not the reference model's.
+* **The replay does not shrink prefill for prompts under ~128 tokens** (it covers the whole prompt),
+  and its own pass over the last 128 tokens still touches ~300 of 384 experts per decoder layer, so
+  short-prompt TTFT is unchanged.
 * **The arena is sized once at load and never adapts.** No per-workload hot set (the trace shows
   coding-only and general-only top sets overlap by a Jaccard of only 0.18-0.31), no promotion of
   experts a long session keeps hitting beyond plain LRU, no prefetch on a session's first turn.
