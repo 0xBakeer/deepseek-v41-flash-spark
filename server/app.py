@@ -154,12 +154,16 @@ def parse_sampling(body: dict) -> dict:
     n = body.get("n", 1)
     if n not in (None, 1):
         raise APIError(400, "only n=1 is supported", param="n")
+    ignore_eos = body.get("ignore_eos", False)
+    if not isinstance(ignore_eos, bool):
+        raise APIError(400, "`ignore_eos` must be a boolean", param="ignore_eos")
     return {
         "max_tokens": mt,
         "temperature": _num(body, "temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
         "top_p": _num(body, "top_p", DEFAULT_TOP_P, 0.0, 1.0),
         "stop": stops,
         "seed": seed,
+        "ignore_eos": ignore_eos,
     }
 
 
@@ -450,15 +454,25 @@ class State:
             raise APIError(400, f"prompt has {len(prompt_ids)} tokens, engine context is {max_ctx}",
                            code="context_length_exceeded")
         max_tokens = min(sampling["max_tokens"], max_ctx - len(prompt_ids) - margin)
-        stop_ids = self.stop_ids()
+        # ignore_eos: benchmarks need a fixed output length, so neither the engine nor this loop
+        # may stop early. The stop set is emptied on both sides -- passing it to the engine and
+        # then truncating here would give a short run anyway.
+        ignore_eos = bool(sampling.get("ignore_eos"))
+        stop_ids: Set[int] = set() if ignore_eos else self.stop_ids()
         detok = IncrementalDetokenizer(self.tok)
         router = OutputRouter(thinking, sampling["stop"], detect_tool_calls)
         result.router = router
         t0 = time.perf_counter()
 
-        gen = self.engine.generate(
-            prompt_ids, max_tokens=max_tokens, temperature=sampling["temperature"],
-            top_p=sampling["top_p"], stop_token_ids=stop_ids, seed=sampling["seed"])
+        gen_kwargs = dict(max_tokens=max_tokens, temperature=sampling["temperature"],
+                          top_p=sampling["top_p"], stop_token_ids=stop_ids, seed=sampling["seed"])
+        if ignore_eos:
+            try:
+                gen = self.engine.generate(prompt_ids, ignore_eos=True, **gen_kwargs)
+            except TypeError:  # an engine without the kwarg (MockEngine): empty stop set is enough
+                gen = self.engine.generate(prompt_ids, **gen_kwargs)
+        else:
+            gen = self.engine.generate(prompt_ids, **gen_kwargs)
         hit_eos = False
         try:
             for burst in gen:
@@ -642,9 +656,19 @@ class Handler(BaseHTTPRequestHandler):
         st = self.state
         try:
             if path == "/health":
-                self._send_json(200, {"status": "ok", "model": st.model_name, "engine": st.args.engine,
-                                      "busy": st.lock.locked(), "max_context": st.engine.max_context,
-                                      "uptime_s": int(time.time()) - st.started})
+                body = {"status": "ok", "model": st.model_name, "engine": st.args.engine,
+                        "busy": st.lock.locked(), "max_context": st.engine.max_context,
+                        "uptime_s": int(time.time()) - st.started}
+                # Static engine configuration (arena GB/slots, max_seq, spec, trace stats, kernel):
+                # every measured number in RESULTS.md has to be quoted with the config that produced
+                # it, and a bench run should not have to be told what the server was started with.
+                cfg = getattr(st.engine, "config", None)
+                if callable(cfg):
+                    try:
+                        body["engine_config"] = cfg()
+                    except Exception as e:  # never let introspection break the health probe
+                        log.warning("engine.config() failed: %s", e)
+                self._send_json(200, body)
             elif path == "/v1/models":
                 self._send_json(200, {"object": "list", "data": [self._model_card()]})
             elif path.startswith("/v1/models/"):

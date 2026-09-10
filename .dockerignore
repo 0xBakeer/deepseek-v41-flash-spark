@@ -1,0 +1,43 @@
+# Build context = the recipe, not the data.
+#
+# The image is a few hundred MB of Python and a copy of this repo; everything that
+# makes the repo big is either a mount at run time (`/models`, `/app/results`) or
+# an artefact of running it here. Two rules decide what stays:
+#
+#   * the container must be able to warm-start its expert arena offline, which needs
+#     `results/*/stats/coverage.json` (about 1 MB) and nothing else from `results/`;
+#   * the raw routing trace (`results/*/trace/*.npz`) and the tracer's resume state
+#     (`results/*/state/`) are inputs to `tools/expert_stats.py`, never to the server.
+#
+# Compose bind-mounts ./results over /app/results anyway, so a box that has the full
+# trace still sees it; what is excluded here only shrinks the image.
+
+.git
+.gitignore
+.github/
+
+# never in an image
+.env
+*.env
+!env.example
+models/
+engram_rows/
+logs/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# large results: keep stats/, drop the raw trace and the resume state
+results/*/trace/
+results/*/state/
+results/oneshots/
+
+# docs travel with the repo, not with the runtime
+docs/
+CHANGELOG.md
+CREDITS.md
+NOTES.md
+LIMITATIONS.md
+RESULTS.md

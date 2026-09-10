@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CANDIDATE_MODEL_DIRS = [
     os.environ.get("V41_MODEL_DIR", ""),
     os.path.expanduser("~/models/DeepSeek-V4.1-Flash"),
-    "/private/tmp/claude-501/-Users-khaledbakeer/fb6ac94e-36da-4abd-b4dd-1008ddf3603a/scratchpad/v41",
+    os.path.join(os.path.dirname(HERE), "models", "DeepSeek-V4.1-Flash"),
 ]
 TOOLS = [{
     "type": "function",
@@ -364,6 +364,24 @@ def test_bad_requests():
     assert status == 400
     status, err = chat([{"role": "user", "content": "hi"}, {"role": "wizard", "content": "x"}])
     assert status == 400 and "cannot encode" in err["error"]["message"]
+    status, err = chat(ignore_eos="yes")
+    assert status == 400 and err["error"]["param"] == "ignore_eos"
+
+
+def test_ignore_eos_runs_to_max_tokens():
+    """The benchmark needs fixed output lengths, so ignore_eos must beat the EOS the engine emits.
+
+    The mock reply ends in EOS. Without ignore_eos the server cuts the burst at that id and
+    stops; with it the stop set is empty on both sides, so the EOS token itself is generated,
+    counted and decoded (the mock has no more text after it, hence exactly one extra token).
+    A real engine keeps going all the way to max_tokens, which is what the benchmark needs.
+    """
+    status, r = chat(max_tokens=300)
+    assert status == 200 and r["choices"][0]["finish_reason"] == "stop"
+    short = r["usage"]["completion_tokens"]
+    status, r = chat(max_tokens=300, ignore_eos=True)
+    assert status == 200, r
+    assert r["usage"]["completion_tokens"] == short + 1, (short, r["usage"])
 
 
 def test_unicode_streaming_is_not_split():

@@ -1,0 +1,66 @@
+# docker compose up -d  ->  serves DeepSeek-V4.1-Flash on http://127.0.0.1:8000/v1
+#
+# Read ./.env first (compose does this by itself), so the same file that configures
+# ./start.sh natively configures the container. See env.example for what the knobs mean
+# and docs/install.md for the host side.
+#
+# The API is published on the loopback interface only. To reach it from another machine,
+# put a reverse proxy with authentication in front of it -- an open port here is a box
+# with 510 GB of weights answering to anyone who finds it.
+services:
+  v41:
+    image: ghcr.io/${GHCR_OWNER:-0xbakeer}/deepseek-v41-flash-spark:${RECIPE_VERSION:-0.1.0-wip}
+    build: .
+    container_name: deepseek-v41-flash
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+
+    volumes:
+      # The checkpoint. It must be a bind mount onto real local NVMe: the engine reads
+      # experts out of the shards with O_DIRECT, which overlayfs (and most network
+      # filesystems) will not give you.
+      - ${MODELS_DIR:-./models}:/models
+      # Benchmark rows, one-shot artefacts, and -- the one the server actually needs --
+      # results/trace-*/stats/coverage.json, which ranks the warm start's hot set.
+      - ./results:/app/results
+
+    environment:
+      # NOT ${MODEL_DIR}: that one is a host path (env.example points it at the NVMe),
+      # and inside the container the checkpoint is always under the /models mount. Only
+      # its directory name varies, so that is the knob. ./run.sh derives both from
+      # MODEL_DIR when you have not set them yourself.
+      MODEL_DIR: /models/${MODEL_NAME:-DeepSeek-V4.1-Flash}
+      SERVED_MODEL_NAME: ${SERVED_MODEL_NAME:-deepseek-v4.1-flash}
+      MAX_SEQ: ${MAX_SEQ:-32768}
+      ARENA_GB: ${ARENA_GB:-}
+      TRACE_STATS: ${TRACE_STATS:-}
+      DEFAULT_THINKING: ${DEFAULT_THINKING:-off}
+      DEFAULT_EFFORT: ${DEFAULT_EFFORT:-75}
+      SPEC: ${SPEC:-1}
+      EXTRA_FLAGS: ${EXTRA_FLAGS:-}
+      MIN_FREE_GIB: ${MIN_FREE_GIB:-90}
+      HF_TOKEN: ${HF_TOKEN:-}
+
+    # One retry, never a loop. A load that fails on this box usually fails because the
+    # unified pool is already spoken for; restarting into the same condition is how a
+    # 121 GiB box goes from "server did not start" to "MemAvailable is negative and the
+    # power button is the only way back".
+    restart: on-failure:1
+
+    # Unified memory: the GPU allocator and the page cache draw on one pool, so a
+    # `mem_limit` here is a cap on *GPU* memory as well, and the arena auto-sizer will
+    # quietly shrink to fit it. Leave it unset unless you mean exactly that.
+    ipc: host
+    ulimits:
+      memlock: -1        # pinned, 4 KiB-aligned staging buffers for the O_DIRECT reads
+      stack: 67108864
+      nofile: 65536      # one fd per shard plus the io thread pool
+    stop_grace_period: 180s
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

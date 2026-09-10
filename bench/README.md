@@ -84,9 +84,13 @@ measured run appends `-run2`. `--no-save-oneshot` turns the writing off.
    unambiguous; `--effort` rides along as `reasoning_effort`, which sets the
    budget without flipping thinking back on by itself.
 
-There is no `ignore_eos` here (the server does not implement one), so a `prose`
-or `code` row stops at EOS and `finish_reason` is recorded per run. Compare rows
-with the same `finish_reason`, or raise `--osl` until every row says `length`.
+6. **`--ignore-eos` when the number will be compared.** It sends the server's
+   `ignore_eos` body field, which empties the stop-id set on both sides, so the
+   completion is exactly `--osl` tokens and every row reports
+   `finish_reason: length`. Without it a `prose` or `code` row stops wherever the
+   model decided to, and two configs are then compared on two different amounts of
+   work (and on different amounts of expert streaming). Leave it off for the
+   one-shot game workloads, where a truncated HTML file is not a result.
 
 ## Reading a row honestly
 

@@ -23,7 +23,7 @@ Outputs (in --out):
                           category -- the end-to-end correctness check of the port.
 
 Usage (on the DGX):
-  python tools/expert_trace.py --model-dir ~/models/DeepSeek-V4.1-Flash \
+  python tools/expert_trace.py --model-dir ./models/DeepSeek-V4.1-Flash \
       --corpus corpus/trace_corpus.jsonl --engram-dir engram_rows --out results/trace-YYYYMMDD
 """
 

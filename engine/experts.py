@@ -10,7 +10,8 @@ else, so the experts live in three places:
     routing trace so the hottest experts are resident before the first request.
   * NVMe: every expert is read straight out of its layer's safetensors shard with O_DIRECT
     preadv (no page-cache pollution, ~5.5 GB/s with 8+ reads in flight on this box), into a
-    pinned staging buffer, then copied into its slot.
+    pinned staging buffer, then copied into its slot. Two reads per expert, not six: see
+    `ShardFile.expert_runs`.
 
 Prefill chunks touch almost every expert of a layer; letting them stream through the LRU would
 evict the hot set each prompt. So misses during prefill go through a small TRANSIENT ring of
@@ -54,10 +55,35 @@ class ShardFile:
         self.fd_buffered = os.open(path, os.O_RDONLY)
 
     def expert_span(self, prefix: str):
-        """Byte span covering the 6 tensors of one expert (they are contiguous in these shards)."""
+        """Byte span covering the 6 tensors of one expert."""
         s = [self.spans[prefix + n] for n in NAMES]
         lo, hi = min(a for a, _ in s), max(b for _, b in s)
         return lo, hi, s
+
+    def expert_runs(self, prefix: str):
+        """The 6 tensors of one expert grouped into maximal contiguous file ranges.
+
+        These shards store ALL the scale tensors near the front and all the weight tensors far
+        behind them, but within each group the three tensors of an expert are adjacent. So an
+        expert is exactly two runs -- a 1.1 MB scale run and a 17.7 MB weight run -- not six, and
+        not one. Reading it as six separate `preadv`s costs six O_DIRECT round trips; at a large
+        arena a decode step misses only about one expert per layer, so nothing else is in flight to
+        hide that latency and the read rate collapses from ~4.7 GB/s to ~0.6 GB/s.
+
+        Returns [(file_lo, file_hi, [(name_index, offset_in_run, nbytes), ...]), ...].
+        """
+        spans = [self.spans[prefix + n] for n in NAMES]
+        order = sorted(range(len(spans)), key=lambda i: spans[i][0])
+        runs = []
+        for i in order:
+            a, b = spans[i]
+            if runs and runs[-1][1] == a:
+                lo, _, members = runs[-1]
+                members.append((i, a - lo, b - a))
+                runs[-1] = (lo, b, members)
+            else:
+                runs.append((a, b, [(i, 0, b - a)]))
+        return runs
 
 
 class ExpertStore:
@@ -83,6 +109,7 @@ class ExpertStore:
         # pinned, aligned staging buffers, one per io thread
         self.stage = [torch.empty(EXPERT_BYTES + 8 * ALIGN, dtype=torch.uint8, pin_memory=True) for _ in range(io_threads)]
         self.stage_free = list(range(io_threads))
+        self._tls = threading.local()
         self.stats = {"hits": 0, "misses": 0, "prefill_misses": 0, "bytes_read": 0, "read_s": 0.0}
 
     # ------------------------------------------------------------------ io
@@ -92,12 +119,16 @@ class ExpertStore:
             self.shards[f] = ShardFile(os.path.join(self.model_dir, f))
         return self.shards[f]
 
-    def read_expert(self, layer: int, expert: int, prefix: str | None = None):
-        """Returns the 6 tensors (CPU uint8) of one expert, read with O_DIRECT (one aligned read per tensor;
-        the six tensors are not adjacent in the shard)."""
+    def _read_leased(self, layer: int, expert: int, prefix: str | None, sink):
+        """O_DIRECT-read one expert into a pinned staging buffer and call ``sink(views)`` while the
+        buffer is still leased. ``views`` are 6 uint8 tensors that ALIAS the pinned buffer, so the
+        sink must be done with them before it returns.
+
+        One aligned read per tensor: the six tensors of an expert are not adjacent in the shard.
+        """
         p = prefix or f"layers.{layer}.ffn.experts.{expert}."
         sh = self._shard(p + "w1.weight")
-        _, _, spans = sh.expert_span(p)
+        runs = sh.expert_runs(p)
         with self.lock:
             sid = self.stage_free.pop()
         buf = self.stage[sid]
@@ -105,9 +136,9 @@ class ExpertStore:
             mv = memoryview(buf.numpy())
             base_addr = buf.data_ptr()
             cur = (-base_addr) % ALIGN
-            out = []
+            out = [None] * len(NAMES)
             t0 = time.perf_counter()
-            for (a, b) in spans:
+            for (a, b, members) in runs:
                 alo = a - a % ALIGN
                 ahi = (b + ALIGN - 1) // ALIGN * ALIGN
                 n = ahi - alo
@@ -120,19 +151,56 @@ class ExpertStore:
                         raise IOError(f"short read {p} {got}/{need}")
                     got += r
                 self.stats["bytes_read"] += n
-                out.append(buf[cur + (a - alo): cur + (b - alo)].clone())
+                base = cur + (a - alo)
+                for (i, off, nb) in members:
+                    out[i] = buf[base + off: base + off + nb]
                 cur += n
+            assert all(t is not None for t in out)
             self.stats["read_s"] += time.perf_counter() - t0
-            return out
+            return sink(out)
         finally:
             with self.lock:
                 self.stage_free.append(sid)
 
+    def read_expert(self, layer: int, expert: int, prefix: str | None = None):
+        """The 6 tensors (CPU uint8) of one expert, copied out of the staging buffer."""
+        return self._read_leased(layer, expert, prefix, lambda v: [t.clone() for t in v])
+
+    def _copy_stream(self):
+        """One CUDA stream per io thread.
+
+        The arena copy must not run on the default stream: every worker would then have to
+        synchronise the stream the model is computing on, once per miss. On its own stream a worker
+        only has to (a) wait for whatever was queued on the compute stream when the lease started --
+        the previous layer's MoE kernel may still be reading the slot we are about to overwrite --
+        and (b) synchronise its own stream before releasing the pinned buffer.
+        """
+        st = getattr(self._tls, "stream", None)
+        if st is None:
+            st = self._tls.stream = torch.cuda.Stream()
+        return st
+
     def _load_into_slot(self, key: tuple, slot: int, prefix: str | None = None):
-        w1, s1, w2, s2, w3, s3 = self.read_expert(key[0], key[1], prefix)
-        self.arena.load_slot(slot, w1.view(*W13_SHAPE), s1.view(*S13_SHAPE), w2.view(*W2_SHAPE), s2.view(*S2_SHAPE),
-                             w3.view(*W13_SHAPE), s3.view(*S13_SHAPE))
-        return slot
+        """Read one expert straight from NVMe into its arena slot.
+
+        The pinned staging buffer is handed to `arena.load_slot` directly instead of being cloned
+        first: the clone was a second 18.8 MB CPU memcpy per expert AND it made the H2D copy run
+        from pageable memory, which PyTorch has to stage through a bounce buffer of its own.
+        """
+        stream = self._copy_stream()
+        compute = torch.cuda.current_stream()  # capture OUTSIDE the `with`, where it is still ours
+
+        def sink(v):
+            w1, s1, w2, s2, w3, s3 = v
+            with torch.cuda.stream(stream):
+                stream.wait_stream(compute)
+                self.arena.load_slot(slot, w1.view(*W13_SHAPE), s1.view(*S13_SHAPE), w2.view(*W2_SHAPE),
+                                     s2.view(*S2_SHAPE), w3.view(*W13_SHAPE), s3.view(*S13_SHAPE),
+                                     non_blocking=True)
+            stream.synchronize()  # the staging buffer is leased to another expert right after
+            return slot
+
+        return self._read_leased(key[0], key[1], prefix, sink)
 
     # ------------------------------------------------------------------ cache policy
     def _lru_slot_for(self, key: tuple, used: set | frozenset = frozenset()) -> int:

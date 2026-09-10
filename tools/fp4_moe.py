@@ -100,14 +100,21 @@ class ExpertArena:
             raise ValueError(f"expected shape {shape}, got {tuple(t.shape)}")
         return t.contiguous()
 
-    def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3) -> None:
-        """Copy one expert (CPU int8/uint8/e8m0 tensors as read from safetensors) into `slot`."""
-        self.w1[slot].copy_(self._u8(w1, (INTER, KB1)))
-        self.s1[slot].copy_(self._u8(s1, (INTER, SG1)))
-        self.w3[slot].copy_(self._u8(w3, (INTER, KB1)))
-        self.s3[slot].copy_(self._u8(s3, (INTER, SG1)))
-        self.w2[slot].copy_(self._u8(w2, (DIM, KB2)))
-        self.s2[slot].copy_(self._u8(s2, (DIM, SG2)))
+    def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3, non_blocking: bool = False) -> None:
+        """Copy one expert (CPU int8/uint8/e8m0 tensors as read from safetensors) into `slot`.
+
+        `non_blocking=True` is for the serving path only (`engine.experts.ExpertStore`), where the
+        source is a *pinned* staging buffer and the caller synchronises its own copy stream before
+        handing that buffer to the next expert. Blocking is the default because a plain `.copy_()`
+        from pinned memory synchronises the calling stream once per tensor -- six GPU syncs per
+        expert, on the stream the model is computing on, for every miss.
+        """
+        self.w1[slot].copy_(self._u8(w1, (INTER, KB1)), non_blocking=non_blocking)
+        self.s1[slot].copy_(self._u8(s1, (INTER, SG1)), non_blocking=non_blocking)
+        self.w3[slot].copy_(self._u8(w3, (INTER, KB1)), non_blocking=non_blocking)
+        self.s3[slot].copy_(self._u8(s3, (INTER, SG1)), non_blocking=non_blocking)
+        self.w2[slot].copy_(self._u8(w2, (DIM, KB2)), non_blocking=non_blocking)
+        self.s2[slot].copy_(self._u8(s2, (DIM, SG2)), non_blocking=non_blocking)
 
     def dequant_slot(self, slot: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(w1, w2, w3) as bf16 [N, K] logical matrices -- for the reference path / tests."""
@@ -246,19 +253,21 @@ def _moe_up_kernel(
 
 
 # --------------------------------------------------------------------------- kernel 2: down + scatter
-# `y_ptr` is a [T*TOPK, DIM] fp32 buffer indexed by (token, k) PAIR, not by token: every pair owns
-# its own row and is written once, so no atomics and no cross-block accumulation. The K experts of
-# a token are summed afterwards in torch, in the token's own routing order. Accumulating here with
-# tl.atomic_add(..., sem="relaxed") made the fp32 summation order depend on block scheduling, so
-# two runs of the same tokens -- and in particular the same token in a short and in a long prefill
-# chunk -- could differ in the last bits, which the next layer's router then amplifies.
+# `y_ptr` is a [TOPK, T, DIM] fp32 buffer: every (k, token) pair owns its own row and is written
+# exactly once, so there are no atomics and no cross-block accumulation. The TOPK experts of a
+# token are summed afterwards in torch, over the outermost axis, always in the same order.
+# Accumulating here with tl.atomic_add(..., sem="relaxed") instead made the fp32 summation order
+# depend on block scheduling -- CUDA guarantees nothing about it -- so the same token could come
+# out different in a short and in a long prefill chunk, which the next layer's router amplifies.
+# k-major and not pair-major: with [T*TOPK, DIM] the scattered fp32 stores cost ~50% at T=512,
+# k-major costs ~6% (the reduction reads one contiguous [T, DIM] plane per k).
 @triton.jit
 def _moe_down_kernel(
     h_ptr, w2_ptr, s2_ptr, y_ptr,
     block_slot_ptr, block_pair_ptr,
     stride_h, stride_y,
     TOPK: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
-    BM: tl.constexpr, BN: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr, NTOK: tl.constexpr,
 ):
     KB: tl.constexpr = K // 2
     SG: tl.constexpr = K // 32
@@ -285,7 +294,8 @@ def _moe_down_kernel(
     for q in range(0, SG // 4):
         acc += _quad_dot(h_base + q * 128, xk, mask_m[:, None], w2_tile + q * 64, s2_tile + q * 4, BN)
 
-    tl.store(y_ptr + offs_m[:, None].to(tl.int64) * stride_y + offs_n[None, :], acc, mask=mask_m[:, None])
+    row = ((offs_m % TOPK) * NTOK + offs_m // TOPK).to(tl.int64)
+    tl.store(y_ptr + row[:, None] * stride_y + offs_n[None, :], acc, mask=mask_m[:, None])
 
 
 # --------------------------------------------------------------------------- routing
@@ -411,9 +421,9 @@ def moe_forward(
         h, arena.w2, arena.s2, parts,
         block_slot, block_pair,
         h.stride(0), parts.stride(0),
-        TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, num_warps=nw2, num_stages=ns2,
+        TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T, num_warps=nw2, num_stages=ns2,
     )
-    return parts.view(T, K, DIM).sum(dim=1).to(torch.bfloat16)
+    return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)
 
 
 @torch.no_grad()

@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fp4_moe  # noqa: E402
 from fp4_moe import DIM, ExpertArena, moe_forward, moe_forward_reference  # noqa: E402
 
-SHARD = os.path.expanduser("~/models/DeepSeek-V4.1-Flash/model-00003-of-00048.safetensors")
+SHARD = os.path.join(os.environ.get("MODEL_DIR") or "./models/DeepSeek-V4.1-Flash",
+                     "model-00003-of-00048.safetensors")
 N_EXPERTS = 32
 TOPK = 6
 
@@ -114,6 +115,24 @@ def main():
         ok &= bool(rel.item() < args.tol)
     assert ok, f"relative error exceeded {args.tol}"
     print("accuracy: PASS")
+
+    # ------------------------------------------------------------------ chunk invariance
+    # The engine prefills a prompt in chunks and re-runs speculative blocks after a rollback, so a
+    # token's MoE output must not depend on how many tokens are in the call, nor on block
+    # scheduling. Both hold only because the down kernel writes one row per (k, token) and the
+    # experts are summed afterwards in a fixed order (see tools/fp4_moe.py, kernel 2).
+    print("\n== chunk invariance (same tokens, different call sizes)")
+    T = 512
+    x = torch.randn((T, DIM), generator=gen).to(torch.bfloat16).to(device)
+    slots, w = random_routing(T, N_EXPERTS, gen, device)
+    full = moe_forward(x, slots, w, arena)
+    same = all(torch.equal(moe_forward(x, slots, w, arena), full) for _ in range(3))
+    bad = [m for m in (1, 3, 6, 7, 17, 64, 148, 256, 300)
+           if not torch.equal(moe_forward(x[:m], slots[:m], w[:m], arena), full[:m])]
+    print(f"  run-to-run bit-identical: {same}")
+    print(f"  prefix bit-identical for every call size: {not bad}" + (f" (differs at M={bad})" if bad else ""))
+    assert same and not bad, "MoE kernel is not chunk-invariant"
+    print("chunk invariance: PASS")
 
     # ------------------------------------------------------------------ timing
     print(f"\n== timing (CUDA events, median of {args.iters}); slot = {mb:.2f} MB; GB10 peak ~273 GB/s")

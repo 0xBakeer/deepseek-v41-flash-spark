@@ -31,7 +31,7 @@ class EngramTable:
         assert w["shape"][1] == 256 and s["shape"][1] == 8
         self.w_off = base + w["data_offsets"][0]
         self.s_off = base + s["data_offsets"][0]
-        self.rows = w["shape"][0]
+        self.n_rows = w["shape"][0]
         self.fd = os.open(self.path, os.O_RDONLY)
         os.posix_fadvise(self.fd, 0, 0, os.POSIX_FADV_RANDOM)
         self.pool = ThreadPoolExecutor(threads)

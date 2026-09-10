@@ -41,15 +41,15 @@ done
 [[ -f .env ]] && { set -a; . ./.env; set +a; }
 for v in "${!_CLI[@]}"; do printf -v "$v" '%s' "${_CLI[$v]}"; done
 
-MODEL_DIR="${MODEL_DIR:-$HOME/models/DeepSeek-V4.1-Flash}"
-PYTHON="${PYTHON:-$HOME/recipes/ling3-flash-dgx-spark/.venv/bin/python}"
+MODEL_DIR="${MODEL_DIR:-./models/DeepSeek-V4.1-Flash}"
+PYTHON="${PYTHON:-python3}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-deepseek-v4.1-flash}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 MAX_SEQ="${MAX_SEQ:-32768}"
 ARENA_GB="${ARENA_GB:-}"                 # empty = size from free GPU memory
-TRACE_STATS="${TRACE_STATS:-results/trace-full/stats/coverage.json}"
-TRACE_STATS_FALLBACK="${TRACE_STATS_FALLBACK:-results/trace-partial/stats/coverage.json}"
+# Empty = auto: take the newest results/trace-*/stats/coverage.json (see below).
+TRACE_STATS="${TRACE_STATS:-}"
 DEFAULT_THINKING="${DEFAULT_THINKING:-off}"
 DEFAULT_EFFORT="${DEFAULT_EFFORT:-75}"
 SPEC="${SPEC:-1}"
@@ -66,7 +66,9 @@ PID_FILE="$LOG_DIR/server.pid"
 [[ -d "$MODEL_DIR" ]] || err "model dir not found: $MODEL_DIR (set MODEL_DIR in .env)"
 [[ -f "$MODEL_DIR/tokenizer.json" ]] || err "$MODEL_DIR has no tokenizer.json"
 [[ -f "$MODEL_DIR/encoding/encoding.py" ]] || err "$MODEL_DIR has no encoding/encoding.py"
-[[ -x "$PYTHON" ]] || err "interpreter not executable: $PYTHON (set PYTHON in .env)"
+PYTHON_BIN="$(command -v -- "$PYTHON" 2>/dev/null || true)"
+[[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || err "interpreter not found or not executable: $PYTHON (set PYTHON in .env)"
+PYTHON="$PYTHON_BIN"
 [[ -f server/app.py ]] || err "server/app.py missing -- run this from a full checkout"
 case "$DEFAULT_THINKING" in on|off) ;; *) err "DEFAULT_THINKING must be on|off (got '$DEFAULT_THINKING')" ;; esac
 case "$SPEC" in 0|1) ;; *) err "SPEC must be 0|1 (got '$SPEC')" ;; esac
@@ -101,12 +103,13 @@ if [[ -r /proc/meminfo ]]; then
         echo "     Biggest resident processes:" >&2
         ps -eo pid,rss,comm --sort=-rss 2>/dev/null | head -6 |
             awk 'NR==1{print "       PID      RSS_GB  COMMAND"; next} {printf "       %-8s %-7.1f %s\n", $1, $2/1048576, $3}' >&2
-        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'vllm-fn-tp1'; then
-            echo "     The Qwen vLLM container vllm-fn-tp1 is running. Stop it with:" >&2
-            echo "         docker stop vllm-fn-tp1" >&2
+        if command -v docker >/dev/null 2>&1 && [[ -n "$(docker ps -q 2>/dev/null)" ]]; then
+            echo "     Containers are running and may be holding the unified pool:" >&2
+            docker ps --format '       {{.Names}}\t{{.Image}}' 2>/dev/null >&2
+            echo "     Stop the one that owns the GPU:  docker stop <container>" >&2
         else
-            echo "     Stop whatever holds the pool (the usual occupant is the Qwen vLLM" >&2
-            echo "     container: docker stop vllm-fn-tp1) and wait for MemAvailable to recover." >&2
+            echo "     Stop whatever holds the pool (another inference server, a container)" >&2
+            echo "     and wait for MemAvailable to recover." >&2
         fi
         exit 1
     fi
@@ -132,18 +135,28 @@ FLAGS=(
 [[ -n "$ARENA_GB" ]] && FLAGS+=(--arena-gb "$ARENA_GB")
 [[ "$SPEC" == "0" ]] && FLAGS+=(--no-spec)
 
-# The full trace is 40 layers and takes days of shard downloads; until it lands,
-# rank the warm start with the partial (layers 0-3) coverage rather than with
-# nothing, which would warm experts in index order.
+# Which coverage.json ranks the warm start. Without one the arena is filled in
+# (layer, expert) index order, which is a measurably worse hot set. Trace
+# directories carry a name and a date (results/trace-full-YYYYMMDD/), so when
+# TRACE_STATS is unset -- or points at something that is not there -- take the
+# newest results/trace-*/stats/coverage.json rather than nothing.
+newest_trace_stats() {
+    local c
+    c=$(ls -1d results/trace-*/stats/coverage.json 2>/dev/null | sort | tail -1 || true)
+    [[ -n "$c" ]] && echo "$c"
+}
 TRACE_USED=""
-if [[ -n "$TRACE_STATS" && -f "$TRACE_STATS" ]]; then
-    TRACE_USED="$TRACE_STATS"
-elif [[ -n "$TRACE_STATS_FALLBACK" && -f "$TRACE_STATS_FALLBACK" ]]; then
-    TRACE_USED="$TRACE_STATS_FALLBACK"
-    info "trace stats $TRACE_STATS missing; falling back to $TRACE_USED (layers 0-3 only)"
+if [[ -n "$TRACE_STATS" ]]; then
+    if [[ -f "$TRACE_STATS" ]]; then
+        TRACE_USED="$TRACE_STATS"
+    else
+        TRACE_USED="$(newest_trace_stats)"
+        [[ -n "$TRACE_USED" ]] && info "trace stats $TRACE_STATS missing; using $TRACE_USED instead"
+    fi
 else
-    info "no trace stats found ($TRACE_STATS, $TRACE_STATS_FALLBACK) -- warm start will use index order"
+    TRACE_USED="$(newest_trace_stats)"
 fi
+[[ -z "$TRACE_USED" ]] && info "no results/trace-*/stats/coverage.json -- warm start will use index order"
 [[ -n "$TRACE_USED" ]] && FLAGS+=(--trace-stats "$TRACE_USED")
 # shellcheck disable=SC2206
 [[ -n "$EXTRA_FLAGS" ]] && FLAGS+=($EXTRA_FLAGS)

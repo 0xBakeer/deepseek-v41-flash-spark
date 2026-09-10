@@ -6,7 +6,7 @@ Four numbers, all on the residual stream after layer 3:
   * odd-sized chunks vs single-chunk        -- ... for arbitrary boundaries, incl. a 1-token chunk
   * rollback vs a straight run              -- cache rollback after a 6-token verify block
 
-The reference comes from results/trace-partial/state/after_layer{NL-1}.pt when tools/expert_trace.py
+The reference comes from results/trace-*/state/after_layer{NL-1}.pt when tools/expert_trace.py
 happens to have left one there; otherwise it is computed once with tools/v41_ref (plain, untiled
 GEMMs, exactly what expert_trace.py runs) and cached under results/engine-ref/.
 """
@@ -19,7 +19,7 @@ from engine.engram import make_hash_state
 import numpy as np
 import v41_ref as R
 
-md = os.path.expanduser("~/models/DeepSeek-V4.1-Flash"); dev = "cuda"
+md = os.environ.get("MODEL_DIR") or "./models/DeepSeek-V4.1-Flash"; dev = "cuda"
 index = json.load(open(f"{md}/model.safetensors.index.json"))
 args = R.Args.from_json(f"{md}/inference/config.json")
 NL = 4
@@ -39,7 +39,8 @@ def rows_from_store(L, hashes):
     v = torch.from_numpy(vals[pos]).to(dev).view(torch.float8_e4m3fn).float(); s = torch.exp2(torch.from_numpy(sc[pos]).to(dev).float() - 127)
     return (v.unflatten(-1, (8, 32)) * s.unsqueeze(-1)).flatten(-2).view(hashes.shape[0], hashes.shape[1], 256)
 m.engram_rows = rows_from_store
-meta = json.load(open("results/trace-partial/meta.json"))
+TRACE = sorted(glob.glob("results/trace-*"))[-1]  # newest results/trace-<name>/
+meta = json.load(open(f"{TRACE}/meta.json"))
 corpus = {json.loads(l)["id"]: json.loads(l)["text"] for l in open("corpus/trace_corpus.jsonl")}
 enc = {i: torch.tensor(tok.encode(corpus[meta["seqs"][i]["id"]], add_special_tokens=False), device=dev) for i in SEQS}
 
@@ -80,7 +81,7 @@ def build_reference():
 
 
 REF_CACHE = f"results/engine-ref/after_layer{NL - 1}.pt"
-trace_state = f"results/trace-partial/state/after_layer{NL - 1}.pt"
+trace_state = f"{TRACE}/state/after_layer{NL - 1}.pt"
 if os.path.exists(trace_state):
     ref_h = {i: torch.load(trace_state, map_location="cpu")["states"][i]["h"] for i in SEQS}
 elif os.path.exists(REF_CACHE):

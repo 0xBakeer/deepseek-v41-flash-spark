@@ -7,7 +7,7 @@ Two modes:
            rows/mask, compressed rows/mask, compressor latents, indexer top-k, engram rows)
            position by position, so the first deviating (layer, tensor, position) is visible.
 """
-import json, os, sys, time, torch, numpy as np
+import glob, json, os, sys, time, torch, numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, ".."))
 from engine.model import Caches, Model, Weights, Shared
 from engine import experts as EX, moe_fallback as K
@@ -15,7 +15,7 @@ from engine.engram import make_hash_state
 from safetensors import safe_open
 import v41_ref as R
 
-md = os.path.expanduser("~/models/DeepSeek-V4.1-Flash"); dev = "cuda"
+md = os.environ.get("MODEL_DIR") or "./models/DeepSeek-V4.1-Flash"; dev = "cuda"
 index = json.load(open(f"{md}/model.safetensors.index.json")); args = R.Args.from_json(f"{md}/inference/config.json")
 NL = 4
 MODE = sys.argv[1] if len(sys.argv) > 1 else "chunk"
@@ -35,7 +35,8 @@ def rows_from_store(L, hashes):
     return (v.unflatten(-1, (8, 32)) * s.unsqueeze(-1)).flatten(-2).view(hashes.shape[0], hashes.shape[1], 256)
 m.engram_rows = rows_from_store
 
-meta = json.load(open("results/trace-partial/meta.json")); corpus = {json.loads(l)["id"]: json.loads(l)["text"] for l in open("corpus/trace_corpus.jsonl")}
+TRACE = sorted(glob.glob("results/trace-*"))[-1]  # newest results/trace-<name>/
+meta = json.load(open(f"{TRACE}/meta.json")); corpus = {json.loads(l)["id"]: json.loads(l)["text"] for l in open("corpus/trace_corpus.jsonl")}
 sid = meta["seqs"][SEQ]["id"]
 ids = torch.tensor(tok.encode(corpus[sid], add_special_tokens=False), device=dev); T = ids.numel()
 print(sid, "T", T, "mode", MODE)

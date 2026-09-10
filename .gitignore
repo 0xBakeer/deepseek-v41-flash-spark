@@ -1,14 +1,31 @@
 __pycache__/
 *.pyc
-engram_rows/
-results/*/state/
-logs/
+*.pyo
+.DS_Store
 .venv/
-.env
+logs/
+engram_rows/
 
-# Bench artefacts are results, not noise: results/oneshots/*.html is the game a
-# reader is supposed to open, and results/*.json is the row it came with. These
-# negations are here so that "ignore the generated stuff" never grows to eat them.
+# The checkpoint is 510 GB and lives here by default. Never in git.
+models/
+
+# Local configuration: this is where the box-specific values go (MODEL_DIR,
+# PYTHON, HF_TOKEN, ...). env.example is the tracked, generic template.
+.env
+*.env
+!env.example
+
+# results/ is mostly tracked -- the measured rows ARE the deliverable -- with
+# two exceptions that are big and regenerable:
+#   * results/*/trace/*.npz  the raw per-layer routing trace (tools/expert_trace.py)
+#   * results/*/state/       the tracer's resume state
+# What the server itself needs is results/*/stats/coverage.json, and that stays
+# tracked. The negations below exist so that "ignore the generated stuff" can
+# never grow to eat the rows a reader came for.
+results/*/trace/
+results/*/state/
+!results/*/stats/
+!results/*/stats/coverage.json
 !results/oneshots/
 !results/oneshots/*.html
 !results/oneshots/*.txt

@@ -5,9 +5,9 @@ Requests are served **one at a time** (the engine is single-sequence); concurren
 on a lock, nothing is rejected.
 
 ```bash
-python3 server/app.py --model-dir ~/models/DeepSeek-V4.1-Flash --engine mock      # HTTP layer only
-python3 server/app.py --model-dir ~/models/DeepSeek-V4.1-Flash --engine v41       # real engine
-python3 server/test_server.py                                                     # 14 e2e tests vs the mock
+python3 server/app.py --model-dir ./models/DeepSeek-V4.1-Flash --engine mock      # HTTP layer only
+python3 server/app.py --model-dir ./models/DeepSeek-V4.1-Flash --engine v41       # real engine
+python3 server/test_server.py                                                     # 15 e2e tests vs the mock
 ```
 
 | flag | default | meaning |
@@ -26,14 +26,17 @@ python3 server/test_server.py                                                   
 | `--max-context`, `--mock-delay` | `32768`, `0` | mock-engine knobs |
 
 Dependencies: `tokenizers` (preferred) or `transformers` for `tokenizer.json`; nothing else.
+The tests need a directory with `tokenizer.json` + `encoding/encoding.py` (the checkpoint's
+metadata files are enough -- no weights): `$V41_MODEL_DIR`, `~/models/DeepSeek-V4.1-Flash`
+or `<repo>/models/DeepSeek-V4.1-Flash`, first match wins.
 
 ## Endpoints
 
 | route | notes |
 |---|---|
-| `GET /health` | `{"status":"ok","engine":..,"busy":bool,"max_context":..}` |
+| `GET /health` | `{"status":"ok","engine":..,"busy":bool,"max_context":..,"engine_config":{..}}`. `engine_config` is the v41 engine's static configuration -- `arena_gb`, `arena_slots`, `lru_slots`, `transient_slots`, `resident_expert_pct`, `max_seq`, `spec`, `trace_stats`, `kernel`, `act_quant` -- so a benchmark never has to be told what the server was started with. Absent for `--engine mock`. |
 | `GET /v1/models`, `GET /v1/models/{id}` | one model card |
-| `POST /v1/chat/completions` | `messages`, `tools`, `tool_choice` (`none` drops the schemas), `response_format` (`json_schema` is rendered into the system prompt), `stream`, `stream_options.include_usage`, `max_tokens`/`max_completion_tokens` (4096), `temperature` (1.0), `top_p` (0.95), `stop`, `seed`, thinking controls below. `n>1`, images and `logprobs` are rejected with 400. |
+| `POST /v1/chat/completions` | `messages`, `tools`, `tool_choice` (`none` drops the schemas), `response_format` (`json_schema` is rendered into the system prompt), `stream`, `stream_options.include_usage`, `max_tokens`/`max_completion_tokens` (4096), `temperature` (1.0), `top_p` (0.95), `stop`, `seed`, `ignore_eos`, thinking controls below. `n>1`, images and `logprobs` are rejected with 400. |
 | `POST /v1/completions` | raw `prompt` (string, or a list of token ids). Strings get BOS prepended unless `"add_bos": false`. No thinking/tool parsing: the text comes back verbatim. Stream and non-stream. |
 | `POST /v1/debug/prompt` | same body as chat; returns the rendered prompt string, its token ids and the resolved thinking/effort. Handy for the engine author. |
 
@@ -89,6 +92,11 @@ generation starts right after `<｜Assistant｜><think>` (thinking) or `<｜Assi
   stable (no trailing U+FFFD), so multi-token UTF-8 sequences are never split across deltas.
 * Stop conditions: EOS id (`<｜end▁of▁sentence｜>` = 1), request `stop` strings (matched across
   reasoning and content; text after the match is dropped), `max_tokens` (`finish_reason: length`).
+* `ignore_eos: true` empties the stop-id set on both sides -- the engine keeps decoding past EOS
+  and the server stops truncating at it -- so the completion is exactly `max_tokens` tokens long.
+  Benchmarks need it: without it a "512-token" run really ends wherever the model decided to stop,
+  and two configs are then compared on two different amounts of work. Request `stop` strings still
+  apply.
   After EOS/length the engine generator is drained (so it can finish its own bookkeeping); on a
   stop string or client disconnect it is closed (`GeneratorExit` inside the engine). `max_tokens` is
   clamped so that `prompt + max_tokens + 8 <= max_context` (the engine's DSpark headroom).

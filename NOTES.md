@@ -134,7 +134,7 @@ top-25% sets = 0.25. Layer 0 is the flattest layer in most MoEs; the deeper laye
 ### 0.4 Download policy followed
 
 Downloaded to the box: shards 1-6, 43-46 + code = **39 GB** (under the 50 GB rule), into
-`~/models/DeepSeek-V4.1-Flash` with `snapshot_download(allow_patterns=...)` so a later full
+`$MODEL_DIR` with `snapshot_download(allow_patterns=...)` so a later full
 download continues in place. Disk after: 460 GB free. The two engram shards (203 GB) are NOT
 downloaded; the trace reads its rows over HTTP. **The full 40-layer histogram needs the remaining
 36 layer shards = 266 GB** (307 GB total without engram), which fits the disk (460 GB free) but
@@ -227,7 +227,7 @@ but four layers are not a histogram. **Category-specific resident sets are a rea
 coding-only top-30% set covers 0.70/0.73/0.82/0.88 of coding slots at layers 0-3 vs 0.65-0.81
 for the mixed set; the Jaccard overlap of the coding vs general top-25% sets is only 0.18-0.31.
 
-Plots: `results/trace-partial/stats/coverage.png`, `layer_hist.png`; tables `coverage.md`.
+Plots: `results/trace-*/stats/coverage.png`, `layer_hist.png`; tables `coverage.md`.
 
 ### 0.8 What the sizes alone already decide (arithmetic, no measurement needed)
 
@@ -238,8 +238,8 @@ over all experts. Consequences:
 
 * **Strategy C (everything resident, hot at FP4 + cold at 2-3 bpw) cannot fit at the quality floor.**
   Even with every cold expert at 2.0 bpw, only ~9% of experts could stay at FP4, and the whole
-  set at EXL3 2.0 bpw is still 136 GB. It only fits below ~1.3 bpw average, which is below anything
-  Khaled ships.
+  set at EXL3 2.0 bpw is still 136 GB. It only fits below ~1.3 bpw average, which is below any
+  quality floor worth shipping.
 * **Strategy B (2 bpw + prune)**: 136 GB -> ~88 GB means dropping ~35% of experts outright. Speed
   reference only, as planned.
 * **Strategy A (hot FP4 cache + NVMe streaming) is the only path that keeps FP4 quality on one
@@ -258,11 +258,11 @@ free, so the 307 GB engram-less checkpoint fits with ~155 GB to spare. Waiting f
 
 ---
 
-## Phase 1/2 -- build log (2026-09-10, Khaled: "just make it work")
+## Phase 1/2 -- build log (2026-09-10, brief: "just make it work")
 
 Go-ahead received; the remaining 471 GB were downloaded (85 MB/s, ~95 min; Ling-3.0-flash weights
 and the ling3 docker image were deleted to make room, both re-downloadable). Work is split into
-Opus-5 agents with this thread orchestrating (Khaled's instruction, to stay under the Fable limit).
+parallel agents with one thread orchestrating.
 
 ### Full 40-layer routing histogram (measured 19:02, `results/trace-full-20260910/`)
 
@@ -301,3 +301,215 @@ inherently unpredictable). A broken port would sit near 10% top-1.
 * `engine/model.py` -- chunked-prefill/decode-block model with caches; single-chunk matches the
   reference trace within 0.7-1.6%; chunk-boundary exactness being fixed (Opus agent).
 * `server/app.py` -- stdlib OpenAI-compatible server (14 e2e tests), `start.sh`/`stop.sh`/`bench/`.
+
+---
+
+## Bring-up -- 2026-09-10
+
+First end-to-end run of `engine/` on the full checkpoint. Everything below is **measured on this
+box** on 2026-09-10 unless it says otherwise. The box's other inference container was already
+stopped (exited 17:2x) when this started, so nothing had to be killed; it is left stopped and not
+removed.
+
+### B.1 Smoke test -- two bugs, then coherent greedy text
+
+Command (the one in the brief), `--max-seq 8192 --max-tokens 64 --temperature 0 --no-spec`:
+
+1. **`EngramTable.rows` was shadowed by an int.** `engine/engram.py::__init__` did
+   `self.rows = w["shape"][0]`, which overwrote the `rows()` method, so the first engram layer
+   (layer 1) raised `TypeError: 'int' object is not callable` on the first forward. Renamed the
+   attribute to `n_rows`. This is the only thing that stood between the engine and a first token;
+   the Triton kernel import from `engine/` (`sys.path` -> `tools/`), the MTP expert load, the
+   `Caches` allocation and the O_DIRECT expert reads all worked first try.
+2. **The arena auto-sizing was reading the wrong number.** On GB10 the GPU and the host share one
+   pool and `torch.cuda.mem_get_info()` counts the *page cache* as used: after the 470 GB
+   checkpoint download it reported **32.0 GB free on a box with 99.9 GiB MemAvailable**, which
+   would have silently given a 23 GB arena (7% of the routed experts) and a permanently
+   NVMe-bound server. `V41Engine` now takes the larger of `mem_get_info()` and `/proc/meminfo`
+   MemAvailable, keeps a hard `keep_free_gb` floor under MemAvailable (default 20 GB; this box
+   hard-resets if MemAvailable goes negative) and logs both numbers.
+
+**Measured, load (`--max-seq 8192`, arena pinned to 20 GB for a fast debug loop):**
+
+| stage | time |
+|---|---|
+| non-expert weights (19 GB) to GPU | 63 s |
+| DSpark experts (3 x 128 = 7.2 GB) resident | 5 s |
+| warm start, 663 experts / 12.5 GB | 3 s |
+| **total to `ready`** | **~72 s** |
+
+**Measured, generation** (prompt 16 tokens, 64 greedy tokens, no spec, 20 GB arena =
+1063 slots = 6.9% of the routed experts):
+
+| metric | value |
+|---|---|
+| output | coherent -- a correct, well-formatted Fibonacci answer with docstrings |
+| prefill | 8.02 s for 16 tokens (2.0 tok/s; a cold prefill chunk misses almost every expert) |
+| decode | **0.93 tok/s** (67.9 s for 64 tokens) |
+| expert hit rate | 0.580 |
+| expert misses / prefill misses | 6,459 / 1,618 |
+| NVMe read | 152.05 GB for 64 tokens (**2.38 GB/s** effective against a 5.5 GB/s device ceiling) |
+| engram | 3,792 rows, 0.65 s total |
+| attention / MoE wall time | 6.35 s / 52.78 s |
+
+At this arena size the run is pure NVMe streaming: 2.4 GB of expert weights per generated token.
+That is the arena's fault, not the engine's -- see B.3 for the same test with the real arena.
+
+### B.2 Warm start at the real arena size (`--max-seq 8192`, auto)
+
+MemAvailable 99.9 GB at sizing time -> arena 80.7 GB = 4,291 slots (3,891 LRU + 400 transient),
+**28% of the 15,360 routed experts**. Warm start: **3,891 experts / 73.2 GB in 16 s = 4.6 GB/s**
+(O_DIRECT, 12 io threads, ranked by `results/trace-full-20260910/stats/coverage.json`). Peak host
+usage 111 GiB of 121, MemAvailable 10 GiB -- which is why `keep_free_gb` was raised to 20 GB and
+the auto factor lowered from 0.88 to 0.82 for the serving runs.
+
+### B.3 Correctness: teacher-forced NLL / top-1 vs the pure-torch tracer (measured 19:45)
+
+New mode `engine/v41_engine.py --teacher-forced corpus/trace_corpus.jsonl`: every corpus sequence
+goes through `Model.forward` in ONE chunk (all <= 512 tokens) and the head's next-token NLL and
+top-1 are aggregated per category, exactly as `tools/expert_trace.py` does at the end of a full
+trace. Run with `--act-quant` so the fp8 activation fake-quant matches the tracer's
+(`results/trace-full-20260910/meta.json` has `act_quant: true`); serving runs with it off, which is
+strictly more precision.
+
+| corpus | tokens | tracer NLL | **engine NLL** | delta | tracer top-1 | **engine top-1** |
+|---|---|---|---|---|---|---|
+| coding | 5,459 | 2.1527 | **2.1586** | **+0.0059** | 0.6384 | **0.6410** |
+| general | 5,251 | 3.4124 | **3.4380** | **+0.0256** | 0.4738 | **0.4769** |
+
+Both inside the +-0.05 nats bar, so `engine/model.py` (arena + Triton FP4 grouped MoE + engram
+rows off NVMe + the fixed-tile GEMMs) agrees with `tools/v41_ref.py` end to end. No bug hunt was
+needed. Config: arena 80.7 GB / 4,291 slots (27.9% resident), max_seq 8192, spec off, kernel
+triton-fp4. 50 sequences in 965 s of forward time; result in
+`results/engine-tf-20260910/teacher_forced_engine_actquant.json`.
+
+### B.4 Two performance bugs found on the way (both measured A/B, same box, same work)
+
+The first end-to-end runs were far slower than the NVMe could explain. Two causes, both outside
+the model math:
+
+**(a) The LM head was converted bf16 -> fp32 on every single token.** `Model.forward` ended with
+`R.mm(x.float(), self.W.head.float())` and `dspark_draft` with `x.float() @ self.W.head.float().T`
+-- a **2.65 GB allocation per token** (`head` is [129280, 5120]), plus a 132 MB one per drafted
+token for the Markov head. On a box where the expert arena already holds 74 GB that pushes the
+caching allocator into `cudaFree`/`cudaMalloc`, and it cost more than the entire rest of the decode
+step. Both are now stored fp32 once at load (+1.33 GB and +66 MB resident), which is also what the
+reference does (`ParallelHead`: "kept as fp32 here so the logits come out in fp32 directly").
+
+**(b) The expert reader issued six O_DIRECT reads per expert and synchronised the compute stream
+six times per miss.** Two separate fixes:
+* `ShardFile.expert_runs` groups the 6 tensors into their **2** maximal contiguous file runs. The
+  shards keep all the scale tensors near the front and all the weight tensors far behind, but
+  within each group an expert's three tensors are adjacent -- so an expert is a 1.1 MB run and a
+  17.7 MB run, not six reads and not one. (The old `expert_span` docstring claimed all six were
+  contiguous; they are not.) Verified byte-exact against `safetensors.safe_open` for
+  layers 0/7/39, experts 0/123/383 and for `mtp.0.experts.7`.
+* `ExpertStore._load_into_slot` now hands the *pinned* staging buffer straight to
+  `arena.load_slot(..., non_blocking=True)` on a **per-io-thread CUDA stream** (which first
+  `wait_stream`s the compute stream, so a slot cannot be overwritten while the previous layer's
+  MoE kernel still reads it) instead of cloning to pageable memory and copying on the default
+  stream. `ExpertArena.load_slot` used a plain `.copy_()`, i.e. six synchronisations of the
+  stream the model computes on, per miss.
+
+| measurement | before | after |
+|---|---|---|
+| expert read, **1** in flight (the large-arena decode regime) | 8.11 ms / expert, 2.32 GB/s | **4.78 ms / expert, 3.93 GB/s** |
+| expert read, 12 in flight | 4.02 ms, 4.68 GB/s | 3.95 ms, 4.76 GB/s |
+| decode, 20 GB arena, 64 greedy tokens, no spec (identical 152.05 GB of reads both times) | 0.93 tok/s | **1.21 tok/s** |
+| decode, 74-76 GB arena, 64 greedy tokens, no spec (~70 GB of reads both times) | 0.76 tok/s | **1.75 tok/s** |
+| decode, 74-76 GB arena, 64 greedy tokens, DSpark on | 1.74 tok/s | **2.64 tok/s** |
+
+The A/B is honest in the sense that matters here: greedy decoding at a fixed arena size reads the
+*same* expert bytes before and after (the tables above quote them), so only the time changed.
+
+Not a win, measured and kept anyway: at 12 reads in flight the fused pinned path is 4.76 vs
+4.73 GB/s against clone+H2D -- a wash. It is kept because it is what removes the compute-stream
+synchronisation, which the isolated micro-benchmark cannot show.
+
+### B.5 DSpark speculative decoding (measured 19:57, `results/engine-tf-20260910/spec_ab2.json`)
+
+New `--spec-ab` mode: one load, `eng.spec` toggled between runs, so both runs share the arena and
+the LRU. Config: arena 74.5 GB / 3,960 slots (25.8% resident), max_seq 8192, kernel triton-fp4,
+prompt 16 tokens, 64 output tokens.
+
+**Greedy speculative output is token-for-token identical to greedy autoregressive output:
+64 of 64, first divergence `None`.** The DSpark verify loop is lossless as implemented.
+
+| run | decode tok/s | steps | accept_len_mean | expert hit rate | NVMe GB | attn_s | moe_s |
+|---|---|---|---|---|---|---|---|
+| greedy, no spec | 1.75 | 63 | -- | 0.826 | 70.44 | 2.86 | 31.42 |
+| greedy, DSpark | **2.64** | 17 | **3.71** | 0.771 | 86.63 | 1.02 | 24.69 |
+| temperature 1.0 / top_p 0.95, DSpark | **2.64** | 20 | **3.40** | 0.794 | 91.98 | 1.21 | 25.55 |
+
+The sampled run is coherent (a correctly structured multi-implementation Fibonacci answer). DSpark
+buys 1.5x here: a 6-token verify block reads more expert bytes than a single token does (86.6 vs
+70.4 GB) but amortises them over 3.7 accepted tokens.
+
+Semantics were checked against the checkpoint's own `inference/model.py` (`DSparkBlock`,
+`DSparkAttention`, `forward_head`, `forward_spec`): block size 5, noise token 128799, target layers
+37/38/39 meaned over the HC copies, `main_x` computed once and shared by all three stages, draft
+queries at `last_main_pos+1 .. +5`, the Markov head chained through the sampled draft ids. One real
+mismatch found and fixed: **the confidence head was being fed the RMS-normed hidden and squashed
+with a sigmoid**; the reference feeds it the un-normed `hc_pre` output and returns the raw
+projection. It changes nothing measured here because adaptive verification is off in this engine
+(the confidence is reported, not acted on).
+
+### B.6 Serving and benchmarking (measured 20:01-20:24)
+
+**Engine API gaps closed for the server and the bench** (`engine/v41_engine.py`, `server/app.py`,
+`bench/bench.py`):
+* `generate(..., ignore_eos=False)`. With it on, the engine's stop set is empty, and `server/app.py`
+  reads a body field `ignore_eos` that empties the stop set on *its* side too (passing it only to
+  the engine would have produced a short run anyway, because the server truncates every burst at a
+  stop id). `bench/bench.py --ignore-eos` sends it. Without this a "512-token" run really ends
+  wherever the model decided to stop, so two configs get compared on two different amounts of work
+  -- and, on this recipe, on two different amounts of expert streaming.
+* `last_stats` is now written in a `finally` around the decode loop, from counters that are
+  initialised before it. The server closes the generator on a stop string or a client disconnect
+  (`GeneratorExit` at the pending `yield`), so before this an aborted request reported the
+  *previous* request's numbers.
+* `V41Engine.config()` returns the static configuration -- arena GB/slots, LRU/transient split,
+  resident-expert %, max_seq, spec, trace_stats, kernel, act_quant -- and it is merged into
+  `stats()` (hence into `x_engine_stats` on every response) and into `GET /health` as
+  `engine_config`. A measured number in RESULTS.md has to be quoted with the config that produced
+  it, and a bench should not have to be told what the server was started with.
+* `V41Engine.close()` (the server calls `engine.close()` at shutdown; there was no such method).
+* `server/test_server.py`: 15 tests pass on the Mac, including a new
+  `test_ignore_eos_runs_to_max_tokens` and an `ignore_eos` type-validation case.
+
+**`./start.sh` / `./stop.sh` behaved correctly on the box, unchanged.** `.env` from `env.example`
+with `TRACE_STATS=results/trace-full-20260910/stats/coverage.json`, `MAX_SEQ=32768`,
+`DEFAULT_THINKING=off`. Start to `/health` **~90 s** (arena 73.8 GB / 3,926 slots = 25.6% resident;
+warm start 3,526 experts / 66.3 GB in **14 s**), peak host use 99-101 GiB of 121, MemAvailable
+19-22 GiB throughout. `./stop.sh` took **2 s** and MemAvailable came back to 118 GiB. A greedy
+`/v1/chat/completions` for "What is 2+2?" answered "2 + 2 equals 4." in 12.2 s wall (6.8 s of that
+prefill).
+
+**Bench (`code` only -- see below).** `python3 bench/bench.py --workload code --runs 2 --osl 512
+--ignore-eos`, thinking off, temperature 0.6, top_p 0.95, DSpark on, 1 warm-up + 2 measured runs,
+every run exactly 512 completion tokens (`finish_reason: length`):
+
+| run | TTFT | TPOT | decode tok/s | accept_len | expert hit | NVMe GB | engram rows |
+|---|---|---|---|---|---|---|---|
+| warm-up | 12.48 s | 338 ms | 2.96 | 3.47 | 0.820 | 496.7 | 45,440 |
+| run 1 | 10.98 s | 369 ms | 2.71 | 3.02 | 0.834 | 517.6 | 51,792 |
+| run 2 | 11.12 s | 379 ms | 2.64 | 3.04 | 0.827 | 543.1 | 51,408 |
+| **median** | **11.05 s** | **374 ms** | **2.68** | **3.03** | **0.830** | **530.3** | **51,600** |
+
+Per run 1 in detail: prefill 62 tokens in 10.82 s (2,473 prefill expert misses = 46 GB at
+4.3 GB/s), decode 514 tokens in 188.3 s over 170 DSpark steps, 25,044 decode expert misses =
+471 GB at **2.5 GB/s**, of which `moe_s` 160.5 s, `attn_s` 9.1 s, `engram_s` 3.6 s. So the decode
+is squarely NVMe-bound: **0.92 GB of expert weights streamed per generated token** at a 25.6%
+resident set, and everything else (attention, engram, the Triton MoE kernel itself) is noise next
+to it.
+
+**The rest of step 6 was stopped by the owner** (the box was needed for interactive use) after the
+`code` row: no `prose` row, no `angry-birds`/`mario` one-shots, no thinking-on run, and therefore
+no `results/oneshots/` artefacts. Two earlier attempts at those rows were killed externally, so
+nothing about them is measured and nothing is claimed. The server was left RUNNING on :8000 at the
+owner's instruction (`./stop.sh` was verified earlier and not run at the end).
+
+**Operational note found while the benches were being killed**: the server serialises requests on
+one lock and only notices a dead client when it next writes a chunk, so a request that was already
+queued when its client died keeps the engine busy for its whole `max_tokens` budget. `/health`
+reports `busy: true` honestly, but there is no cancel endpoint and no queue cap. See LIMITATIONS.

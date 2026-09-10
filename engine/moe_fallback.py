@@ -30,13 +30,13 @@ class ExpertArena:
     def bytes_per_slot(self):
         return 3 * (2304 * 2560 + 2304 * 160)
 
-    def load_slot(self, slot, w1, s1, w2, s2, w3, s3):
-        self.w1[slot].copy_(w1.view(torch.uint8), non_blocking=True)
-        self.s1[slot].copy_(s1.view(torch.uint8), non_blocking=True)
-        self.w2[slot].copy_(w2.view(torch.uint8), non_blocking=True)
-        self.s2[slot].copy_(s2.view(torch.uint8), non_blocking=True)
-        self.w3[slot].copy_(w3.view(torch.uint8), non_blocking=True)
-        self.s3[slot].copy_(s3.view(torch.uint8), non_blocking=True)
+    def load_slot(self, slot, w1, s1, w2, s2, w3, s3, non_blocking: bool = False):
+        self.w1[slot].copy_(w1.view(torch.uint8), non_blocking=non_blocking)
+        self.s1[slot].copy_(s1.view(torch.uint8), non_blocking=non_blocking)
+        self.w2[slot].copy_(w2.view(torch.uint8), non_blocking=non_blocking)
+        self.s2[slot].copy_(s2.view(torch.uint8), non_blocking=non_blocking)
+        self.w3[slot].copy_(w3.view(torch.uint8), non_blocking=non_blocking)
+        self.s3[slot].copy_(s3.view(torch.uint8), non_blocking=non_blocking)
 
 
 def moe_forward(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, arena: ExpertArena,

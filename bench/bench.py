@@ -135,7 +135,7 @@ ALL_WORKLOADS = ["random"] + sorted(WORKLOADS)
 HEADLINE_STATS = ["accept_len_mean", "expert_hit_rate", "nvme_gb", "engram_rows"]
 
 
-def run_once(base, model, prompt, osl, api_key, thinking, effort, temperature, seed=None):
+def run_once(base, model, prompt, osl, api_key, thinking, effort, temperature, seed=None, ignore_eos=False):
     """One streamed chat completion. Returns timings + the engine's own stats."""
     body = {
         "model": model,
@@ -150,6 +150,10 @@ def run_once(base, model, prompt, osl, api_key, thinking, effort, temperature, s
         # sent separately so it sets the budget without flipping thinking back on.
         "chat_template_kwargs": {"thinking": bool(thinking)},
     }
+    if ignore_eos:
+        # Fixed output length: without it a "512-token" run really ends wherever the model
+        # decided to stop, and two configs are then compared on two different amounts of work.
+        body["ignore_eos"] = True
     if effort is not None:
         body["reasoning_effort"] = effort
     if seed is not None:
@@ -262,6 +266,9 @@ def main():
     ap.add_argument("--thinking", action="store_true", help="ask for thinking mode (default: server default, off)")
     ap.add_argument("--effort", type=int, default=None, help="reasoning effort 1-100 (only meaningful with --thinking)")
     ap.add_argument("--temperature", type=float, default=0.6)
+    ap.add_argument("--ignore-eos", action="store_true",
+                    help="generate exactly --osl tokens (server body field ignore_eos); use it for "
+                         "any run whose tok/s is compared with another run's")
     ap.add_argument("--seed", type=int, default=None, help="sampling seed passed to the server")
     ap.add_argument("--seed-salt", default=None,
                     help="Fixes the prompt seed. Runs that share a salt get IDENTICAL prompts, "
@@ -312,7 +319,8 @@ def main():
             # from run N-1's blocks, which would fake a near-zero TTFT.
             prompt = f"[req {seed}] " + WORKLOADS[a.workload]
             n = token_len(a.base, prompt, a.model, a.api_key, a.thinking)
-        r = run_once(a.base, a.model, prompt, a.osl, a.api_key, a.thinking, a.effort, a.temperature, a.seed)
+        r = run_once(a.base, a.model, prompt, a.osl, a.api_key, a.thinking, a.effort, a.temperature, a.seed,
+                     ignore_eos=a.ignore_eos)
         r["prompt_tokens_actual"] = n
         measured = i >= a.warmup
         tag = "warmup" if not measured else f"run{i - a.warmup + 1}"
@@ -346,6 +354,7 @@ def main():
         "isl": a.isl if a.workload == "random" else None, "osl": a.osl,
         "runs": a.runs, "warmup": a.warmup,
         "thinking": a.thinking, "effort": a.effort, "temperature": a.temperature,
+        "ignore_eos": a.ignore_eos,
         "base": a.base, "model": a.model, "health": health,
         "ttft_ms_median": med("ttft_ms"),
         "tpot_ms_median": med("tpot_ms"),

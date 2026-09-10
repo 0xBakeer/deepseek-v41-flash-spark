@@ -1,109 +1,296 @@
-# deepseek-v41-flash-spark
+# DeepSeek-V4.1-Flash on a single NVIDIA DGX Spark
 
-DeepSeek-V4.1-Flash on a single NVIDIA DGX Spark class box (GB10, 128 GB unified memory). Work in
-progress; the status of each phase is in NOTES.md and what does not work is in LIMITATIONS.md.
+> **Status: WORK IN PROGRESS.** It serves, it is correct, and it is slow. One benchmark row
+> exists, the container image has never been run, and nothing here has been repeated on a
+> second day. Read [LIMITATIONS.md](LIMITATIONS.md) before you quote anything from it.
 
-**Status (2026-09-10): Phase 0 done, no serving recipe yet.** The model is 510 GB on disk
-(288.8 GB of FP4 routed experts, 203 GB of Engram n-gram tables, ~19 GB of everything else). The
-question this repo answers is whether one box can serve it without dropping below Q4-class expert
-quality, and if so how fast.
+Serve **DeepSeek-V4.1-Flash** — 510 GB on disk, 15,360 routed FP4 experts, Engram n-gram
+memory, CSA2/CED sparse attention, a DSpark drafter — on **one** GB10 box (sm_121a, 128 GB
+unified memory, ~121 GiB visible), at **full FP4 expert quality**, from a plain-PyTorch engine
+with one Triton kernel.
 
-## What is here
+The point of this recipe is the one thing no published source does:
 
-| path | what |
-|---|---|
-| `NOTES.md` | running log: checkpoint layout, architecture facts that matter for serving (Engram lookup path, router, mHC, CED/CSA2 attention, DSpark), the public landscape, size arithmetic, measured trace results |
-| `LIMITATIONS.md` | what is not done and why, with exact reasons |
-| `tools/v41_ref.py` | pure-PyTorch port of the V4.1 text forward pass, exact for sequences <= 512 tokens, no tilelang needed |
-| `tools/expert_trace.py` | layer-streaming router trace: runs a corpus through one 7.4 GB layer shard at a time, records the top-6 experts per token per layer, resumable as shards arrive |
-| `tools/engram_rows.py` | fetches only the Engram rows a corpus needs (multipart HTTP range requests against the 101 GB shards; nothing else is downloaded) |
-| `tools/make_corpus.py` | builds the teacher-forced trace corpus in the V4.1 chat format |
-| `tools/expert_stats.py` | coverage curves, LRU hit-rate simulation per token and per DSpark block, memory projection |
-| `results/trace-partial/` | layers 0-3 routing trace over 10,760 tokens + coverage tables/plots |
-| `corpus/` | the trace corpus and its (public, MIT) sources |
-| `engine/` | the serving engine: `v41_engine.py` (generation loop, MTP spec decode, expert arena + NVMe store), `model.py`, `experts.py`, `engram.py` |
-| `server/` | OpenAI-compatible HTTP front end (`app.py`), standard library only; `server/README.md` documents the API and the thinking/effort mapping |
-| `start.sh` / `stop.sh` / `env.example` | launcher for `server/app.py --engine v41`: memory and port guards, nohup + pidfile, health wait |
-| `bench/` | `bench.py` + `bench/README.md`: TTFT/TPOT/decode tok/s plus the engine's expert-hit-rate and NVMe stats |
+> **Keep a measured hot set of FP4 experts resident and stream every miss off NVMe with
+> `O_DIRECT`, so the quality is the checkpoint's and only the speed pays.**
 
-## Phase 0 headline
+Every other single-box approach to this model shrinks the weights until they fit. This one
+does not shrink anything. What runs:
 
-Measured on this box, layers 0-3 of 40, 10,760 tokens (coding + general):
+- **one GB10 / DGX Spark class box** — no tensor parallelism, no second machine;
+- **full FP4 expert quality** — the checkpoint's own e2m1 experts, never requantised, never
+  pruned;
+- **a resident hot set + NVMe streaming** — a 73.8 GB arena holds 25.6 % of the routed
+  experts, ranked by a measured 40-layer routing trace; the other 74.4 % are read from the
+  shards on demand;
+- **DSpark speculative decoding** — the checkpoint's own drafter, lossless (the target
+  verifies every drafted token), worth 1.5x here;
+- **an OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`,
+  streaming, tools, thinking/effort;
+- **Open WebUI-ready** — reasoning streams as `reasoning_content` and renders in the
+  collapsible pane with no configuration.
 
-| layer | experts used / 384 | top-25% of experts cover | top-30% cover | top-50% cover |
-|---|---|---|---|---|
-| 0 | 381 | 59.4% | 65.4% | 84.2% |
-| 1 | 380 | 61.4% | 67.2% | 84.6% |
-| 2 | 370 | 69.4% | 75.2% | 90.2% |
-| 3 | 374 | 76.1% | 80.8% | 93.0% |
+## The numbers
 
-30% is roughly the share of experts that fits in memory next to everything else. Coverage rises
-with depth; the decoder layers (20-39) have not been traced yet.
+**Measured 2026-09-10**, one GB10 box (128 GB unified / 121 GiB visible, 1 local NVMe,
+Ubuntu 24.04 / DGX OS, driver 580.173.02, CUDA 13) with the unified pool to itself. Exact
+config: `MAX_SEQ=32768`, `SPEC=1`, thinking **off**, arena auto-sized to **73.8 GB = 3,926
+slots = 25.6 % of the 15,360 routed experts**, warm start ranked by
+`results/trace-full-20260910/stats/coverage.json`, kernel `triton-fp4`, activation quant off,
+`bench/bench.py --workload code --runs 2 --osl 512 --ignore-eos` (temperature 0.6, top_p 0.95,
+every run exactly 512 completion tokens).
 
-Size arithmetic that needs no trace: keeping every expert resident would require ~1.3 bits per
-weight on average, so an all-resident recipe cannot meet the quality floor. The only quality-preserving
-single-box design is a resident hot set at FP4 plus NVMe streaming for the rest (NOTES.md 0.8).
+| | measured | where |
+|---|---|---|
+| load, process start to `/health` | **~90 s** (63 s non-expert weights + 14 s warm start, 66.3 GB at 4.7 GB/s) | [RESULTS.md §1](RESULTS.md) |
+| TTFT, short prompts | **~7–11 s** (6.8 s on a 6-token prompt, 11.05 s median on the 62-token `code` prompt) | [§4](RESULTS.md) |
+| decode | **2.64–2.71 tok/s**, median **2.68** (1.75 with DSpark off) | [§3, §4](RESULTS.md) |
+| DSpark acceptance length | **~3.0** (3.03 median; 3.71 greedy on a 16-token prompt) | [§3, §4](RESULTS.md) |
+| expert hit rate | **~0.83** (0.771–0.834 across runs) | [§3, §4](RESULTS.md) |
+| NVMe read per generated token | **~0.9 GB** (0.92 GB) | [§4](RESULTS.md) |
+| correctness vs the pure-torch reference port | NLL **+0.006 / +0.026 nats**, top-1 slightly *better* | [§2](RESULTS.md) |
+| greedy speculative vs greedy autoregressive | **64 of 64 tokens identical**, first divergence `None` | [§3](RESULTS.md) |
 
-## Reproduce
+That is 15–30x slower than the same model on four DGX Sparks with every expert resident, and
+the reason is not a mystery: at a 25.6 % resident set the engine streams 0.92 GB of expert
+weights per generated token, and the NVMe delivers ~2.5 GB/s at the read sizes a decode step
+produces. Attention, the Engram lookups and the Triton MoE kernel together are **under 8 % of
+decode time**. Everything else is the SSD.
 
-### Serve it
+## Benchmarks: work in progress
 
-The engine is under construction (LIMITATIONS.md says exactly how far it is);
-the launcher around it is not, and it is the same shape as the ling3 recipe's.
-There is no container and no venv of its own: `PYTHON` points at an interpreter
-that already has torch (CUDA 13 / sm_121), transformers and safetensors.
+There is **one** workload row. `prose`, both one-shot generations and every thinking-on run
+were stopped before they produced a number, so this repo contains **no measured evidence of a
+long (thousands of tokens) generation and no thinking-mode figure at all**, `results/oneshots/`
+is empty, and long context (8k+ prompts) has never been attempted at serving time. The table
+above is what exists; [RESULTS.md](RESULTS.md) lists every planned row that does not.
+
+Do not quote the early bring-up figures in [NOTES.md](NOTES.md) either — they were taken on a
+20 GB debug arena (6.9 % of the routed experts) and are a measurement of that arena, not of
+this recipe.
+
+Take your own rows against a running server:
 
 ```bash
-cp env.example .env      # then edit MODEL_DIR / PYTHON / PORT
-./start.sh               # nohup server/app.py --engine v41, logs/server.log, waits for /health
-./start.sh --no-wait     # start and return; tail logs/server.log yourself
-./stop.sh                # SIGTERM -> SIGKILL -> wait for the memory to come back
+python3 bench/bench.py --workload code  --runs 2 --osl 512 --ignore-eos --out results/code.json
+python3 bench/bench.py --workload prose --runs 2 --osl 512 --ignore-eos --out results/prose.json
 ```
 
-`start.sh` refuses to start if the port is taken or if less than 90 GiB is
-available (`MIN_FREE_GIB`), naming the processes that hold the pool — on this
-box that is normally the Qwen vLLM container, so `docker stop vllm-fn-tp1`
-first. The health wait is 20 minutes on purpose: the warm start reads ~80 GB
-from NVMe to fill the resident FP4 expert arena before the socket is even bound,
-ranked by `results/trace-*/stats/coverage.json`.
+Every row carries the engine's own `x_engine_stats` — expert hit rate, NVMe GB, Engram rows,
+acceptance length, the attention/MoE split — because on a recipe that streams most of its
+weights, **a tok/s number without the hit rate and the GB that produced it is an anecdote**.
+The four rules the harness refuses to break are in [`bench/README.md`](bench/README.md).
+
+## Why it is built this way
+
+The routed experts are 15,360 × 3 × 2304 × 5120 = 543.6 B weights, which at FP4 + UE8M0/32 is
+**288.8 GB**. After ~18.5 GB of non-expert weights and a few GB of KV, one 121 GiB box has
+**~85–90 GB left for experts** — an average of **~1.3 bits per weight** if everything must be
+resident. Nothing meets a Q4-class quality floor at 1.3 bpw: even with every cold expert at
+2.0 bpw only ~9 % could stay at FP4, and the whole set at 2.0 bpw is still 136 GB. So an
+all-resident scheme is arithmetically dead, and the only quality-preserving single-box design
+left is a resident hot set at native FP4 plus NVMe streaming for the rest.
+
+Whether that works is decided by the routing coverage curve, so it was measured rather than
+assumed — the full 40-layer histogram over 10,760 teacher-forced tokens
+(`results/trace-full-20260910/`, built by `tools/expert_trace.py` one 7.4 GB layer shard at a
+time):
+
+| resident experts | GB (FP4) | static coverage | LRU hit / token | LRU hit / 6-token block |
+|---|---|---|---|---|
+| 3000 | 56.4 | 0.670 | 0.805 | 0.681 |
+| **4000** | **75.2** | **0.748** | **0.855** | **0.764** |
+| 5000 | 94.0 | 0.810 | 0.891 | 0.822 |
+| 6000 | 112.8 | 0.859 | 0.917 | 0.865 |
+
+The served config sits at 3,926 slots and the hit rate the engine actually reports is 0.830 —
+close to the 4,000-slot per-token prediction, which is the one place where a design number and
+a serving number can be checked against each other. The full arithmetic, the per-layer
+skew, the category-specific hot sets (coding and general top-25 % sets overlap by a Jaccard of
+only 0.18–0.31) and the whole design log are in [NOTES.md](NOTES.md) §0.6–0.8 and §B.
+
+## Two ways to run it
+
+Both are the same server and both read the same `./.env` (copy [`env.example`](env.example)).
+[`docs/install.md`](docs/install.md) compares them and lists the host prerequisites — GB10 /
+`sm_121a`, a CUDA 13 driver, ≥ 600 GB free on **local NVMe**, and the box essentially to
+itself.
+
+### Native — a venv on the box (this is the path every number above came from)
 
 ```bash
-curl -s localhost:8000/health
+python3.12 -m venv .venv && . .venv/bin/activate
+pip install torch==2.13.0+cu130 --index-url https://download.pytorch.org/whl/cu130
+pip install "transformers>=4.57" "tokenizers>=0.21" "safetensors>=0.5" numpy sympy huggingface_hub
+
+cp env.example .env                  # set MODEL_DIR and PYTHON
+MODEL_DIR=./models/DeepSeek-V4.1-Flash ./scripts/download-model.sh    # 510 GB, resumable
+./start.sh                           # nohup server/app.py --engine v41; waits for /health
+./start.sh --no-wait                 # start and return; tail logs/server.log yourself
+./stop.sh                            # SIGTERM -> SIGKILL -> wait for the memory to come back
+```
+
+`triton` arrives as a dependency of `torch` from the cu130 index and must not be replaced with
+a PyPI build — the FP4 MoE kernel is JIT-compiled against whichever Triton is installed.
+
+`start.sh` refuses to start if the port is taken or if less than `MIN_FREE_GIB` (90) is
+available, and names the processes and containers holding the pool. The health wait is 20
+minutes on purpose: the warm start fills the resident FP4 expert arena from NVMe *before* the
+socket is bound, ranked by the newest `results/trace-*/stats/coverage.json` it can find. A
+server that is not answering at minute 5 is normal.
+
+### Container — compose or `run.sh`
+
+```bash
+cp env.example .env
+./run.sh setup     # pull ghcr.io/<owner>/deepseek-v41-flash-spark:<version>, then download the weights
+./run.sh serve     # detached; waits for /health
+./run.sh logs
+./run.sh stop
+```
+
+> **The image is untested.** `Dockerfile`, `compose.yaml`, `run.sh` and
+> `scripts/entrypoint.sh` are written and `docker compose config` resolves, but **no image has
+> been built or run yet** — the first build is the arm64 GitHub Actions job
+> ([`.github/workflows/image.yml`](.github/workflows/image.yml)) on a `v*` tag, and nothing has
+> served a request from a container. Until that lands, use the native path. `BUILD=1 ./run.sh
+> setup` builds it on the box instead of pulling.
+
+The image is arm64 only — the wheels are aarch64 and the box is a GB10, so there is no manifest
+list. `compose.yaml` publishes the API on `127.0.0.1` only, mounts the checkpoint at `/models`
+and `./results` at `/app/results`, and sets the three flags that are not optional (`--gpus
+all`, `--ipc=host`, `--ulimit memlock=-1`). **Do not set `--memory`**: on unified memory that
+caps GPU allocations too and the arena auto-sizer will quietly shrink to fit it.
+
+### Check it is alive
+
+```bash
+curl -s localhost:8000/health | python3 -m json.tool
 curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":64}'
 ```
 
-### Benchmark it
+`GET /health` carries `engine_config` — arena GB and slots, resident-expert %, `max_seq`, spec
+on/off, trace stats, kernel — and every completion carries `x_engine_stats` with the same
+fields plus that request's acceptance length, hit rate, NVMe GB and Engram rows. A benchmark
+never has to be *told* how the server was started.
 
-```bash
-python3 bench/bench.py --workload prose  --runs 3 --out results/prose.json
-python3 bench/bench.py --workload code   --runs 3 --out results/code.json
-python3 bench/bench.py --workload random --isl 8192 --osl 1024 --out results/random8k.json
-python3 bench/bench.py --workload angry-birds --label hot --out results/angry-birds.json
-python3 bench/bench.py --workload mario       --label hot --out results/mario.json
+## Open WebUI (or any OpenAI client)
+
+| setting | value |
+|---|---|
+| Base URL | `http://<host>:8000/v1` |
+| API key | anything non-empty; it is not checked |
+| Model | `deepseek-v4.1-flash` (whatever `SERVED_MODEL_NAME` says) |
+| Streaming | on |
+
+In Open WebUI: **Settings → Connections → add an OpenAI-compatible connection** with that base
+URL. The model appears by its served id.
+
+**Reasoning** is streamed as `reasoning_content` (text before `</think>`; the marker itself is
+never emitted), which is the DeepSeek/OpenAI convention Open WebUI, LibreChat and the `openai`
+Python SDK already understand — the thinking shows up in the collapsible pane with no
+configuration.
+
+**Thinking is OFF by default** (`DEFAULT_THINKING=off`). V4.1's template is not a binary
+switch: thinking is on or off *and* there is an effort budget 1–100 rendered as a `Reasoning
+Effort: N` system prefix. To turn it on for one request, any of these work — first match wins:
+
+```jsonc
+{"chat_template_kwargs": {"thinking": true}}   // unambiguous; what bench/bench.py sends
+{"enable_thinking": true}                      // vLLM/SGLang convention
+{"reasoning_effort": "high"}                   // OpenAI convention -> thinking on, effort 75
 ```
 
-TTFT, TPOT and decode tok/s (from `usage.completion_tokens`, never chunk
-counts), plus the acceptance length, expert hit rate, NVMe GB and engram rows
-the server reports in `x_engine_stats` — on a recipe that streams most of its
-weights, a speed number without those is an anecdote. The two one-shot
-workloads use the trace corpus's own prompts verbatim and drop a playable file
-in `results/oneshots/`. Details in `bench/README.md`.
+`reasoning_effort` maps `none`→off, `low`→off/50, `medium`→on/60, `high`→on/75, `xhigh`→on/90,
+`max`→on/100, and a bare integer 1–100 → on at that integer. Open WebUI's own *Reasoning
+Effort* control sends the top-level field, so setting it to `medium` or higher turns thinking
+on by itself. Change the default for every request with `DEFAULT_THINKING=on` /
+`DEFAULT_EFFORT=90` in `.env`.
 
-### The routing trace
+Two expectations to set before anyone else points a client at it:
+
+* **The first token can take minutes on a cold prompt.** Prefill misses almost every expert and
+  each miss is an 18.8 MB NVMe read. Raise the client-side request timeout to tens of minutes.
+* **One request at a time.** The engine is single-sequence; a second caller does not get an
+  error, they get a wait. There is no authentication and the port is loopback-only — put a
+  reverse proxy in front of it before it leaves the box.
+
+Full API reference: [`docs/openai-api.md`](docs/openai-api.md) (operator's view) and
+[`server/README.md`](server/README.md) (every flag and field).
+
+## Reproduce the checks and the trace
+
+Neither needs a server; both need the checkpoint and an interpreter with torch.
 
 ```bash
-# on the box, with a venv that has torch (CUDA), transformers, safetensors, numpy, sympy
-python3 tools/make_corpus.py --tokenizer ~/models/DeepSeek-V4.1-Flash --code ... --prose ... --out corpus/trace_corpus.jsonl
-python3 tools/engram_rows.py --model-dir ~/models/DeepSeek-V4.1-Flash --corpus corpus/trace_corpus.jsonl --out engram_rows
-python3 tools/expert_trace.py --model-dir ~/models/DeepSeek-V4.1-Flash --corpus corpus/trace_corpus.jsonl \
-    --engram-dir engram_rows --out results/trace-YYYYMMDD --layers 0-39 --resume
-python3 tools/expert_stats.py --trace results/trace-YYYYMMDD --out results/trace-YYYYMMDD/stats
+# the engine's math against the pure-PyTorch reference port (RESULTS.md §2)
+python3 engine/v41_engine.py --model-dir ./models/DeepSeek-V4.1-Flash --act-quant \
+    --teacher-forced corpus/trace_corpus.jsonl --tf-out results/tf.json
+
+# DSpark on/off/sampled from one load, and where the two greedy runs diverge (RESULTS.md §3)
+python3 engine/v41_engine.py --model-dir ./models/DeepSeek-V4.1-Flash --spec-ab \
+    --max-tokens 64 --temperature 1.0 --ab-out results/spec_ab.json
+
+# the HTTP layer, against the mock engine -- no GPU, no weights, tokenizer metadata is enough
+python3 server/test_server.py
 ```
 
-`--model-dir` needs the layer shards you want to trace (`model-0000{3..42}-of-00048.safetensors`),
-`model-00002` (embed), the `inference/` folder and the tokenizer. The engram shards are not needed.
+The routing trace that ranks the warm start, one 7.4 GB layer shard at a time (resumable, so
+it can run while the rest of the checkpoint is still downloading):
+
+```bash
+python3 tools/make_corpus.py   --tokenizer ./models/DeepSeek-V4.1-Flash --code ... --prose ... \
+    --out corpus/trace_corpus.jsonl
+python3 tools/engram_rows.py   --model-dir ./models/DeepSeek-V4.1-Flash \
+    --corpus corpus/trace_corpus.jsonl --out engram_rows
+python3 tools/expert_trace.py  --model-dir ./models/DeepSeek-V4.1-Flash \
+    --corpus corpus/trace_corpus.jsonl --engram-dir engram_rows \
+    --out results/trace-YYYYMMDD --layers 0-39 --resume
+python3 tools/expert_stats.py  --trace results/trace-YYYYMMDD --out results/trace-YYYYMMDD/stats
+```
+
+Tracing needs the layer shards (`model-0000{3..42}-of-00048.safetensors`), `model-00002`
+(embed), the checkpoint's `inference/` folder and the tokenizer — but **not** the two 101 GB
+Engram shards: `tools/engram_rows.py` pulls only the rows the corpus touches over multipart
+HTTP range requests. Serving needs all of it.
+
+## Layout
+
+```
+start.sh / stop.sh    native launcher: memory and port guards, nohup + pidfile, health wait
+run.sh                container dispatcher: setup | serve | logs | stop | shell | bench | config
+compose.yaml          loopback-only service, /models bind mount, unified-memory ulimits
+Dockerfile            arm64 CUDA-13 devel base, torch cu130 + triton; weights mounted, never baked
+scripts/              entrypoint.sh (the container's start.sh) · download-model.sh (510 GB, resumable)
+env.example           every knob, for both paths
+engine/               the serving engine: v41_engine.py (generation loop, DSpark, arena + NVMe
+                      store) · model.py · experts.py · engram.py
+server/               OpenAI-compatible front end (app.py), standard library only + 15 e2e tests
+tools/                v41_ref.py (pure-torch reference port) · expert_trace.py · expert_stats.py
+                      · engram_rows.py · make_corpus.py · fp4_moe.py (the Triton FP4 MoE kernel)
+bench/                bench.py + the rules it refuses to break
+corpus/               the teacher-forced trace corpus and its (public, MIT) sources
+results/              measured rows; results/*/stats/coverage.json ranks the warm start
+docs/                 install · architecture · openai-api · benchmarking · gotchas
+```
+
+## Documentation
+
+| | |
+|---|---|
+| [`docs/install.md`](docs/install.md) | host prerequisites, the checkpoint, both run paths, first start |
+| [`docs/architecture.md`](docs/architecture.md) | how the engine is put together |
+| [`docs/openai-api.md`](docs/openai-api.md) | endpoints, thinking/effort, streaming, Open WebUI |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | how to take a row that means something |
+| [`docs/gotchas.md`](docs/gotchas.md) | the sharp edges, found the hard way |
+| [`RESULTS.md`](RESULTS.md) | every measured number with the config that produced it, and every one that was not taken |
+| [`NOTES.md`](NOTES.md) | the design log: checkpoint layout, architecture facts, the landscape, the size arithmetic, the trace, the bring-up and every bug found |
+| [`LIMITATIONS.md`](LIMITATIONS.md) | what does not work, and why |
+| [`CHANGELOG.md`](CHANGELOG.md) | a version is a measurement epoch |
+| [`CREDITS.md`](CREDITS.md) | whose work this is a thin layer over |
 
 ## License
 
-MIT (this repo). DeepSeek-V4.1-Flash weights and reference code are MIT (deepseek-ai).
+MIT (this repo). DeepSeek-V4.1-Flash weights and reference code are MIT (deepseek-ai) — read
+the model licence before deploying commercially.
