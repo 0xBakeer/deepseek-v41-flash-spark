@@ -21,6 +21,10 @@ quality, and if so how fast.
 | `tools/expert_stats.py` | coverage curves, LRU hit-rate simulation per token and per DSpark block, memory projection |
 | `results/trace-partial/` | layers 0-3 routing trace over 10,760 tokens + coverage tables/plots |
 | `corpus/` | the trace corpus and its (public, MIT) sources |
+| `engine/` | the serving engine: `v41_engine.py` (generation loop, MTP spec decode, expert arena + NVMe store), `model.py`, `experts.py`, `engram.py` |
+| `server/` | OpenAI-compatible HTTP front end (`app.py`), standard library only; `server/README.md` documents the API and the thinking/effort mapping |
+| `start.sh` / `stop.sh` / `env.example` | launcher for `server/app.py --engine v41`: memory and port guards, nohup + pidfile, health wait |
+| `bench/` | `bench.py` + `bench/README.md`: TTFT/TPOT/decode tok/s plus the engine's expert-hit-rate and NVMe stats |
 
 ## Phase 0 headline
 
@@ -40,7 +44,53 @@ Size arithmetic that needs no trace: keeping every expert resident would require
 weight on average, so an all-resident recipe cannot meet the quality floor. The only quality-preserving
 single-box design is a resident hot set at FP4 plus NVMe streaming for the rest (NOTES.md 0.8).
 
-## Reproduce the trace
+## Reproduce
+
+### Serve it
+
+The engine is under construction (LIMITATIONS.md says exactly how far it is);
+the launcher around it is not, and it is the same shape as the ling3 recipe's.
+There is no container and no venv of its own: `PYTHON` points at an interpreter
+that already has torch (CUDA 13 / sm_121), transformers and safetensors.
+
+```bash
+cp env.example .env      # then edit MODEL_DIR / PYTHON / PORT
+./start.sh               # nohup server/app.py --engine v41, logs/server.log, waits for /health
+./start.sh --no-wait     # start and return; tail logs/server.log yourself
+./stop.sh                # SIGTERM -> SIGKILL -> wait for the memory to come back
+```
+
+`start.sh` refuses to start if the port is taken or if less than 90 GiB is
+available (`MIN_FREE_GIB`), naming the processes that hold the pool — on this
+box that is normally the Qwen vLLM container, so `docker stop vllm-fn-tp1`
+first. The health wait is 20 minutes on purpose: the warm start reads ~80 GB
+from NVMe to fill the resident FP4 expert arena before the socket is even bound,
+ranked by `results/trace-*/stats/coverage.json`.
+
+```bash
+curl -s localhost:8000/health
+curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":64}'
+```
+
+### Benchmark it
+
+```bash
+python3 bench/bench.py --workload prose  --runs 3 --out results/prose.json
+python3 bench/bench.py --workload code   --runs 3 --out results/code.json
+python3 bench/bench.py --workload random --isl 8192 --osl 1024 --out results/random8k.json
+python3 bench/bench.py --workload angry-birds --label hot --out results/angry-birds.json
+python3 bench/bench.py --workload mario       --label hot --out results/mario.json
+```
+
+TTFT, TPOT and decode tok/s (from `usage.completion_tokens`, never chunk
+counts), plus the acceptance length, expert hit rate, NVMe GB and engram rows
+the server reports in `x_engine_stats` — on a recipe that streams most of its
+weights, a speed number without those is an anecdote. The two one-shot
+workloads use the trace corpus's own prompts verbatim and drop a playable file
+in `results/oneshots/`. Details in `bench/README.md`.
+
+### The routing trace
 
 ```bash
 # on the box, with a venv that has torch (CUDA), transformers, safetensors, numpy, sympy

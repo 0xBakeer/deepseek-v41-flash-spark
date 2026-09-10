@@ -4,3 +4,11 @@ engram_rows/
 results/*/state/
 logs/
 .venv/
+.env
+
+# Bench artefacts are results, not noise: results/oneshots/*.html is the game a
+# reader is supposed to open, and results/*.json is the row it came with. These
+# negations are here so that "ignore the generated stuff" never grows to eat them.
+!results/oneshots/
+!results/oneshots/*.html
+!results/oneshots/*.txt

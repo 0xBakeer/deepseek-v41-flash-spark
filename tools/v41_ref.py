@@ -168,6 +168,12 @@ class Args:
     beta_fast: int = 32
     beta_slow: int = 1
     index_topk: int = 512
+    index_n_heads: int = 32
+    index_head_dim: int = 128
+    candidate_source_layer: int = 20
+    dspark_target_layer_ids: tuple = (37, 38, 39)
+    dspark_block_size: int = 5
+    dspark_noise_token_id: int = 128799
     candidate_topk_blocks: int = 2048
     candidate_block_size: int = 8
     compress_rope_theta: float = 160000.0
@@ -184,7 +190,7 @@ class Args:
     def from_json(cls, path: str) -> "Args":
         cfg = json.load(open(path))
         keep = {k: v for k, v in cfg.items() if k in cls.__dataclass_fields__}
-        for k in ("kv_source_layers", "index_source_layers", "compress_ratios", "engram_layer_ids"):
+        for k in ("kv_source_layers", "index_source_layers", "compress_ratios", "engram_layer_ids", "dspark_target_layer_ids"):
             if k in keep:
                 keep[k] = tuple(keep[k])
         return cls(**keep)
@@ -250,16 +256,69 @@ class EngramWeights:
 
 
 # ----------------------------------------------------------------------------- ops
+MM_TILE = 0  # 0 = plain GEMMs. >0 = run every activation GEMM in fixed-size row tiles; see mm().
+
+
+def mm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """F.linear(x, w), but with a result that does not depend on how many rows are in the call.
+
+    cuBLAS picks its tile shape AND its split-K count from M, so F.linear(x[:m], w) is generally
+    NOT the first m rows of F.linear(x, w) -- for the small-N projections here (wkv N=512, the
+    router gate N=384, hc_fn N=24) the two differ by ~1e-4 relative, which is enough to round a
+    bf16 activation to a different ulp and to flip a borderline router top-k. A GEMM row never
+    depends on the other rows in the call, so issuing every call with exactly MM_TILE rows makes
+    the result identical for any chunk length. Set MM_TILE from engine/model.py; 0 keeps the
+    plain behaviour for tools/expert_trace.py and the stored reference trace.
+    """
+    B = MM_TILE
+    if B <= 0 or x.ndim != 2 or x.size(0) == B:
+        return F.linear(x, w)
+    m = x.size(0)
+    n = (m + B - 1) // B * B
+    if n != m:
+        x = torch.cat([x, x.new_zeros(n - m, x.size(1))])
+    out = torch.empty(n, w.size(0), dtype=torch.promote_types(x.dtype, w.dtype), device=x.device)
+    for i in range(0, n, B):
+        out[i:i + B] = F.linear(x[i:i + B], w)
+    return out[:m]
+
+
+def tiled_rows(fn, *xs: torch.Tensor):
+    """Apply `fn` to its argument(s) in fixed-size row tiles when MM_TILE > 0 (see mm()).
+
+    Torch picks the block/vector configuration of a last-dim reduction from the number of rows, so
+    x.square().mean(-1) is not row-count-invariant either (it differs for M <= ~14 against a large
+    M). Same cure as for the GEMMs: always work on exactly MM_TILE rows at a time. `fn` may return
+    a tensor or a tuple of tensors; the tail rows of the last tile are zero padding and dropped.
+    """
+    B = MM_TILE
+    m = xs[0].size(0)
+    if B <= 0 or m == B:
+        return fn(*xs)
+    n = (m + B - 1) // B * B
+    if n != m:
+        xs = tuple(torch.cat([x, x.new_zeros(n - m, *x.shape[1:])]) for x in xs)
+    outs = [fn(*[x[i:i + B] for x in xs]) for i in range(0, n, B)]
+    if isinstance(outs[0], tuple):
+        return tuple(torch.cat([o[k] for o in outs])[:m] for k in range(len(outs[0])))
+    return torch.cat(outs)[:m]
+
+
+def rms_rsqrt(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """rsqrt(mean(x^2, -1, keepdim=True) + eps), row-count-invariant."""
+    return tiled_rows(lambda t: torch.rsqrt(t.square().mean(-1, keepdim=True) + eps), x)
+
+
 def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     dtype = x.dtype
     xf = x.float()
-    xf = xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + eps)
+    xf = xf * rms_rsqrt(xf, eps)
     return (w.float() * xf).to(dtype)
 
 
 def qlinear(x: torch.Tensor, w_bf16: torch.Tensor) -> torch.Tensor:
     """Quantized-weight linear: fake-quantize the activation to fp8 (as the kernels do), bf16 GEMM."""
-    return F.linear(act_qdq_fp8(x), w_bf16)
+    return mm(act_qdq_fp8(x), w_bf16)
 
 
 def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc: int, iters: int, eps: float):
@@ -278,9 +337,10 @@ def hc_split_sinkhorn(mixes, hc_scale, hc_base, hc: int, iters: int, eps: float)
 def hc_mixes(x: torch.Tensor, hc_fn, hc_scale, hc_base, args: Args):
     """x: [s, hc, d] -> (pre [s,hc], post [s,hc], comb [s,hc,hc]); normalized over the flattened stream."""
     xf = x.flatten(1).float()
-    rsqrt = torch.rsqrt(xf.square().mean(-1, keepdim=True) + args.norm_eps)
-    mixes = F.linear(xf, hc_fn) * rsqrt
-    return hc_split_sinkhorn(mixes, hc_scale, hc_base, args.hc_mult, args.hc_sinkhorn_iters, args.hc_eps)
+    rsqrt = rms_rsqrt(xf, args.norm_eps)
+    mixes = mm(xf, hc_fn) * rsqrt
+    return tiled_rows(lambda t: hc_split_sinkhorn(t, hc_scale, hc_base, args.hc_mult,
+                                                  args.hc_sinkhorn_iters, args.hc_eps), mixes)
 
 
 def hc_pre(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -294,7 +354,7 @@ def hc_post(x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: t
 
 def router(x: torch.Tensor, w: LayerWeights, args: Args):
     """Gate.forward for text tokens: sqrt(softplus(scores)); bias only steers selection."""
-    scores = F.linear(x.float(), w.gate_w)
+    scores = mm(x.float(), w.gate_w)
     scores = F.softplus(scores).sqrt()
     indices = (scores + w.gate_bias).topk(args.n_activated_experts, dim=-1)[1]
     weights = scores.gather(1, indices)
@@ -413,10 +473,14 @@ def engram_forward(h: torch.Tensor, rows: torch.Tensor, ew: EngramWeights, args:
     key = key.float().view(T, args.hc_mult, args.dim)
     weight = ew.q_weight * ew.k_weight
     hf, eps = h.float(), args.norm_eps
-    rstd = torch.rsqrt(hf.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps)
-    dot = (hf * weight * key).sum(-1) * rstd * args.dim ** -0.5
-    gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
-    return (hf + gate.unsqueeze(-1) * value.float().unsqueeze(1)).to(h.dtype)
+
+    def _gate(hh, kk):
+        rstd = rms_rsqrt(hh, eps) * rms_rsqrt(kk, eps)
+        dot = (hh * weight * kk).sum(-1, keepdim=True) * rstd * args.dim ** -0.5
+        return torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+
+    gate = tiled_rows(_gate, hf, key)  # [T, hc, 1]
+    return (hf + gate * value.float().unsqueeze(1)).to(h.dtype)
 
 
 # ----------------------------------------------------------------------------- block

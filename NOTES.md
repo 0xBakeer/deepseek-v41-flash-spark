@@ -255,3 +255,49 @@ over all experts. Consequences:
 Next: the remaining 36 layer shards (266 GB) are needed for the full histogram; disk has 460 GB
 free, so the 307 GB engram-less checkpoint fits with ~155 GB to spare. Waiting for the go-ahead
 (the >50 GB rule).
+
+---
+
+## Phase 1/2 -- build log (2026-09-10, Khaled: "just make it work")
+
+Go-ahead received; the remaining 471 GB were downloaded (85 MB/s, ~95 min; Ling-3.0-flash weights
+and the ling3 docker image were deleted to make room, both re-downloadable). Work is split into
+Opus-5 agents with this thread orchestrating (Khaled's instruction, to stay under the Fable limit).
+
+### Full 40-layer routing histogram (measured 19:02, `results/trace-full-20260910/`)
+
+| resident experts | GB (FP4) | static coverage | LRU hit / token | LRU hit / 6-token block |
+|---|---|---|---|---|
+| 3000 | 56.4 | 0.670 | 0.805 | 0.681 |
+| 4000 | 75.2 | 0.748 | 0.855 | 0.764 |
+| **4500** | **84.6** | **0.780** | **0.875** | **0.796** |
+| 5000 | 94.0 | 0.810 | 0.891 | 0.822 |
+| 6000 | 112.8 | 0.859 | 0.917 | 0.865 |
+
+Per layer, the top-25% of experts cover 59-83% of slots (min layer 0, max layer 28); unique experts
+per 6-token block 18-28 of 36. The decoder layers are only mildly more skewed than the encoder.
+So at the ~4,500-expert budget a DSpark step misses ~20% of its ~1,000 (layer, expert) slots:
+~200 loads x 18.8 MB = ~3.8 GB per step, ~0.7 s at the measured 5.5 GB/s NVMe ceiling, i.e.
+**the streaming design lands around 4-6 tok/s on a general workload before any smarter placement**.
+Levers left: workload-specific hot sets (coding-only top sets cover noticeably more of coding),
+LRU adaptation during a session, and prefetching the next layer's likely experts.
+
+**Teacher-forced check of the pure-torch port, all 40 layers + head** (proves the tracer/engine
+math end to end): coding NLL 2.15 nats, top-1 63.8% (5,459 tokens); general NLL 3.41, top-1 47.4%
+(the "general" chunks are documents pasted into a user turn with no prior context, so they are
+inherently unpredictable). A broken port would sit near 10% top-1.
+
+### NVMe (measured, O_DIRECT, 18.8 MB objects, download running concurrently)
+1 in flight 4.08 GB/s (3.9 ms/read); 8 in flight 5.43 GB/s; 32 in flight 5.59 GB/s (91 ms/read).
+
+### Engine pieces
+* `tools/fp4_moe.py` -- Triton grouped MoE on packed FP4 + UE8M0 (hardware `cvt.rn.f16x2.e2m1x2`
+  decode, 64-byte-wide tiles; 16-byte tiles cap at ~130 GB/s on GB10). Decode-size calls: 193 GB/s
+  effective (T=1, 6 experts, 0.58 ms), 197 GB/s (T=6, 30 experts, 2.9 ms); rel. error 4.4e-3 vs the
+  dequant reference. Prefill (T=512) ~23 TFLOPs, compute-bound, unoptimized.
+* `engine/experts.py` -- arena + LRU + transient ring for prefill (must hold >= 384 slots: one
+  prefill layer touches ~370 experts; a 64-slot ring wrapped inside a layer and silently computed
+  with the wrong experts -- the 0.88 error in the first smoke test).
+* `engine/model.py` -- chunked-prefill/decode-block model with caches; single-chunk matches the
+  reference trace within 0.7-1.6%; chunk-boundary exactness being fixed (Opus agent).
+* `server/app.py` -- stdlib OpenAI-compatible server (14 e2e tests), `start.sh`/`stop.sh`/`bench/`.
