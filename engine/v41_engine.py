@@ -73,7 +73,7 @@ class V41Engine:
     def __init__(self, model_dir: str, max_seq: int = 32768, arena_gb: float | None = None, device: str = "cuda",
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
-                 hot_profile: str | None = None):
+                 hot_profile: str | None = None, prune_keep: float | None = None):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
@@ -145,8 +145,33 @@ class V41Engine:
         self.model.hash_state = make_hash_state(model_dir, self.tokenizer, max_seq, device)
         self.tables = {L: EngramTable(model_dir, index, L, device) for L in self.args.engram_layer_ids}
         self.model.engram_rows = lambda L, h: self.tables[L].rows(h)
-        ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
-                  else [(L, e) for e in range(384) for L in range(40)])
+        self.prune_keep = prune_keep
+        if prune_keep and prune_keep < 1.0:
+            # pruned, all-resident mode: per layer only the top-N experts (by trace frequency) stay
+            # routable, and exactly those are warm-started, so decode never touches NVMe
+            import math as _m
+            cc, cg = EX.category_counts(trace_stats, "coding"), EX.category_counts(trace_stats, "general")
+            assert len(cc) == 40 and len(cg) == 40, "pruned mode needs the per-layer trace npz files next to trace_stats"
+            n_keep = max(6, _m.ceil(prune_keep * 384))
+            masks, ranked = {}, []
+            for L in range(40):
+                c = cc[L] / cc[L].sum() + cg[L] / cg[L].sum()
+                keep = np.argsort(c)[::-1][:n_keep]
+                m = torch.zeros(384, dtype=torch.bool, device=device); m[torch.as_tensor(keep.copy(), device=device)] = True
+                masks[L] = m
+                ranked += [(float(c[e]), L, int(e)) for e in keep]
+            ranked.sort(reverse=True)
+            ranked = [(L, e) for _, L, e in ranked]
+            self.model_prune_mask = masks
+            if len(ranked) > self.store.lru_slots:
+                log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
+            log(f"pruned mode: keep {prune_keep:.2f} = {n_keep}/384 experts per layer, {len(ranked)} total, "
+                f"{len(ranked) * EX.EXPERT_BYTES / 1e9:.1f} GB")
+        else:
+            self.model_prune_mask = None
+            ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
+                      else [(L, e) for e in range(384) for L in range(40)])
+        self.model.prune_mask = self.model_prune_mask
         self.store.warm_start(ranked, log=log)
         torch.cuda.synchronize()
         self.last_stats = {}
@@ -485,6 +510,13 @@ if __name__ == "__main__":
     ap.add_argument("--teacher-forced", default=None,
                     help="corpus jsonl: run each sequence through Model.forward in one chunk and report NLL/top-1")
     ap.add_argument("--tf-out", default=None, help="write the teacher-forced result JSON here")
+    ap.add_argument("--prune-sweep", default=None,
+                    help="with --teacher-forced: comma list of keep fractions (e.g. 0.25,0.4,1.0); per layer only the "
+                         "top-N experts by trace frequency stay routable; writes --tf-out with one entry per fraction")
+    ap.add_argument("--prune-profile", default="mixed", choices=["mixed", "coding", "general"])
+    ap.add_argument("--prune-keep", type=float, default=None,
+                    help="serve a REAP-style pruned model: only the top-F experts per layer are routable and all of "
+                         "them are resident (F <= ~0.25 fits the arena on a 128 GB box)")
     ap.add_argument("--tf-ab", action="store_true",
                     help="with --teacher-forced: score the last window_size positions of every "
                          "sequence twice in one load -- full 40-layer prefill vs encoder + decoder "
@@ -496,11 +528,37 @@ if __name__ == "__main__":
     a = ap.parse_args()
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
-                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile)
+                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep)
     if a.verify_replay:
         short = "def fib(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
         res = eng.verify_replay([short, open(os.path.join(HERE, "..", "corpus", "sources", "dsv41_readme.md")).read()[:1400]])
         print(json.dumps(res, indent=1))
+        raise SystemExit(0)
+    if a.teacher_forced and a.prune_sweep:
+        import math as _m
+        if a.prune_profile == "mixed":
+            cc, cg = EX.category_counts(a.trace_stats, "coding"), EX.category_counts(a.trace_stats, "general")
+            counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in cc if L in cg}
+        else:
+            counts = EX.category_counts(a.trace_stats, a.prune_profile)
+        assert len(counts) == 40, f"trace npz files missing next to {a.trace_stats}: {len(counts)} layers"
+        out = {}
+        for frac in [float(x) for x in a.prune_sweep.split(",")]:
+            n_keep = max(6, _m.ceil(frac * 384))
+            masks = {}
+            for L, c in counts.items():
+                keep = np.argsort(np.asarray(c))[::-1][:n_keep]
+                m = torch.zeros(384, dtype=torch.bool, device=eng.device); m[torch.as_tensor(keep.copy(), device=eng.device)] = True
+                masks[int(L)] = m
+            eng.model.prune_mask = masks if frac < 1.0 else None
+            t0 = time.time()
+            res = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq))
+            res["keep_frac"] = frac; res["experts_per_layer"] = n_keep; res["resident_gb_fp4"] = round(n_keep * 40 * EX.EXPERT_BYTES / 1e9, 1)
+            res["seconds"] = round(time.time() - t0, 1)
+            out[str(frac)] = res
+            log(f"prune keep={frac} ({n_keep}/384 per layer, {res['resident_gb_fp4']} GB): {json.dumps({k: v for k, v in res.items() if k in ('coding', 'general')})}")
+            if a.tf_out:
+                json.dump(out, open(a.tf_out, "w"), indent=1)
         raise SystemExit(0)
     if a.teacher_forced:
         if a.tf_ab:

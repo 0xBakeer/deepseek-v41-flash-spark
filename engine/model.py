@@ -477,7 +477,12 @@ class Model:
         self._tap("moe_in", L, y)
         scores = F.softplus(R.mm(y.float(), w.gate_w)).sqrt()
         k = 3 if n_experts == 128 else a.n_activated_experts
-        indices = (scores + w.gate_bias).topk(k, dim=-1)[1]
+        logits = scores + w.gate_bias
+        pm = getattr(self, "prune_mask", None)
+        if pm is not None and n_experts != 128 and L in pm:
+            # expert pruning experiment: the router may only pick surviving experts (REAP-style drop)
+            logits = logits.masked_fill(~pm[L], float("-inf"))
+        indices = logits.topk(k, dim=-1)[1]
         weights = scores.gather(1, indices)
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
         self._tap("route_idx", L, indices); self._tap("route_w", L, weights)
