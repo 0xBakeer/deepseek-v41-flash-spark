@@ -173,6 +173,11 @@ class V41Engine:
                       else [(L, e) for e in range(384) for L in range(40)])
         self.model.prune_mask = self.model_prune_mask
         self.store.warm_start(ranked, log=log)
+        self.fast = None
+        if spec and os.environ.get("DSV41_FAST", "1") == "1":
+            from engine.fastdecode import FastDecoder
+            self.fast = FastDecoder(self.model, self, use_graphs=os.environ.get("DSV41_GRAPHS", "1") == "1")
+            log("fast decode path enabled (CUDA graphs=%s)" % (self.fast.use_graphs,))
         torch.cuda.synchronize()
         self.last_stats = {}
         log("ready")
@@ -289,9 +294,17 @@ class V41Engine:
         yield [tok]
         while n_out < max_tokens and tok not in stop_ids:
             if self.spec:
-                drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
-                block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # 6 tokens at pos..pos+5
-                logits, mh = m.forward(block, pos, prefill=False)
+                if self.fast is not None:
+                    drafts, q = self.fast.draft(tok, pos - 1, temperature)
+                    drafts = drafts.clone(); q = q.clone()
+                    block = torch.cat([torch.tensor([tok], device=self.device), drafts])
+                    hashes = m.hash_state(block[None], pos)[0]
+                    rows = {L: self.tables[L].rows(hashes[:, li, :]) for li, L in enumerate(self.args.engram_layer_ids)}
+                    logits, mh = self.fast.step(block, pos, rows)
+                else:
+                    drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
+                    block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # 6 tokens at pos..pos+5
+                    logits, mh = m.forward(block, pos, prefill=False)
                 # verify drafts[i] (position pos+1+i) against logits[i]
                 a = 0
                 new = []
@@ -323,7 +336,8 @@ class V41Engine:
                     bonus = int(torch.multinomial(pt, 1)) if temperature > 0 else int(pt.argmax())
                 # caches valid for positions < pos + a + 1 (tok + accepted drafts)
                 m.c.rollback(pos + a + 1)
-                m.dspark_seed(mh[:a + 1], pos)
+                if self.fast is None:
+                    m.dspark_seed(mh[:a + 1], pos)
                 accepted_hist.append(a)
                 emitted = list(new)
                 if bonus is not None:

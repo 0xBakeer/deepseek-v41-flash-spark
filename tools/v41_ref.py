@@ -145,6 +145,7 @@ def apply_rotary(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = False
 # ----------------------------------------------------------------------------- args
 @dataclass
 class Args:
+    vocab_size: int = 129280
     dim: int = 5120
     moe_inter_dim: int = 2304
     n_layers: int = 40
