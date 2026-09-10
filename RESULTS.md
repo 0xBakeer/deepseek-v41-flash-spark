@@ -139,7 +139,6 @@ so only the time changed.
 
 ## 6. Reference points (not our measurements)
 
-For scale only — different hardware, all experts resident, no streaming:
-tonyd2wild's 4x DGX Spark TP4 vLLM build reports 39-77 tok/s single stream, TTFT 0.27-0.58 s,
-DSpark acceptance 3.56 (NOTES.md 0.5). That build needs four boxes and states "TP2 does not fit
-either way". This repo runs the same model, at FP4 expert quality, on **one** box, at 2.6-2.7 tok/s.
+For scale only — different hardware, all experts resident, no streaming: a public **4x** DGX Spark
+TP4 vLLM build reports 39-77 tok/s single stream, TTFT 0.27-0.58 s, DSpark acceptance 3.56
+(NOTES.md 0.5). That build needs four boxes and states "TP2 does not fit either way". This repo runs the same model, at FP4 expert quality, on **one** box, at 2.6-2.7 tok/s.

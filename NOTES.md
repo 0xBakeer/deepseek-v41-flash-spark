@@ -151,15 +151,15 @@ Nobody serves V4.1-Flash on one 128 GB box. The public state:
   '{"cpu_offload": true}'` = pinned host memory, UVA lookup (default). DSpark:
   `--speculative-config '{"method":"dspark","num_speculative_tokens":5,...}'`. SM12x umbrella for
   V4 (#41834) still open; no upstream SM121 work for V4.1.
-* **tonyd2wild/DeepSeek-V4.1-Flash-vLLM-DGX-Spark** (4x DGX Spark, TP4, serving 2026-09-10): the
-  only measured Spark run. vLLM `dsv41-feat` on nightly 8a728663 + `_C_stable_libtorch` rebuilt for
+* **A public 4x DGX Spark TP4 vLLM build** (serving 2026-09-10): the only measured Spark run
+  in the wild. vLLM `dsv41-feat` on nightly 8a728663 + `_C_stable_libtorch` rebuilt for
   12.1a + FlashInfer 0.7.0rc1 (0.6.18 lacks the SM120 sparse-MLA decode kernel for V4.1's topk 1152)
   + prebuilt `mxfp8_gemm_cutlass_sm120`. Five SM12x patches (block size 64/128 for the sparse SWA
   and indexer caches, `--block-size 128`, `top_k_per_row_decode` instead of `persistent_topk`
   which needs 128 KB smem per block, GB10 has 99 KB). **Engram-on-disk patch** (`DSV41_ENGRAM_DISK=1`):
   table tensors skipped at load, rows read with `preadv` from the safetensors on NVMe/NFS by a
   32-thread pool in `prepare_inputs` before the forward (so CUDA graphs work), dequantized on CPU,
-  copied to a pinned staging buffer. Measured by them: 24 serial preads ~17 ms/step on NVMe,
+  copied to a pinned staging buffer. Measured there: 24 serial preads ~17 ms/step on NVMe,
   parallel 3.1 ms (C1). Per rank 81.6 GiB weights (experts all resident, split 4 ways, DeepGEMM
   MXFP4 MoE backend), KV 4.84 GiB = 1.03M tokens. Numbers: 39-77 tok/s single stream
   (counting 77, code 52-57, reasoning 39, prose 23), DSpark acceptance length mean 3.56
@@ -167,21 +167,21 @@ Nobody serves V4.1-Flash on one 128 GB box. The public state:
 * **SGLang**: PR #38798 open, `lmsysorg/sglang:dev-dsv41`, `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1`
   (host copy of the tables, huge pages advised), `--enable-decoder-swa-bounded-replay`. Datacenter
   GPUs only. Blog: engram host offload +36% KV capacity at same decode on 4x GB300.
-* **0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000** (SGLang, 4x RTX PRO 6000 + 128 GB DDR5): bounded
+* **A 4x RTX PRO 6000 + 128 GB DDR5 SGLang build**: bounded
   64 GiB DDR5 engram row cache with exact NVMe reads on misses; b12x io_uring reader "prerequisites
   met". 200+ tok/s single stream on that hardware.
-* **antirez/ds4**: no V4.1 branch, only an FYI issue (#1023). On X: "Not a fit for 128GB systems ...
-  Good fit for Mac M5 Ultra 512GB ... Not really a 'local' model IMHO"; support "probably yes,
-  initially as an experiment, will 2 bit quants hold up?".
+* **The single-file C inference projects**: no V4.1 branch, only an FYI issue. The public read is
+  "not a fit for 128 GB systems ... good fit for a 512 GB Mac ... not really a 'local' model", with
+  support "probably yes, initially as an experiment, will 2 bit quants hold up?".
 * **llama.cpp**: converter-only draft PR #28696 (Engram written as row-block memmap, 508 GB at
   Q8_0 + MXFP4 experts); "the model won't load until a V4.1 runtime implementation" exists. No
   runtime, no upstream V4 runtime either (fork only).
-* **exllamav3 / anemone / TabbyAPI / sparkinfer**: V4 Flash only; zero V4.1 mentions.
-* **ktransformers, ik_llama.cpp, mlx-lm, transformers main**: nothing for V4.1.
-* **Quants on HF (all day-0 stubs)**: GGUF (vcruz305 Q2_K uploading, apetersson MixedQ2 2.25 bpw
-  experts 170 GB, engram excluded), NVFP4 (LibertAIDAI 400 GiB with engram FP8->FP4 lossy;
-  msuiche 415 GB ModelOpt), MLX (Vontra 2-bit 239 GB for 256 GiB Macs at 9.5 tok/s; pipenetwork
-  4/8-bit 427-477 GB; inferencerlabs Q4i 14.6 tok/s on a 512 GB M3 Ultra). No EXL3, no REAP/pruned.
+* **exllamav3 / anemone / TabbyAPI**: V4 Flash only; zero V4.1 mentions.
+* **ik_llama.cpp, mlx-lm, transformers main**: nothing for V4.1.
+* **Quants on HF (all day-0 stubs)**: GGUF (Q2_K uploading; a MixedQ2 2.25 bpw expert set at
+  170 GB, engram excluded), NVFP4 (400 GiB with engram FP8->FP4 lossy; 415 GB ModelOpt), MLX
+  (2-bit 239 GB for 256 GiB Macs at 9.5 tok/s; 4/8-bit 427-477 GB; Q4i 14.6 tok/s on a 512 GB
+  M3 Ultra). No EXL3, no REAP/pruned.
 * **DeepSeek's three new repos** (2026-09-10): `deepseek-recipe` = Rust + Python protocol/chat-template
   layer (Chat Completions/Responses/Messages -> V4.1 prompt, parses thinking + DSML tool calls;
   string `reasoning_effort` only: low=50, high=75, max=100; **no aarch64 wheel**, build from source
@@ -189,9 +189,9 @@ Nobody serves V4.1-Flash on one 128 GB box. The public state:
   (k=512 over context positions) and the sampler, sm_100a/sm_103a only -- not expert selection.
   `DeepJIT` = header-only JIT runtime extracted from DeepGEMM, ships no kernels, no license file;
   DeepGEMM 26/09 uses it; DeepGEMM sm_121a issues open (#372, #417, #425).
-* Prior art for expert caching (V4 Flash, not V4.1): ssd-moe/deepseek-v4-flash-mlx "a 32GB cache
-  captures 80%+ of expert accesses" (48 GB Mac, 4.5-5 tok/s); bigs/deepseek-v4-flash-dgx-spark
-  (256-slot expert arena, native packed loader, ~2 tok/s); ktransformers cpuinfer.
+* Prior art for expert caching on the previous model (V4 Flash, not V4.1): bounded expert caches on
+  a 48 GB Mac (4.5-5 tok/s) and a 256-slot expert arena with a native packed loader on a Spark
+  (~2 tok/s). Rules of thumb, not measured routing traces -- which is why this repo traced it.
 * Engram paper (arXiv 2601.07372): offloading a 100B table to host costs <= 2.8% throughput on an
   8B backbone.
 

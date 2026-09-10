@@ -12,7 +12,7 @@ Weight format (per expert, as stored in the HF safetensors):
 
 Pipeline for one call (T tokens, K experts per token), three Triton launches and no host sync:
   1. _route_kernel: groups the (token, k) pairs by expert slot, each slot's run padded to a multiple of
-     BM pairs (vLLM's moe_align_block_size idea) -> block_slot[b], block_pair[b*BM + i].
+     BM pairs -> block_slot[b], block_pair[b*BM + i].
   2. _moe_up_kernel: grid (pair block, n-block). For its expert it streams the packed w1/w3 rows ONCE,
      decodes them with the hardware `cvt.rn.f16x2.e2m1x2` instruction (one instruction per byte -> two
      fp16), does tl.dot against the (up to BM) pairs of the block and applies the UE8M0 scale on the fp32
@@ -347,8 +347,8 @@ def _next_pow2(v: int) -> int:
 
 
 def build_routing(slots: torch.Tensor, n_slots: int, BM: int):
-    """Group the (token, k) pairs by arena slot, each slot's run padded to a multiple of BM (vLLM's
-    moe_align_block_size idea) so that one program == one expert x BM pairs. One small Triton launch,
+    """Group the (token, k) pairs by arena slot, each slot's run padded to a multiple of BM, so that
+    one program == one expert x BM pairs. One small Triton launch,
     no host sync, so the CPU launch overhead of the main kernels overlaps with GPU work.
 
     Returns (block_slot i32[NB], block_pair i32[NB*BM], NB) with -1 marking unused blocks / padding rows.

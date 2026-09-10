@@ -3,7 +3,7 @@
 This recipe is a thin layer over other people's work plus a lot of arithmetic. What is ours
 is the single-box design — the expert arena with its LRU and transient ring, the `O_DIRECT`
 streaming path, the Triton FP4 grouped-MoE kernel, the chunk-invariant port, the stdlib
-server, the routing trace and every measurement. Everything below is somebody else's.
+server, the routing trace and every measurement.
 
 ## The model
 
@@ -21,33 +21,27 @@ chat-template layer, whose `reasoning_effort` string mapping the server's own ma
 follows), **`DeepSelect`** (the indexer top-k kernel — `sm_100a`/`sm_103a` only, which is
 part of why this box needs its own path) and **`DeepJIT`**.
 
-## The prior art this design is built on
+## Where the techniques come from
 
-**[tonyd2wild/DeepSeek-V4.1-Flash-vLLM-DGX-Spark](https://github.com/tonyd2wild/DeepSeek-V4.1-Flash-vLLM-DGX-Spark)**
-— the four-Spark TP4 vLLM build, and the most useful single source for this repo. The
-**engram-on-disk** patch (`DSV41_ENGRAM_DISK=1`: table tensors skipped at load, rows read
-with `preadv` by a thread pool before the forward so CUDA graphs still work, dequantised on
-CPU into a pinned staging buffer) is the idea `engine/engram.py` follows on one box, and
-their measurement of it — 24 serial `pread`s ≈ 17 ms/step against 3.1 ms parallel — is why
-it is a thread pool here too. Their SM12x notes are the map of this hardware's sharp edges:
-block size 64/128 for the sparse SWA and indexer caches, and `top_k_per_row_decode` instead
-of `persistent_topk`, which wants 128 KB of shared memory per block where GB10 has 99 KB.
-Their honest "TP2 does not fit either way" is what made a streaming design the only option
-left for a single box.
+Both of the load-bearing ideas here were built and measured in earlier recipes of mine on
+the same class of box, and this repo is the third iteration of them.
 
-**[ssd-moe / deepseek-v4-flash-mlx](https://github.com/ssd-moe)** — the observation that a
-bounded expert cache captures most expert accesses on the previous model ("a 32 GB cache
-captures 80%+"). This repo's coverage curve is the same question asked with a measured
-routing trace instead of a rule of thumb, and the answer on V4.1 turned out to be less
-generous.
+**[qwen38-flash-next-spark](https://github.com/0xBakeer/qwen38-flash-next-spark)** — the
+**NVMe-resident table** pattern: keep a table that does not fit in unified memory on the SSD,
+map it, and let the page cache serve the rows a step actually touches instead of loading the
+whole thing. That is exactly the shape `engine/engram.py` takes for V4.1's 203 GB of Engram
+n-gram tables — 48 random 264-byte rows per token, read with buffered `preadv` in a thread
+pool under `POSIX_FADV_RANDOM`, with a small process-local row cache in front. It is also
+where the idea generalises from: an expert is the same problem at 18.8 MB instead of 264
+bytes, which is what `engine/experts.py` does with `O_DIRECT` and an explicit arena.
 
-**vLLM's PLE mmap work** — the prior art for treating a per-layer table as something you
-map and read rather than something you load, which is the shape both the Engram reader and
-the expert store take here.
-
-**[0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000](https://github.com/0xSero)** — a bounded
-DDR5 engram row cache with exact NVMe reads on misses, on very different hardware; a useful
-second data point for the row-cache idea.
+**[ling3-flash-spark](https://github.com/0xBakeer/ling3-flash-spark)** — the recipe shape
+this one copies: `start.sh`/`stop.sh` with the memory and port guards, the `run.sh`
+dispatcher and container split, the GHCR workflow on `v*` tags, the "a version is a
+measurement epoch" changelog, the `results/` layout, and the benchmark harness with its four
+rules (usage-based token counts, fresh verified prompts, label-salted seeds, `ignore_eos`).
+`bench/bench.py` here is an adaptation of that harness, so rows from the two are directly
+comparable.
 
 ## The platform and the tools
 
@@ -57,20 +51,4 @@ aarch64 wheels, without which none of this runs on arm64.
 **[OpenAI Triton](https://github.com/triton-lang/triton)** — the kernel language the FP4
 grouped-MoE forward is written in, and the JIT that compiles it for `sm_121a` on the box.
 
-**[vLLM](https://github.com/vllm-project/vllm)** — `moe_align_block_size`, whose idea of
-padding each expert's run of `(token, k)` pairs to a block multiple is what the routing
-kernel here does.
-
-## The house templates
-
-**[ling3-flash-spark](https://github.com/0xBakeer/ling3-flash-spark)** — the recipe shape
-this one copies: `start.sh`/`stop.sh` with memory guards, the benchmark harness and its
-four rules (usage-based token counts, fresh verified prompts, label-salted seeds,
-`ignore_eos`), and the `results/` layout. `bench/bench.py` here is an adaptation of that
-harness, so rows from the two are directly comparable.
-
-**[deepseek-v4-flash-spark](https://github.com/0xBakeer/deepseek-v4-flash-spark)** — the
-container and release shape: the `run.sh` dispatcher, the GHCR workflow on `v*` tags, the
-"a version is a measurement epoch" changelog, and the entrypoint/download split.
-
-Assembled, measured and documented by 0xBakeer.
+Assembled, measured and documented by Khaled Bakeer (0xBakeer).

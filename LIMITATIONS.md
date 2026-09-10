@@ -73,8 +73,8 @@ are in RESULTS.md. What follows is what is still missing or broken.
   only quality-preserving path is the resident hot set plus NVMe streaming this repo implements —
   and the measured price of that choice is 2.6 tok/s.
 * No engine has a single-GPU expert-streaming path for `deepseek_v41` today. vLLM (`dsv41-feat`) and
-  SGLang both assume all experts resident across TP ranks; the tonyd2wild 4x Spark build is the
-  closest working code (engram-on-disk + SM12x fixes) but states "TP2 does not fit either way".
+  SGLang both assume all experts resident across TP ranks; the closest working public code is a
+  4x Spark TP4 build (engram-on-disk + SM12x fixes) which states "TP2 does not fit either way".
 
 ## Bugs found and fixed during bring-up (2026-09-10)
 

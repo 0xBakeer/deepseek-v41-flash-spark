@@ -621,6 +621,8 @@ class Handler(BaseHTTPRequestHandler):
             raise APIError(400, f"request body is not valid JSON: {e}")
         if not isinstance(body, dict):
             raise APIError(400, "request body must be a JSON object")
+        if os.environ.get("DSV41_LOG_BODIES"):
+            log.info("request body: %s", json.dumps(body)[:4000])
         return body
 
     def _start_sse(self) -> None:
