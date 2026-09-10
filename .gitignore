@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+engram_rows/
+results/*/state/
+logs/
+.venv/
