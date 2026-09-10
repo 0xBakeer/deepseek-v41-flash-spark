@@ -660,3 +660,49 @@ the owner before they were started. The ranking helper for the profile exists an
 (`experts.category_counts` reads the per-category counts out of `results/trace-*/trace/layer*.npz`;
 the coding top-4,000 differs from the mixed top-4,000 in 27% of its entries) but has never ranked a
 warm start in a serving run, and `DSV41_HOT_PROFILE` defaults to `mixed`, i.e. to the old behaviour.
+
+### Expert pruning sweep (2026-09-10 23:07-23:45, measured, in-sample)
+
+Question: can enough experts be dropped (REAP-style: the router only picks among survivors, chosen
+per layer by trace frequency, mixed profile) to make the model fully resident? Teacher-forced loss on
+the trace corpus, `engine/v41_engine.py --teacher-forced --prune-sweep`:
+
+| kept / layer | FP4 GB | coding NLL | general NLL |
+|---|---|---|---|
+| 384 (100%) | 288.8 | 2.160 | 3.426 |
+| 231 (60%) | 173.7 | 2.185 (+0.025) | 3.418 (-0.009) |
+| 192 (50%) | 144.4 | 2.190 (+0.030) | 3.438 (+0.012) |
+| 154 (40%) | 115.8 | 2.247 (+0.087) | 3.530 (+0.104) |
+| 116 (30%) | 87.2 | 2.319 (+0.159) | 3.755 (+0.329) |
+
+Half the experts are almost free; the cliff is between 40% and 30%, and 30% is the first size that
+fits at FP4. Caveat: keep-sets and loss come from the same corpus (in-sample); a held-out corpus
+(`corpus/heldout_corpus.jsonl`, code and prose the trace never saw) is being scored next. Also
+queued: the all-resident decode speed at keep=25% (the engine's zero-miss ceiling).
+
+### 2026-09-11 00:50 -- the port bug that shaped every earlier number (measured, fixed)
+
+Greedy generation stuttered ("LRLR", "time-to-llive", "ev eviction") on every path, including the
+oldest engine commit; decode-vs-prefill was bit-identical at all 40 layers, so it was not a cache
+or speculation bug but the ported math. Cause: `v41_ref.hc_post` summed the Hyper-Connection
+`comb` matrix over the wrong index (comb @ residual instead of the reference's combᵀ @ residual).
+The model stayed coherent enough that teacher-forced loss looked "plausible" (coding 2.16 nats,
+top-1 64%) -- it was not. Fix: one einsum in `tools/v41_ref.py::hc_post`, shared by the tracer,
+the engine and the fast decode path.
+
+Immediately visible after the fix (same prompt, greedy): clean production-quality code on both
+paths; DSpark acceptance length 2.4 -> 3.75; streaming decode 2.86 -> 3.69 tok/s with no other change.
+
+Numbers produced before this fix that are now invalid or biased and get re-measured: the
+teacher-forced baselines (tracer and engine), the pruning sweep (loss deltas AND the keep-sets:
+the routing trace itself was recorded with the bug, so the hot-set ranking is approximate until
+the trace is redone), RESULTS.md speed rows (acceptance was depressed), and the "keep 25% garbles"
+observation (to be re-checked).
+
+### Fast decode path (engine/fastdecode.py, measured 2026-09-11 00:10-00:35)
+CUDA graphs per layer (A: attention+HC+router, host slot resolve, B: MoE+residual), fused Sinkhorn
+Triton kernel, bf16 head, fixed-length masked indexer scoring. Verify step with everything resident:
+183 ms + 16 ms draft (was 436 ms). End to end, pruned keep=0.25 all-resident: 9.6-10.5 tok/s (was
+4.8); streaming unpruned: NVMe-bound, unchanged. Greedy argmax agreement with the reference path
+100% on the tested positions; hidden states differ 2-5% from bf16 GEMM noise amplified by router
+near-ties (same class as chunk-boundary noise before the tiling work).

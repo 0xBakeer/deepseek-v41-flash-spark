@@ -349,7 +349,17 @@ def hc_pre(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
 
 
 def hc_post(x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
-    y = post.unsqueeze(-1) * x.unsqueeze(1) + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(1), dim=2)
+    """Expand the sublayer output back to hc copies and mix the residual in through `comb`.
+    x: [s, d], residual: [s, hc, d], post: [s, hc], comb: [s, hc, hc] -> [s, hc, d].
+
+    Reference (`model.py:Block.hc_post`): `post.unsqueeze(-1) * x.unsqueeze(-2)
+    + sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)` -- the sum runs over the FIRST
+    index of comb, i.e. y[j] = post[j] * x + sum_i comb[i, j] * residual[i]. (An earlier version
+    of this port summed over the second index, comb @ residual: a transposed mixing matrix that
+    left the model coherent but measurably worse -- teacher-forced NLL and stuttering generation.)
+    """
+    mixed = torch.einsum("sij,sid->sjd", comb.float(), residual.float())
+    y = post.unsqueeze(-1) * x.float().unsqueeze(1) + mixed
     return y.type_as(x)
 
 

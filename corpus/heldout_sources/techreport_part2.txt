@@ -1,0 +1,1301 @@
+and the remaining five layers operate in Reuse Mode. The 20 decoder layers use CSA2 with a
+compression rate of 𝑚 = 1. These layers are divided into five groups of four layers. In the first
+group, the first layer operates in Full Mode, and the remaining three layers operate in Reuse
+Mode. The remaining four groups share the same configuration: the first layer operates in
+Reindex Mode, and the remaining three layers operate in Reuse Mode. For all CSA2 layers, we
+set the number of indexer query heads to 32, the indexer head dimension to 128, and the number
+of KV entries selected for sparse attention (i.e., attention top-k) to 512. We set the number of
+query heads to 64, the head dimension to 512, and the query compression dimension to 1280.
+For the Hierarchical Sparse Indexer, we select a maximum of 2,048 blocks with 8 positions,
+yielding up to 16,384 candidate positions in total. The number of output projection groups is set
+to 8, and the dimension of each intermediate attention output is set to 1024. For the additional
+branch of sliding window attention, the window size 𝑛win is set to 128. We employ MoE layers
+in all Transformer blocks, using SwiGLU activation function with clamping (OpenAI, 2025) at a
+threshold of 10. Each MoE layer consists of 1 shared expert and 384 routed experts, where the
+intermediate hidden dimension of each expert is 2304. Among the routed experts, 6 experts
+will be activated for each token. As for mHC, the expansion factor is set to 4, and the number
+of Sinkhorn-Knopp iterations is set to 20. For the vision encoder, we set its number of layers
+to 32, the hidden dimension to 1024, the number of attention heads to 16, and the image patch
+size to 14. The vision MLP projector has 2 layers with a hidden dimension of 5120. Under this
+configuration, DeepSeek-V4.1-Flash comprises 552B backbone parameters, with 8B activated
+per token during prefill and 16B during decode.
+
+4.2.2. Training Setups
+
+We employ the Muon optimizer (Jordan et al., 2024; Liu et al., 2025) for the parameters of linear
+transformations, use AdamW optimizer (Loshchilov and Hutter, 2019) for the weights of all
+RMSNorm modules and other non-matrix parameters, and use Sinkhorn-balanced update for all
+embeddings and prediction head. For AdamW, we set its hyper-parameters to 𝛽1 = 0.9, 𝛽2 = 0.95,
+𝜀 = 10 −20 , and weight_decay = 0.1. For Muon, we set the momentum to 0.95 and the weight
+decay to 0.1, and rescale the RMS of each update matrix to 0.18 for reutilization of the AdamW
+learning rate. For Sinkhorn-balanced updating, we use the same momentum coefficient and
+learning-rate correction factor as for Muon and set 𝐾 = 11, 𝜏 = 10−3 , 𝜀 = 10−20 . Following (Cheng
+et al., 2026b), the learning rate of Engram is scaled by 5×. We train DeepSeek-V4.1-Flash on
+45T tokens of multimodal data with no instability. We keep the batch size fixed at 100.6 million
+tokens throughout training. The learning rate is linearly warmed up over the first 2000 steps
+and then maintained at 2.6 × 10−4 until 28T tokens. Between 28T and 40T tokens, we decay the
+learning rate to 2.6 × 10−5 following a cosine schedule. We keep the learning rate at this value
+from 40T to 45T tokens. We train the model from scratch with sparse attention at a sequence
+length of 64K and extend the sequence length to 1M at 34T tokens. For auxiliary-loss-free load
+balancing, we set the bias update speed to 0.001 for both image and text tokens, while retaining
+a small sequence-level balance loss with a loss weight of 0.0001 to avoid extreme imbalance
+within single sequences. Similar to DeepSeek-V4, we employ sample-level attention masking
+during pre-training.
+
+
+Vision Encoder Training. Our DeepSeek-ViT undergoes a separate training stage before being
+integrated with the language backbone. The training pipeline consists of two stages: contrastive
+
+
+                                                22
+pre-training and autoregressive fine-tuning. During contrastive pretraining, we optimize the model
+using the sigmoid contrastive loss introduced by SigLIP (Zhai et al., 2023) on approximately 47B
+image-text pairs sourced from alt-text data. To efficiently learn visual representations from such
+massive datasets, we restrict the maximum input resolution to 224 × 224 pixels by downscaling
+larger images while preserving their aspect ratios. Although using higher resolutions in this
+phase yields notable gains, empirical results show that these benefits contribute little to the
+final model. Because the subsequent autoregressive stage specifically handles high-resolution
+extrapolation, scaling up resolutions during contrastive pretraining significantly increases
+computational overhead without much overall improvement. In the autoregressive fine-tuning
+stage, we connect the vision encoder to a 4B MoE LLM and train on 236B tokens across datasets
+including image captions, alt text, charts, and OCR, using a next-token prediction objective. This
+stage aims to enhance the encoder’s ability to model fine-grained visual features. We therefore
+constrain the input resolution between 544 × 544 and 1344 × 1344 pixels by proportionally scaling
+out-of-bound images. After this stage, we discard the LLM and retain only the optimized vision
+encoder for the subsequent pre-training pipeline, where the same input-resolution policy is
+maintained.
+
+
+4.3. Evaluations
+
+4.3.1. Evaluation Benchmarks
+
+We compare DeepSeek-V4.1-Flash-Base with its predecessor models DeepSeek-V4-Flash-Base
+and DeepSeek-V4-Pro-Base. We report benchmarks spanning five key dimensions: world
+knowledge, language understanding and reasoning, coding and mathematics, long context, and
+multimodal abilities.
+    World knowledge benchmarks include AGIEval (Zhong et al., 2023), MMLU-Pro (Wang
+et al., 2024b), C-Eval (Huang et al., 2023), MultiLoKo (Hupkes and Bogoychev, 2025), SimpleQA-
+Verified (Haas et al., 2025) and SuperGPQA (Du et al., 2025)，
+    Language understanding and reasoning benchmarks include BigBench Hard (BBH) (Suzgun
+et al., 2022), BigBench Extra Hard (BBEH) (Kazemi et al., 2025), DROP (Dua et al., 2019) and
+HellaSwag (Zellers et al., 2019),
+  Coding and mathematical benchmarks include BigCodeBench (Zhuo et al., 2025), Hu-
+manEval (Chen et al., 2021), GSM8K (Cobbe et al., 2021), MATH (Hendrycks et al., 2021) and
+MGSM (Shi et al., 2023),
+   Long context benchmark includes LongBench-V2 (Bai et al., 2025).
+   Multimodal benchmarks include MMMU-Pro (Yue et al., 2025), DocVQA (Mathew et al.,
+2021), CVBench (Tong et al., 2024) and RefCOCO/RefCOCO+/RefCOCO-g (Kazemzadeh et al.,
+2014; Nagaraja et al., 2016; Mao et al., 2016; Yu et al., 2016).
+
+4.3.2. Evaluation Results
+
+In Table 1, we provide a detailed comparison of the base models for DeepSeek-V4-Flash,
+DeepSeek-V4-Pro and DeepSeek-V4.1-Flash, all evaluated under our internal evaluation frame-
+work using strictly controlled and reproducible settings. Compared with DeepSeek-V4-Flash-
+Base and DeepSeek-V4-Pro-Base, our latest base model reveals a compelling efficiency gain.
+DeepSeek-V4.1-Flash activates a substantially smaller number of parameters than DeepSeek-
+V4-Pro-Base and occupies a heavily-reduced KV cache, yet its performance is fully on par
+
+
+                                               23
+Table 1 | Comparison among DeepSeek-V4-Flash-Base, DeepSeek-V4-Pro-Base, and DeepSeek-
+V4.1-Flash-Base. All models are evaluated in our internal framework and share the same
+evaluation setting. Scores with a gap not exceeding 0.3 are considered to be at the same level.
+The highest score in each row is in bold font, and the second is underlined.
+
+                                                DeepSeek-V4-Flash DeepSeek-V4-Pro DeepSeek-V4.1-Flash
+              Benchmark (Metric)      # Shots
+                                                      Base             Base              Base
+              Architecture               -              MoE            MoE               MoE
+              # Activated Params         -               13B           49B              8B/16B
+              # Backbone Params          -              284B           1.6T              552B
+             AGIEval (EM)            3-5-shot           83.9            84.4              83.4
+             MMLU-Pro (EM)            5-shot            68.3            73.5              74.1
+             C-Eval (EM)              5-shot            92.1            93.1              92.1
+World Knowl.
+             MultiLoKo (LLM-Judge)    5-shot            42.6            50.9              45.5
+             Simple-QA verified (EM) 25-shot            30.1            55.2              42.3
+             SuperGPQA (EM)           5-shot            46.5            53.9              53.1
+              BBH (EM)                3-shot            86.9            87.5              86.1
+              BBEH (EM)               1-shot            25.4            29.8              27.2
+Lang. & Reas.
+              DROP (F1)               1-shot            88.6            88.7              87.9
+              HellaSwag (EM)          0-shot            85.7            88.0              87.2
+              BigCodeBench (Pass@1)   3-shot            56.8            59.2              60.6
+              HumanEval (Pass@1)      0-shot            69.5            76.8              79.4
+Code & Math   GSM8K (EM)              8-shot            90.8            92.6              93.0
+              MATH (EM)               4-shot            57.4            64.5              61.1
+              MGSM (EM)               8-shot            85.7            84.4              80.2
+Long Context LongBench-V2 (EM)        1-shot            44.7            51.5              45.2
+              MMMU-Pro (EM)           4-shot             -               -                56.5
+              CVBench (EM)            4-shot             -               -                77.9
+Multimodal
+              DocVQA (LLM-Judge)      4-shot             -               -                95.6
+              RefCOCO-avg (Acc@0.5)   0-shot             -               -                86.0
+
+
+
+with its predecessors. These results also reflect the substantial improvements we made to our
+pre-training data curation pipeline. In this version, we introduce native multimodal training
+and validate its effectiveness through corresponding multimodal evaluations. Trained on a
+more diverse and multimodal corpus, DeepSeek-V4.1-Flash achieves world knowledge and
+comprehension capabilities comparable to those of DeepSeek-V4-Pro. In reasoning and coding
+benchmarks, DeepSeek-V4.1-Flash shows consistent progress, reaching performance close to or
+better than DeepSeek-V4-Pro across multiple benchmarks.
+    To further assess the model’s capabilities in real-world R&D scenarios, we additionally
+perform perplexity tests on dedicated internal corpora. Since perplexity tests are impossible
+through model APIs, we mainly focus on our own pretrained base models. For corpus selection,
+a separate evaluation set is collected based on our daily development, including internal docu-
+mentation, proprietary code repositories and academic materials, which targets for reasoning,
+attribution and problem-solving on complex scientific problems and frontier research. The
+results are shown in Figure 6, where we report the bits-per-byte(BPB) of different models, with
+lower values indicating better performance.
+
+
+
+
+                                                   24
+Figure 6 | Bits-per-bytes (BPB) comparison of DeepSeek-V4-Flash-Base, DeepSeek-V4-Pro-Base
+and DeepSeek-V4.1-Flash-Base on our held-out evaluation sets. DeepSeek-V4.1-Flash-Base
+achieves lowest BPB on all tasks and demonstrates greater potential to serve as a strong base-
+model.
+
+
+5. Post-Training
+
+5.1. Post-Training Pipeline
+
+In this release, we refrain from introducing novel post-training algorithms. The overall recipe
+follows the standard paradigm of supervised fine-tuning (SFT) followed by reinforcement learn-
+ing (RL) and on-policy distillation (OPD; Gu et al., 2024; Lu and Lab, 2025), without algorithmic
+modifications beyond well-established practices. Instead, our efforts are concentrated almost
+entirely on what the model is trained on rather than how it is optimized: we invest in large-
+scale, automated pipelines for data synthesis and environment construction. Concretely, the
+pipeline (i) synthesizes diverse, verifiable training tasks together with their reference solutions
+and reward signals, (ii) procedurally constructs and scales interactive agent environments in
+which trajectories can be collected and evaluated at low cost, and (iii) applies rigorous filtering,
+deduplication, and difficulty calibration to ensure data quality and curriculum balance. We find
+that, under a fixed and unremarkable optimization procedure, systematic improvements in the
+scale, diversity, and verifiability of synthesized data and environments account for essentially
+all of the observed gains. This observation echoes a broader lesson: at the current stage, the
+marginal return of engineering the data and environment pipeline substantially exceeds that of
+algorithmic novelty in post-training.
+
+5.1.1. Large-Scale Agent Task Synthesis
+
+Tasks serve as the fundamental fuel for agent learning. However, constructing high-quality
+training tasks has traditionally required substantial manual effort. We observe that the model is
+already beginning to exhibit the ability to construct its own training tasks, though this capability
+remains far from perfect. Recognizing this potential, we have invested considerable effort in
+strengthening the model’s task-construction and quality-verification abilities.
+    We formalize each task as a triplet (problem, environment, verification system) and evaluate
+its quality along two dimensions: difficulty—ensuring the task is non-trivial—and correct-
+ness—guaranteeing that no critical flaws exist among the three components. Using difficulty
+and correctness as reward signals, we iteratively train the model to construct better tasks. We
+also monitor RL tasks across their full lifecycle. Whenever a task is used in a new RL run,
+
+                                                25
+the resulting trajectories provide fresh evidence for quality re-auditing. Under this general
+framework, we have built dedicated training environment production pipelines for two core
+scenarios: general agents and coding agents.
+    General Agent. For general agents, we encourage internal employees and external partners
+to incorporate our latest model into their routine workflows and, on a voluntary basis, return
+interaction data and feedback. Based on the interfaces observed in the returned data, we
+construct a large set of mocked tools that reproduce the interfaces and behaviors of real-world
+tools and systems, including their input formats, output structures, API schemas, and behavioral
+constraints, covering both commonly used SaaS and enterprise applications as well as more
+specialized business back-end systems. In parallel, we collect negative feedback and model
+failure cases submitted by internal employees at scale, and incorporate them into the pipeline
+to generate both single-turn and multi-turn agent environments grounded in real workflows.
+By reconstructing the relevant tool context, user interaction patterns, and failure conditions,
+the pipeline enables systematic replay of failures and targeted reinforcement learning against
+observed model weaknesses.
+    Coding Agent. Coding agent training environments are built from two sources: 1) coding-
+agent sessions from internal employees and external partners, filtered to retain highly complex
+tasks or tasks on which model performance is poor, then deduplicated by trajectory; and 2)
+public GitHub repositories that meet a star-count threshold. Environment construction is carried
+out collaboratively by multiple specialized agents. First, an agent determines whether the project
+can be built and fully run inside a container and whether it can be automatically verified; if so, it
+selects a specific turn or commit as the task starting point, designs several sufficiently complex
+implementation directions, and produces concrete evaluation points, including both fail-to-pass
+and pass-to-pass points, along with a construction report, fetching external resources from the
+web as needed. Next, a separate agent sets up dependencies, the initial working directory, test
+code, and task descriptions in an isolated container, performs self-testing, removes any traces
+that could leak the task solution, and packages the environment as a new image layer. Then,
+multiple distinct agents attempt the task, and an independent quality-inspection agent reviews
+the environment together with the solving agents’ trajectories, checking for environment issues,
+factual errors, mismatches between evaluation points and task descriptions, and hackability
+risks. If the inspection does not pass, a repair agent fixes all identified errors, adjusts evaluation
+points that are too easy or too difficult, and the task re-enters verification.
+   Through these pipelines, we can automatically and batch-produce RL training data that is
+correct, discriminative, and controllable in length and difficulty. Whether through the faithful
+reconstruction of real workflows in general agent environments or the precise construction of
+coding tasks in coding agent environments, both ultimately feed into a unified training system,
+driving iterative improvement of model capabilities under continuous quality monitoring.
+
+5.1.2. RL in Synthesized Tasks
+
+We use large-scale asynchronous RL in synthesized tasks to improve model performance and
+shape its behavior in complicated scenarios. We scale RL runs in two dimensions, i.e., training
+compute and the number of scaffolds. As shown in Figure 7 and Figure 8, performance continues
+to improve as we increase compute with cumulative RL steps, whether scaling within a single
+scaffold, jointly across variants of the same scaffold, or across heterogeneous scaffolds.
+   For RL training across diverse scaffolds, we decouple agent rollout execution into an agent
+sandbox and a worker container. The sandbox runs the scaffold and its tools, while the worker
+
+
+                                                 26
+                                                     Pass@1                                       Output tokens
+
+                             DeepSWE v1.1                                                                         SWE-Bench Pro
+                                                          250                                    65                                             200
+                                                          225
+                                                                                                 64                                             175
+                    70
+
+
+
+
+                                                                Output tokens (k)
+
+
+
+
+                                                                                                                                                      Output tokens (k)
+                                                          200
+                                                                                                                                                150
+       Pass@1 (%)
+
+
+
+
+                                                                                    Pass@1 (%)
+                                                                                                 63
+                                                          175
+                    65                                                                                                                          125
+                                                          150                                    62
+                                                                                                                                                100
+                    60                                    125                                    61                                             75
+                                                          100
+                                                                                                 60                                             50
+                    55            512K                    75                                                          512K
+                                                                                                                                               25
+                         500      1000        1500     2000                                                  500      1000        1500      2000
+                            Cumulative RL steps                                                                 Cumulative RL steps
+                          Terminal-Bench v2.1                                                             Terminal-Bench v3.0 (no-gpu)
+                                                          100
+                                                                                                 30                                             400
+                    90                                    90
+                                                                                                                                                350
+
+
+
+                                                                Output tokens (k)
+
+
+
+
+                                                                                                                                                      Output tokens (k)
+                    88                                                                           25
+                                                          80
+       Pass@1 (%)
+
+
+
+
+                                                                                    Pass@1 (%)
+                                                                                                                                                300
+                    86                                    70                                     20
+                                                                                                                                                250
+                    84                                    60                                     15
+                                                          50                                                                                    200
+                    82                                                                           10
+                                                          40                                                                                    150
+                    80
+                                                          30                                      5                                             100
+                                  512K                                                                               512K                  1M
+                    78
+                         500      1000        1500     2000                                           0     500       1000      1500     2000
+                            Cumulative RL steps                                                                   Cumulative RL steps
+
+
+Figure 7 | Performance improves on various code agent benchmarks as RL training scales in the
+Minimal mode of DeepSeek Harness. Further extending maximal context length to 1M tokens
+continues to improve performance on extremely long-horizon tasks, e.g., Terminal-Bench v3.0.
+
+
+provides a scaffold-agnostic control layer that orchestrates the rollout, normalizes heterogeneous
+interactions into a common trajectory schema, and communicates with the trainer. Both run on
+DSec (Section 5.1.3), outside the preemptible GPU training pool, separating long-lived rollouts
+from fine-grained training scheduling. During trainer preemption, rollout execution can be
+suspended and offloaded while preserving its full state for later resumption and releasing CPU
+and GPU resources. This design enables stable and efficient RL across heterogeneous scaffolds
+without modifying the underlying algorithms.
+    To extend effective RL compute beyond a single training run, we use model merging to
+reinitialize successive RL runs. Specifically, we merge checkpoints from runs across different
+scaffolds or configurations, combining improvements acquired along different optimization
+paths. In Figure 7 and Figure 8, disconnected curve segments reflect successive RL runs after
+model reinitialization. This yields further gains in both task performance and token efficiency,
+providing a simple and practical way to aggregate parallel RL compute and continue scaling
+across successive runs.
+
+5.1.3. Running Agents at Massive Scale: DSec
+
+As we transitioned from DeepSeek-V3 to V4, the rapidly growing number and diversity of agen-
+tic training environments motivated us to build DeepSeek Elastic Compute (DSec), a production-
+grade sandbox platform for large-scale agentic training and evaluation. Its initial design ad-
+dressed heterogeneous execution environments, scalable image distribution, multiple isolation
+backends, high-density resource management, command trajectory logging, and preemption-
+safe resumption.
+   V4.1 training further increased demand to millions of concurrent sandbox instances span-
+
+                                                                          27
+                                                        Avg Pass@1                                           Avg output tokens
+
+                            Multi-version Claude Code RL                                                                 Multi-scaffold RL
+                                                                300                                                                                   200
+                   65                                                                                   65
+
+
+
+
+                                                                      Output tokens (k)
+
+
+
+
+                                                                                                                                                            Output tokens (k)
+                   60                                           250                                     60
+      Pass@1 (%)
+
+
+
+
+                                                                                           Pass@1 (%)
+                                                                                                        55                                            150
+                   55
+                                                                200                                     50
+                   50
+                                                                                                        45                                            100
+                   45                                           150
+                                                                                                        40
+                   40
+                                                                100                                     35
+                        0     1000   2000       3000    4000                                                 0     500     1000     1500     2000   2500
+                                  Cumulative RL steps                                                                    Cumulative RL steps
+
+
+
+Figure 8 | Performance improves with cumulative RL steps when jointly training across multiple
+versions of Claude Code (left) and across heterogeneous scaffolds, including OpenCode, Pi, and
+DeepSeek Harness in Standard and PTC modes (right). Performance is evaluated on DeepSWE
+v1.1. Lighter curves show the evaluation of individual scaffold versions or scaffolds.
+
+
+ning diverse harnesses, platforms, code repositories, software dependencies, and task-specific
+services. At this scale, the primary bottlenecks shifted toward datacenter scalability, work-
+load isolation, per-node compute density, and the containment of misbehavior by increasingly
+capable agents. We briefly describe our key design aspects below.
+   Horizontally Scaling Compute at Scale. DSec scales through two complementary mech-
+anisms: sharding and scheduling with relaxed consistency. To accommodate a large number
+of machines, we partition compute nodes into multiple shards (so-called scale units). Such
+sharding also allows us to reduce blast radius by isolating workloads from different experiments,
+preventing a single memory-intensive task from exhausting resources shared by unrelated work.
+    Instead of using off-the-shelf orchestrators like Kubernetes, DSec employs a custom place-
+ment engine to schedule the large number of sandboxes, by trading strong global consistency
+for scalability. This design is based on a key observation: agentic sandbox placements only
+demand eventual consistency as long as each compute node enforces local safety constraints. To
+do so, the placement engine deploys in multiple independent replicas, without synchronized
+coordination. Each replica predicts resource availability from recent measurements and makes
+good-enough placement decisions. To compensate for this loss in consistency, each node is
+responsible for validating the final placement decisions, enforcing a hard admission constraint
+that rejects new placements if it exceeds a local warning threshold. This design as a whole
+allows DSec to scale to millions of containers without bottlenecking on central coordination.
+   Running Sandboxes at High Density. At the node level, we use hardware-supported sub-
+NUMA partitioning and bind each worker VM to an individual NUMA domain. Containers
+run within these worker VMs, with their CPU and memory allocations confined to the VM’s
+local NUMA resources. This setup balances aggressive memory overcommitment against
+Linux kernel lock contention, while localizing memory pressure and runtime failures. Under
+comparable workload configurations, it increases the supported density from roughly 1,000 to
+more than 2,500 concurrent live containers per physical node before measurable end-to-end
+degradation appears.
+    Such high-density deployment can nevertheless distort time-sensitive evaluations through
+interference from background workloads. DSec therefore introduces a latency-sensitive (LS)
+execution class. We apply SCHED_IDLE to non-LS tasks to minimize their scheduling priority,
+
+
+                                                                                          28
+and use core scheduling to ensure only tasks of the same priority class execute simultaneously
+on sibling hyperthreads to eliminate interference.
+    Mitigation of Misbehaving Agents. During RL training, we frequently observe agents
+attempting to perform reward hacking or unintentionally crashing the environment. In certain
+attempts, our agents exploited recently disclosed vulnerabilities, including permission issues
+from the XFS driver, illegal memory access in AppArmor, leaking answers from package mirror
+services, and so on. Agents have also been notorious for deleting critical binaries, breaking
+system files, or even removing the filesystem. We use per-sandbox AppArmor profiles and
+fine-grained eBPF-based network policies to prevent such attempts. If an agent crashes its
+environment, we treat the crash as a failed trajectory and report a "repercussion" signal to the
+RL framework.
+
+5.1.4. Controllable Reasoning Effort in RL
+
+Alongside advances in model architecture and hardware, the number of output tokens is another
+key determinant of serving cost and, consequently, of the cost–quality trade-off in real-world
+applications. We therefore introduce a scalar effort level 𝑏 as an explicit conditioning signal
+during reinforcement-learning. This mechanism is applied to both single-turn reasoning and
+multi-turn agentic tasks. Specifically, we prepend the following instruction to the system prompt:
+
+  Reasoning Effort:           {effort} (range 1–100; higher values request more
+                                    thorough reasoning)
+
+Here, 𝑏 ∈ {1, . . . , 100} denotes the requested effort level.
+   For each training prompt 𝑥 , we sample 𝑀𝑏 responses at each effort level 𝑏 ∈ B:
+
+                            𝑧𝑏, 𝑗 ∼ 𝜋𝜃 (· | 𝑥 , 𝑏),         𝑏 ∈ B,        𝑗 = 1, . . . , 𝑀𝑏 .     (8)
+
+Here, 𝑗 indexes the responses sampled at effort level 𝑏. Responses sharing the same ( 𝑥 , 𝑏) form
+a subgroup, within which rewards are mean-centered to compute group-relative advantages.
+Thus, responses from different effort levels are not directly compared. Instead, effort-dependent
+behavior is induced within each subgroup by making the length component of the reward
+depend on 𝑏. Specifically, we add the length-penalty term 𝑟𝑏len , 𝑗 to the reward of response 𝑧 𝑏, 𝑗 :
+                                                                                  
+                                                                           ℓ𝑏, 𝑗
+                                    𝑟𝑏len
+                                       , 𝑗 = − min        𝐶max , 𝑘 ( 𝑏)                ,          (9)
+                                                                          𝐿norm
+
+where ℓ𝑏, 𝑗 is the number of reasoning tokens, 𝐿norm is a reference length, and 𝐶max caps the maxi-
+mum deduction applied to a trajectory. The token-penalty coefficient decreases exponentially
+with the requested effort:
+                                                        
+                                                𝑏 − 𝑏min
+                              𝑘 ( 𝑏) = 𝑘0 exp −            ,   𝜏 = 𝜆Δ𝑏,                        (10)
+                                                            𝜏
+
+where 𝑘0 is the basic penalty coefficient at different effort levels, 𝑏𝑚𝑖𝑛 is the minimum value of
+B, Δ𝑏 is the average spacing between training effort levels, and 𝜆 controls the rate of penalty
+decay. Increasing 𝑏 by 𝜏 multiplies the penalty coefficient by 𝑒−1 . The parameter 𝑘0 controls the
+overall pressure toward shorter reasoning, whereas a smaller 𝜏 causes the penalty to decay more
+rapidly and tends to produce greater behavioral separation between effort levels. Appendix C
+provides a marginal-utility motivation for the exponential parameterization of 𝑘 ( 𝑏).
+
+                                                           29
+    At deployment time, the scalar 𝑏 provides a flexible control interface over the model’s
+reasoning strength. By varying 𝑏, a single model checkpoint can move between different
+operating regimes along the learned cost–quality frontier, adapting to different latency, token-
+budget, and solution-quality requirements. Although training uses only a finite set of effort
+levels, intermediate values can be used at deployment to elicit interpolated reasoning behaviors,
+providing a fine-grained and efficient mechanism for test-time resource allocation.
+    In our production deployment launched in September 2026, the public API exposes three
+preset reasoning-effort tiers—max, high, and low—which map directly onto this scalar interface.
+As summarized in Table 2, the three tiers correspond to effort values of 𝑏 = 100, 𝑏 = 75, and
+𝑏 = 50, respectively, so that API users select an operating point on the learned cost–quality
+frontier without any change to the model weights or decoding configuration.
+
+Table 2 | Mapping between the public API reasoning-effort tiers and the underlying scalar effort
+values 𝑏.
+
+                                     API tier   Effort value 𝑏
+                                     max             100
+                                     high             75
+                                     low              50
+
+
+
+5.2. Asynchronous Post-training Infrastructure
+
+The long-tail problem during the rollout phase of RL for LLMs has consistently been a major
+bottleneck for training efficiency. To address this, we extend our post-training infrastructure
+to allow asynchronous generation of samples (Zeng et al., 2026; Team et al., 2026b), which
+significantly mitigates the long-tail issue in the rollout phase by maintaining a sufficiently high
+level of concurrency. Asynchronous training is now enabled for nearly all our RL and OPD
+tasks, and rollout efficiency has improved substantially.
+
+5.2.1. Overall Workflow
+
+We colocate rollout and training on the same physical devices and time-share their execution,
+eliminating the need to manually tune resource allocation between the two phases. Each task
+specifies an upper bound on the number of in-flight samples, and the system maintains this
+bound throughout the rollout phase.
+    We evaluated three dispatch granularities for maintaining the target rollout concurrency.
+Our final approach is sample-level dispatch: once the number of newly completed samples
+reaches the GRPO group size assigned to the next prompt, we dispatch that prompt regardless
+of which groups produced those completions. This helps maintain a steady rollout concurrency
+throughout training. Before settling on this dispatch strategy, we experimented with two
+alternative dispatch granularities. In the first attempt, we dispatched several extra batches at
+the beginning and supplemented a full batch after each training iteration; however, this caused
+severe oscillations in training metrics, indicating that batch-level granularity was too coarse. In
+the second attempt, we switched to prompt-level dispatch, where a new prompt was dispatched
+after one GRPO group finishes, but found that it stalled easily on long-tail samples within a
+GRPO group, making it difficult to smoothly maintain the target rollout concurrency.
+   Once enough training samples have accumulated, training preempts ongoing rollouts. Dur-
+
+                                                30
+ing training, we use concatenated routing-replay: for samples that span multiple checkpoints,
+we concatenate the expert routing produced at each rollout segment rather than discarding and
+recomputing the routing information with new checkpoints.
+
+5.2.2. Mitigating Length Bias and Off-Policy Effects
+
+Asynchronous generation, while effectively improving rollout efficiency, introduces two side
+effects that can degrade training quality. First, it creates a length-distribution bias, especially in
+the early training stage, because shorter sequences tend to complete first and thus dominate
+the initial training batches. Second, it inevitably produces off-policy samples, i.e., samples
+whose tokens are partially or entirely generated by earlier checkpoints. These two issues require
+different handling strategies.
+    To address the length bias, we employ two mechanisms. First, the dispatcher can limit
+concurrency on a per-dataset basis, which helps regulate the proportion of each dataset in the
+steady-state training batch, indirectly mitigating the length skew by controlling the sources of
+incoming samples. Second, we support discarding early-returned short samples to smooth the
+transition into the steady-state length distribution, and prevent the model from overfitting to
+overly short sequences.
+    For the off-policy issue, we implement two additional mechanisms. First, by tuning the logic
+that controls sample dispatching and the waiting condition for training samples, we can bound
+the maximum off-policy ratio, ensuring that the training data does not deviate excessively from
+the current model. Second, during training, we add a loss masking scheme that eliminates the
+contribution of tokens with excessive staleness, thereby mitigating the adverse impact of stale
+samples on gradient updates.
+
+5.2.3. Performance Optimization
+
+In our asynchronous RL framework, the rollout phase is periodically interrupted to switch to
+updated policy checkpoints. We aim to make this process seamless: interruptions should be
+near-instantaneous, and interrupted rollouts should resume as if never stopped.
+   To stop rollouts promptly, we support token-level interruption: generation can be halted at
+any token boundary. Once sufficient training data has been collected, all in-flight samples stop
+almost immediately, allowing the system to enter the training phase without delay.
+    To preserve rollout progress across checkpoint switches, rollout states such as KV cache and
+expert routing are persisted at token granularity during generation. Upon resumption with a
+new checkpoint, the persisted states are directly reused, eliminating the cost of re-prefilling and
+allowing interrupted samples to continue exactly where they left off. Since this requires retaining
+the states of all in-flight samples, we perform sample-grained garbage collection, releasing each
+sample’s states as soon as it completes.
+   Beyond checkpoint switching, the same fast-interruption and seamless-resumption machin-
+ery allows the training jobs to respond promptly to cluster scheduling preemption signals
+without losing progress, thereby improving overall cluster utilization.
+
+5.2.4. Large-Scale On-Policy Distillation
+
+As the last stage of post-training, the final full-vocabulary OPD task is trained on datasets from
+all domains using over 40 teacher models. It also adopts asynchronous generation to improve
+
+
+                                                 31
+rollout efficiency. Due to differences in training procedures across domains, the best teacher for
+each domain may come from a different stage of model development. Moreover, the teacher
+models may differ architecturally from one another and from the student. Our post-training
+infrastructure readily accommodates this setting, supporting full-vocabulary OPD with an
+effectively unbounded number of architecturally heterogeneous teachers, and efficient switching
+among them at negligible cost (DeepSeek-AI, 2026b).
+    The OPD stage also requires dynamic reconfiguration during training. We continuously
+track model capabilities and may adjust the training recipe accordingly, including the dataset
+mixture, per-dataset concurrency limits, and active teachers. Such changes are straightforward
+in synchronous training where rollout batches provide explicit configuration boundaries. In the
+asynchronous setting, however, samples generated under different configurations may coexist
+in flight. Our infrastructure supports consistent transitions between configurations without
+disrupting rollout or training.
+
+5.3. Evaluation
+
+5.3.1. Evaluation Setup
+
+Our post-training evaluation focuses primarily on reasoning and agentic capabilities, while
+knowledge-intensive performance is largely determined by pretraining and reported in Table 1.
+For reasoning, we evaluate on GPQA Diamond (Rein et al., 2023), Humanity’s Last Exam (Phan
+et al., 2025), Codeforces (internal benchmark), and MathArena Apex (Dekoninck et al., 2025),
+using temperature and top- 𝑝 of 1.0. For agentic capabilities, we evaluate across four categories:
+
+   • Code agent: Terminal-Bench 2.1 (Merrill et al., 2026), Terminal-Bench 3.0 (Marten et al.,
+     2026b), Terminal-Bench 4.0 (Marten et al., 2026a), DeepSWE v1.1 (DataCurve, 2026), Pro-
+     gramBench (Yang et al., 2026), NL2Repo-Bench (Ding et al., 2025).
+   • Cyber security: SEC-Bench Pro version 260505 (Lee et al., 2026), CyberGym (Wang et al.,
+     2026c), and ExploitGym (Wang et al., 2026b).
+   • General agent: the public evaluation set of AutomationBench v1.0.6 (Shepard and Sali-
+     mans, 2026), Agents’ Last Exam (Sun et al., 2026a) (ALE-CLI).
+   • Visual agent: Chartography (Garre et al., 2026), BabyVision (Chen et al., 2026), main set of
+     ZeroBench (Roberts et al., 2025).
+
+For code agents, we evaluate DeepSeek-V4.1-Flash using the Minimal mode of DeepSeek
+Harness with a 1M-token context window, temperature set to 1.0, and top-p set to 0.95. To align
+with official setup requirements, we employ the mini-SWE harness for DeepSWE v1.1. For
+SEC-Bench Pro, we utilize the Claude Code harness specifically for its session compact design.
+For visual agent tasks, we evaluate using the Claude Code harness with a 512k-token context
+window, temperature set to 1.0, and top-p set to 0.95. Agents’ Last Exam and AutomationBench
+are evaluated with their official scaffolds. Model performance with other coding scaffolds is
+reported in Table 4.
+    To mitigate reward hacking in coding agent evaluations, we restrict internet access and strip
+Git histories from the environment. Additionally, we automatically purge transient build and
+package caches across diverse environments, including Go module caches (go/mod), node
+modules dependency artifacts, compiled .jar files, and Python pycache directories. Despite
+these precautions, we still observe instances of exploit-seeking behavior during testing—such
+as decompiling core Ubuntu Linux packages to uncover vulnerabilities in CyberGym. As
+models grow increasingly capable, standard evaluation infrastructure (e.g., Docker containers
+
+                                               32
+and validation scripts) becomes more susceptible to model gaming. We urge the broader
+research community to prioritize detecting and mitigating these behaviors when designing
+next-generation benchmarks.
+
+5.3.2. Evaluation Results
+
+Table 3 | Comparison between DeepSeek-V4.1-Flash with closed/open source models. † denotes
+text-only subset of HLE. The best results are highlighted in bold; the second-best results are
+underlined.
+
+                                               Opus-5 GPT-5.6 Sol K3 GLM-5.3 DS-V4-Pro DS-V4-Flash DS-V4.1-Flash
+            Benchmark (Metric)
+                                                Max     Max      Max Max       Max        Max          Max
+Reasoning
+
+
+
+
+            GPQA Diamond (Pass@1)               93.4     94.1    92.9   88.1    92.4      89.9          90.9
+            HLE (Pass@1)                        56.3     44.5    43.5   42.0†   42.7†     37.8†     36.8 (39.1† )
+            Codeforces (Rating)                  -        -       -       -     3348      3289         3471
+            MathArena Apex (Pass@1)              -        -      65.6     -     65.3      58.6          65.6
+            Terminal-Bench 2.1 (Pass@1)         89.1     88.8    88.3   88.2    87.9       82.7         90.6
+            Terminal-Bench 3.0 (Pass@1)         43.3     34.4    17.7   28.3    11.8        7.6         30.0
+            Terminal-Bench 4.0 (Pass@1)         51.8     39.9    12.6   37.9    12.4        7.0         31.2
+            DeepSWE v1.1 (Resolved)             74.0     73.0    67.5   66.9    62.7       54.4         74.2
+            ProgramBench (Almost@1)             37.0     23.0    17.5   19.0    15.5         -          20.3
+            NL2Repo-Bench (Score)               75.3     56.8    58.0   58.0    61.5       54.2         65.4
+            CyberGym (Pass@1)                    -       84.5    80.0   84.5    83.3       76.7         88.1
+Agentic
+
+
+
+
+            SEC-Bench Pro (Pass@1)               -       74.3     -      -      56.4       30.9         62.8
+            ExploitGym (Pass@1)                 22.1     33.7     -     15.0     5.4        1.8         15.3
+            HLE w/ tools (Pass@1)               63.6      -      59.8   62.5    60.0       51.5         63.9
+            Automation-Bench (Pass@1)           50.3     45.8    46.7   48.8    43.2       37.7         54.8
+            Agents’ Last Exam(Pass@1)           28.6     26.7    27.6   28.5    25.7       25.2         31.8
+            Chartography w/ tools (Pass@1)      84.0     79.9    68.1    -        -          -          78.9
+            BabyVision w/ tools (Pass@1)        94.1     88.9    85.7    -        -          -          89.6
+            ZeroBench-main w/ tools (Pass@5)    52.0     53.0    41.0    -        -          -          49.0
+
+   As detailed in Table 3, DeepSeek-V4.1-Flash exhibits significant performance upgrades
+across both reasoning and agentic benchmarks over its predecessor, DeepSeek-V4-Flash, while
+matching or outperforming top-tier open-source and proprietary models.
+    In core reasoning tasks, DeepSeek-V4.1-Flash achieves a Codeforces rating of 3471, sur-
+passing both DeepSeek-V4-Flash (3289) and DeepSeek-V4-Pro (3348). On MathArena Apex,
+it obtains a 65.6% Pass@1 accuracy, fully matching the top-performing open-source baseline
+Kimi-K3 (65.6%) and DeepSeek-V4-Pro (65.3%). Furthermore, its GPQA Diamond score reaches
+90.9%, showing steady improvements over DeepSeek-V4-Flash (89.9%).
+    The performance gains are even more pronounced across agentic tasks. Notably, on Deep-
+SWE v1.1, DeepSeek-V4.1-Flash reaches 74.2% pass rate, marking a substantial jump from
+DeepSeek-V4-Flash (54.4%) and surpassing leading proprietary models including Opus-5 (74.0%)
+and GPT-5.6 Sol (73.0%). On Terminal-Bench 2.1, it achieves 90.6%, outperforming Opus-5
+(89.1%) and GLM-5.3 (88.2%). Similarly, on Automation-Bench (54.8%) and Agents’ Last Exam
+(31.8%), DeepSeek-V4.1-Flash establishes leading scores over both open-source counterparts
+and top closed-source systems. Despite its compact nature, DeepSeek-V4.1-Flash demonstrates
+state-of-the-art agentic capabilities, substantially closing the gap with frontier closed-source
+models while establishing clear advantages among open-source alternatives.
+   On cyber-security tasks, DeepSeek-V4.1-Flash establishes a new state of the art among open-
+source models. Given the dual-use nature of these capabilities, we encourage the community to
+
+                                                                33
+apply them responsibly, such as for defensive security research and vulnerability remediation.
+In the domain of visual agent tasks, DeepSeek-V4.1-Flash demonstrates robust capabilities,
+particularly in scenarios requiring visual reasoning and the analysis of complex professional
+charts. While it outperforms the leading open-source model Kimi-K3, we acknowledge that a
+measurable gap still remains when benchmarked against the leading closed-source alternatives.
+    Beyond peak performance, DeepSeek-V4.1-Flash exposes a reasoning-effort setting that
+allows users to trade inference cost for accuracy in a controllable manner. As illustrated in
+Figure 9, both accuracy and output length increase steadily with the effort level across reasoning
+and agentic benchmarks alike. Raising the effort from 25 to 100 improves the average Pass@1 on
+eight reasoning-intensive benchmarks from 67.1% to 76.3%, on DeepSWE v1.1 from 66.0% to
+74.2%, and on Terminal-Bench 2.1 from 82.4% to 90.6%, at the cost of roughly 2.5× more output
+tokens. Notably, the effort control learned on single-response reasoning transfers faithfully
+to long-horizon agentic trajectories, where it governs the total amount of exploration and
+verification across turns. The gains are front-loaded: the 60–80 range already recovers most
+of the accuracy of the maximum setting at less than half of its token budget, whereas the final
+step to effort 100 lengthens agent trajectories by 1.6–1.8× for only marginal improvements. The
+maximum tier is thus best reserved for the most challenging tasks, while moderate effort levels
+offer a favorable cost–performance balance for everyday agentic use.
+
+5.3.3. Performance across reasoning efforts
+
+Figure 9 reports performance and average response length across a range of budget values. As
+the reasoning effort increases, the model produces progressively longer reasoning traces and
+accuracy improves monotonically on reasoning-intensive benchmarks and software engineering
+tasks, with the largest gains concentrated in the low-to-mid budget range and diminishing
+returns beyond. Although our RL involves only a limited number of effort levels, the use of
+scalar efforts achieves flexible, interpolated control of response length within a specific range.
+This allows practitioners to trade off quality against latency and token cost along a smooth
+continuum: latency-sensitive applications can operate at low effort with modest accuracy
+degradation, while difficult tasks can invoke high effort to recover the model’s full reasoning
+capability. In our public API service, we expose three preset effort levels that map onto this
+scale: low, high, and max correspond to effort values of 50, 75, and 100, respectively.
+
+5.3.4. Performance across agent scaffolds
+
+In practice, a model is rarely deployed within a single fixed agent framework; different scaffolds
+vary in their system prompts, tool definitions, context management strategies, and interaction
+protocols, and a model that overfits to one particular harness may degrade substantially when
+placed in another. To assess the robustness of our model to such variation, our comparison covers
+eight configurations from six scaffold families: Claude Code (Anthropic, 2026), Codex (Ope-
+nAI, 2026), OpenCode (Anomaly, 2026), Pi (Zechner, 2026), mini-SWE (Yang et al., 2024), and
+DeepSeek Harness (DSH) (DeepSeek-AI, 2026a) in Minimal, Standard, and PTC modes. For
+each scaffold, we keep the model checkpoint, decoding configuration, and task set identical, and
+only the surrounding harness, including its native system prompt, tool schema, and turn-taking
+logic, is changed. Table 4 reports performance at Max reasoning effort (100) on DeepSWE v1.1
+and Terminal-Bench v2.1.
+    The model’s agentic capabilities transfer well across scaffold families with different prompts
+and tool interfaces, rather than depending on conventions specific to a particular harness.
+Its performance remains robust as the surrounding interaction protocol and tool abstractions
+
+                                               34
+                        Reasoning-intensive                                                    Avg Pass@1               Avg output tokens
+                           Benchmarks                                                                DeepSWE v1.1                                                                 Terminal-Bench v2.1
+              78                                    35                                    76                                     225                                    94                                     100
+              76                                                                          74                                                                            92
+
+
+
+
+                                                         Output tokens (k)
+
+
+
+
+                                                                                                                                       Output tokens (k)
+
+
+
+
+                                                                                                                                                                                                                     Output tokens (k)
+                                                    30                                                                           200                                                                           80
+              74                                                                                                                                                        90
+ Pass@1 (%)
+
+
+
+
+                                                                             Pass@1 (%)
+
+
+
+
+                                                                                                                                                           Pass@1 (%)
+                                                                                          72                                     175
+              72                                    25                                                                                                                  88                                     60
+                                                                                          70                                     150
+              70                                    20                                                                                                                  86
+                                                                                          68                                     125                                                                           40
+              68                                    15                                                                                                                  84
+              66                                                                          66                                     100                                    82
+                                                    10                                                                                                                                                         20
+              64                                                                          64                                     75                                     80
+                   25    40    60      80     100                                              25   40    60      80       100                                               25    40    60      80      100
+                          Reasoning effort                                                           Reasoning effort                                                               Reasoning effort
+
+
+Figure 9 | Performance and output length as a function of reasoning effort. Each panel plots
+Pass@1 (solid, left axis) and mean output tokens per response (dashed, right axis) as the
+reasoning-effort value is varied from 25 to 100; The results of reasoning-intensive benchmarks
+are averaged over eight benchmarks (AIME 2026, Apex 2025 Shortlist, GPQA Diamond, HLE,
+IMO-AnswerBench, LiveCodeBench, MathArena-Apex, SimpleQA-Verified). DeepSWE v1.1
+is evaluated based on mini-SWE and Terminal-Bench v2.1 is evaluated based on DeepSeek
+Harness (Minimal).
+
+                               Table 4 | Performance across agent scaffolds at Max reasoning effort.
+
+                                                                                                                                                                                      DeepSeek Harness
+Benchmark (Metric)                             Claude Code                                     Codex        OpenCode          Pi                       mini-SWE
+                                                                                                                                                                                   Minimal Standard PTC
+DeepSWE v1.1 (Resolved)                                           69.8                           65.6         65.5           66.2                          74.2                       72.6             70.5            67.6
+Terminal-Bench v2.1 (Pass@1)                                      88.0                           84.1         85.0           86.1                          90.3                       90.6             85.8            85.8
+Note. All scaffolds use 𝑁 = 8 samples per task on DeepSWE v1.1 and 𝑁 = 3 on Terminal-Bench v2.1. Runs use Linux containers,
+temperature 1.0, top-p 0.95, a 1M-token context window, and max_steps=500 model-generation rounds per agent on both
+benchmarks. Terminal-Bench v2.1 is evaluated without network access. We evaluate four Claude Code versions, with per-version
+results and their average reported in Appendix Table 5; this table reports v2.1.251. More scaffold-specific configurations are detailed
+in Appendix B.1.
+
+
+
+change, indicating that its agentic behavior is not tightly coupled to a single scaffold design. This
+robustness is consistent with the diversity of environments, tool schemas, and interaction formats
+in our synthesized training data (Section 5), which is designed to encourage generalization
+across agent scaffolds.
+
+5.3.5. Multi-Agent
+
+To explore multi-agent collaboration on complex tasks, we conduct preliminary experiments
+with DeepSeek-V4.1-Flash using DeepSeek Harness’s Agent Team mode.
+   Multi-Agent Harnesses. We use DeepSeek Harness in Agent Team mode, where a lead agent
+can asynchronously create named, persistent teammates by default through spawn_teammate.
+Each receives a delegated task and starts in either fresh mode without lead history or fork
+mode with a one-time snapshot of the lead’s completed turns. All agents share one repository
+checkout, making edits immediately visible to one another.
+    Agents communicate through a durable peer mailbox. A message sent through send_message
+reaches a running teammate at its next step boundary, starts a new turn for an idle teammate,
+or resumes an inactive teammate. Across each teammate’s task lifecycle, the lead monitors
+runtime status with list_agents and waits for status, mailbox, or shared-task changes with
+wait_agent. Task ownership, dependencies, and advisory write scopes are maintained on
+a shared task board (using the four team_task_* tools with revision checks on updates).
+
+
+                                                                                                             35
+                                                    Agent Teams Test-Time Compute Scaling
+                                                             Multi-Agent                              Single-Agent
+                                        ProgramBench                                                           FrontierSWE v2 (no-gpu)
+                         35                                                                     35                                       32.90%
+                                                           30.04%
+                         30                                                                     30                                       28.20%
+       Almost@1 Credit
+
+
+
+
+                                                                                 Mean@5 Score
+                         25                                                                     25
+                                                           20.39%
+                         20                                                                     20
+
+                         15                                                                     15
+
+                         10                                                                     10
+
+                          5                                                                      5
+                              1h   2h          4h             8h      12h                            1h       2h       4h        8h           20h
+                                                    Deadline per rollout (wall-clock hours, log scale)
+
+
+Figure 10 | Test-time compute scaling for single-agent and multi-agent configurations on Pro-
+gramBench (Almost@1) and FrontierSWE v2 (Mean@5) as functions of the per-rollout wall-clock
+deadline.
+
+
+When intervention is needed, only the lead can interrupt a teammate’s current turn through
+interrupt_agent. Once the required work is complete, the lead reviews and tests the com-
+bined changes and produces the final response.
+    Training. We train Agent Team mode with an RL reward combining task performance, a
+collaboration bonus that encourages delegation and inter-agent communication, and a derived-
+latency penalty that promotes efficient coordination. Derived latency is computed by represent-
+ing execution events and their collaboration dependencies as a directed acyclic graph (DAG),
+assigning costs from token counts at fixed prefill/decode rates plus measured tool-execution
+time, and taking the length of the critical path. This encourages useful parallelism while penaliz-
+ing unnecessary sequential work and synchronization, with reduced sensitivity to serving-side
+batching and queuing delays.
+    Performance. We construct a high-confidence subset of ProgramBench (Yang et al., 2026)
+by retaining only tasks for which the reference solution achieves a pass rate of at least 95% on
+the hidden test suite. This filtering procedure leaves 172 "golden" tasks. We also evaluate on
+FrontierSWE v2 (Kondra et al., 2026), a larger and more challenging successor to FrontierSWE
+that uses a substantially improved methodology. We construct a no-GPU subset from the
+currently public tasks by excluding tasks that require GPU access. We evaluate single-agent and
+multi-agent configurations on both benchmarks under explicit per-rollout wall-clock deadlines.
+The results reported here are preliminary: we compare the strongest observed multi-agent
+configurations with the strongest available single-agent baselines. On ProgramBench, we run
+up to three rollouts per task, corresponding to 516 planned rollouts for each configuration. We
+report Almost@1, which measures the fraction of individual rollouts achieving a score of at least
+0.95. On FrontierSWE v2, we report Mean@5. ProgramBench deadlines range from 1 to 12 hours,
+while FrontierSWE v2 is evaluated at deadlines ranging from 1 to 20 hours. At each deadline,
+metrics are computed from the outputs available when the deadline is reached.
+    As shown in Figure 10, multi-agent configurations outperform their single-agent counter-
+parts at every deadline on both benchmarks. On ProgramBench, Almost@1 increases from
+13.59% at 1 hour to a peak of 30.04% at 8 hours for the multi-agent configuration, compared with
+12.79% and 20.39% for the single-agent configuration. On FrontierSWE v2, Mean@5 increases
+from 13.50% at 1 hour to 32.90% at 20 hours for the multi-agent configuration, compared with
+an increase from 10.50% to 28.20% for the single-agent configuration.
+
+
+                                                                            36
+6. Conclusion, Limitations, and Future Directions
+In this work, we introduce DeepSeek-V4.1-Flash, a multimodal Mixture-of-Experts (MoE) model
+with support for contexts of up to one million tokens. Through joint optimization of model
+architecture, cache precision, and deployment strategy, DeepSeek-V4.1-Flash pushes the limits
+of KV cache compression. Its Causal Encoder-Decoder (CED) architecture enables the model
+to activate only 8B parameters per token during prefill, compared with 16B during decode,
+improving cost efficiency for input-heavy agentic workloads. At equal sequence lengths, cross-
+layer KV cache reuse in Compressed Sparse Attention 2 (CSA2) and FP4 KV caching reduce
+its global KV cache footprint (always in HBM) to 890 bytes per token, roughly 1/4 of the
+corresponding footprint of DeepSeek-V4-Flash. SWA Bounded Replay further reduces its
+persistent KV cache footprint (always on SSD or in host memory) to roughly 1/8 of that of
+DeepSeek-V4-Flash. These reductions alleviate HBM and SSD capacity pressure while the
+model delivers substantially better overall performance than DeepSeek-V4-Flash. Despite
+possessing a significantly smaller parameter footprint than contemporary open-source models
+such as GLM-5.3 and Kimi-K3, DeepSeek-V4.1 achieves comparable—and in several tasks,
+superior—performance across key benchmarks.
+    Although DeepSeek-V4.1-Flash substantially simplifies several architectural components
+relative to DeepSeek-V4-Flash, the newly introduced architectural changes also create robustness
+boundaries that have yet to be fully characterized. Our internal evaluations cover a diverse
+range of test cases and boundary conditions, and we have not observed any systematic degra-
+dation in model capabilities in the evaluated settings. Nevertheless, no finite test suite can
+cover every extreme input and deployment condition. Potential selection errors in CSA2 and
+approximate state reconstruction in SWA Bounded Replay may still cause capability degradation
+in untested boundary cases. Going forward, we will continue to expand our stress-testing and
+evaluation stack, with particular attention to sparse retrieval over long contexts and SWA state
+reconstruction at cache-resumption boundaries. We will also monitor real-world workloads,
+systematically characterize potential failure modes and robustness boundaries, and further
+improve model robustness under extreme conditions.
+    As AI models achieve remarkable performance capabilities, standard evaluation benchmarks
+have increasingly reached saturation. While DeepSeek-V4.1-Flash demonstrates performance
+that closely approaches top-tier models like Fable-5 and GPT-6 Astra—offering a highly compa-
+rable user experience in daily applications—a performance gap remains on the most challenging
+tasks. Although benchmark scores show a narrow margin, this parity does not imply that the
+model matches the frontier capabilities of leading closed-source systems on complex, high-
+difficulty reasoning and edge cases.
+   Consequently, we will continuously update our evaluation protocols to ensure rigorous
+assessment of state-of-the-art reasoning boundaries. Alongside continued efforts to reduce
+model costs, we believe that further advances in model intelligence will depend on the coor-
+dinated scaling of data, model capacity, and RL. With DeepSeek-V4.1-Flash as a new starting
+point, we will continue to explore the limits of model capabilities and systematically address
+key challenges in large-scale data synthesis and RL scaling. We will also actively integrate
+model–harness co-design, enabling the joint system to evolve and be optimized together. By ad-
+vancing cost reduction and capability scaling in tandem, we hope to make highly capable agents
+more accessible and easier to deploy, further lowering the barriers to adopting AI technologies
+across a broader range of industries and scenarios.
+
+
+
+
+                                              37
+References
+J. Ainslie, J. Lee-Thorp, M. de Jong, Y. Zemlyanskiy, F. Lebrón, and S. Sanghai. Gqa: Training
+   generalized multi-query transformer models from multi-head checkpoints. arXiv preprint
+   arXiv:2305.13245, 2023.
+
+E. Alvarez, O. Almog, E. Chung, S. Layton, D. Stosic, R. Krashinsky, and K. Aubrey. Introducing
+   nvfp4 for efficient and accurate low-precision inference, 2025. URL https://developer.
+  nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-pre
+  cision-inference/.
+Anomaly. Opencode. https://github.com/anomalyco/opencode, 2026.
+
+Anthropic. Claude code. https://code.claude.com/docs/en/overview, 2026.
+
+Y. Bai, S. Tu, J. Zhang, H. Peng, X. Wang, X. Lv, S. Cao, J. Xu, L. Hou, Y. Dong, et al. Longbench
+   v2: Towards deeper understanding and reasoning on realistic long-context multitasks. In
+   Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics
+   (Volume 1: Long Papers), pages 3639–3664, 2025.
+
+Y. Bai, Q. Dong, T. Jiang, X. Lv, Z. Du, A. Zeng, J. Tang, and J. Li. Indexcache: Accelerating
+   sparse attention via cross-layer index reuse. arXiv preprint arXiv:2603.12201, 2026.
+
+W. Brandon, M. Mishra, A. Nrusimha, R. Panda, and J. Ragan-Kelley. Reducing transformer key-
+ value cache size with cross-layer attention. In A. Globerson, L. Mackey, D. Belgrave, A. Fan,
+ U. Paquet, J. Tomczak, and C. Zhang, editors, Advances in Neural Information Processing
+ Systems, volume 37, pages 86927–86957. Curran Associates, Inc., 2024. doi: 10.52202/07901
+ 7-2758. URL https://proceedings.neurips.cc/paper_files/paper/2024/file/9
+ e23d020c18e4c40d81c6a0fc7a46f68-Paper-Conference.pdf.
+L. Chen, D. Xu, C. An, X. Wang, Y. Zhang, J. Chen, Z. Liang, F. Wei, J. Liang, Y. Xiao, et al.
+  Powerattention: exponentially scaling of receptive fields for effective sparse attention. arXiv
+  preprint arXiv:2503.03588, 2025.
+
+L. Chen, W. Xie, Y. Liang, H. He, H. Zhao, Z. Yang, Z. Huang, H. Wu, H. Lu, Y. Bao, et al.
+  Babyvision: Visual reasoning beyond language. arXiv preprint arXiv:2601.06521, 2026.
+
+M. Chen, J. Tworek, H. Jun, Q. Yuan, H. P. de Oliveira Pinto, J. Kaplan, H. Edwards, Y. Burda,
+ N. Joseph, G. Brockman, A. Ray, R. Puri, G. Krueger, M. Petrov, H. Khlaaf, G. Sastry, P. Mishkin,
+ B. Chan, S. Gray, N. Ryder, M. Pavlov, A. Power, L. Kaiser, M. Bavarian, C. Winter, P. Tillet,
+ F. P. Such, D. Cummings, M. Plappert, F. Chantzis, E. Barnes, A. Herbert-Voss, W. H. Guss,
+ A. Nichol, A. Paino, N. Tezak, J. Tang, I. Babuschkin, S. Balaji, S. Jain, W. Saunders, C. Hesse,
+ A. N. Carr, J. Leike, J. Achiam, V. Misra, E. Morikawa, A. Radford, M. Knight, M. Brundage,
+ M. Murati, K. Mayer, P. Welinder, B. McGrew, D. Amodei, S. McCandlish, I. Sutskever, and
+ W. Zaremba. Evaluating large language models trained on code. CoRR, abs/2107.03374, 2021.
+ URL https://arxiv.org/abs/2107.03374.
+
+X. Cheng, X. Yu, C. Shao, J. Li, Y. Xiong, Y. Qian, J. Zhu, S. Ma, X. Zhang, J. Ye, et al. Dspark:
+  Confidence-scheduled speculative decoding with semi-autoregressive generation. arXiv
+  preprint arXiv:2607.05147, 2026a.
+
+X. Cheng, W. Zeng, D. Dai, Q. Chen, B. Wang, Z. Xie, K. Huang, X. Yu, Z. Hao, Y. Li, H. Zhang,
+  H. Zhang, D. Zhao, and W. Liang. Conditional memory via scalable lookup: A new axis of
+
+
+                                               38
+  sparsity for large language models. CoRR, abs/2601.07372, 2026b. doi: 10.48550/ARXIV.2601.
+  07372. URL https://doi.org/10.48550/arXiv.2601.07372.
+
+X. Cheng, W. Zeng, D. Dai, Q. Chen, B. Wang, Z. Xie, K. Huang, X. Yu, Z. Hao, H. Zhang, et al.
+  Conditional memory via scalable lookup: A new axis of sparsity for large language models.
+  In Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics
+  (Volume 1: Long Papers), pages 4968–4990, 2026c.
+
+K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek,
+  J. Hilton, R. Nakano, et al. Training verifiers to solve math word problems. arXiv preprint
+  arXiv:2110.14168, 2021.
+
+D. Dai, C. Deng, C. Zhao, R. X. Xu, H. Gao, D. Chen, J. Li, W. Zeng, X. Yu, Y. Wu, Z. Xie, Y. K.
+  Li, P. Huang, F. Luo, C. Ruan, Z. Sui, and W. Liang. Deepseekmoe: Towards ultimate expert
+  specialization in mixture-of-experts language models. CoRR, abs/2401.06066, 2024. URL
+  https://doi.org/10.48550/arXiv.2401.06066.
+DataCurve. Deepswe v1.1, 2026. URL https://deepswe.datacurve.ai/.
+
+DeepSeek-AI. Deepseek-v3 technical report. CoRR, abs/2412.19437, 2024. URL https://doi.
+ org/10.48550/arXiv.2412.19437.
+DeepSeek-AI. Deepseek-v2: A strong, economical, and efficient mixture-of-experts language
+ model. CoRR, abs/2405.04434, 2024. URL https://doi.org/10.48550/arXiv.2405.04
+ 434.
+DeepSeek-AI. Deepseek-v3.2: Pushing the frontier of open large language models, 2025. URL
+ https://arxiv.org/abs/2512.02556.
+DeepSeek-AI. Deepseek harness: Everything is a plugin. https://github.com/deepseek-a
+  i/deepseek-harness, 2026a.
+DeepSeek-AI. Deepseek-v4: Towards highly efficient million-token context intelligence. CoRR,
+ abs/2606.19348, 2026b. URL https://doi.org/10.48550/arXiv.2606.19348.
+
+J. Dekoninck, N. Jovanović, I. Petrov, and M. Vechev. Matharena apex: Unconquered final-answer
+   problems, 2025. URL https://matharena.ai/apex/.
+
+S. Deng, Z. Ouyang, T. Pang, Z. Liu, R. Jin, S. Yu, and Y. Yang. Rmnp: Row-momentum normal-
+   ized preconditioning for scalable matrix-based optimization. arXiv preprint arXiv:2603.20527,
+   2026.
+
+J. Ding, S. Long, C. Pu, H. Zhou, H. Gao, X. Gao, C. He, Y. Hou, F. Hu, Z. Li, et al. Nl2repo-bench:
+   Towards long-horizon repository generation evaluation of coding agents. arXiv preprint
+   arXiv:2512.12730, 2025.
+
+A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai, T. Unterthiner, M. Dehghani,
+  M. Minderer, G. Heigold, S. Gelly, J. Uszkoreit, and N. Houlsby. An image is worth 16x16
+  words: Transformers for image recognition at scale. In International Conference on Learning
+  Representations, 2021. URL https://openreview.net/forum?id=YicbFdNTTy.
+
+X. Du, Y. Yao, K. Ma, B. Wang, T. Zheng, K. Zhu, M. Liu, Y. Liang, X. Jin, Z. Wei, et al. Supergpqa:
+  Scaling llm evaluation across 285 graduate disciplines. arXiv preprint arXiv:2502.14739, 2025.
+
+
+
+                                                39
+D. Dua, Y. Wang, P. Dasigi, G. Stanovsky, S. Singh, and M. Gardner. DROP: A reading compre-
+  hension benchmark requiring discrete reasoning over paragraphs. In J. Burstein, C. Doran, and
+  T. Solorio, editors, Proceedings of the 2019 Conference of the North American Chapter of the
+  Association for Computational Linguistics: Human Language Technologies, NAACL-HLT
+  2019, Minneapolis, MN, USA, June 2-7, 2019, Volume 1 (Long and Short Papers), pages 2368–
+  2378. Association for Computational Linguistics, 2019. doi: 10.18653/V1/N19-1246. URL
+  https://doi.org/10.18653/v1/n19-1246.
+Y. Gao, J. Wei, Q. Zhang, Y. Cheng, S. Chen, Z. Tang, Z. Jiang, Y. Song, H. Zhang, L. Zhao,
+   B. Yang, G. Wang, S. Cao, and F. Luo. Hysparse: A hybrid sparse attention architecture with
+   oracle token selection and kv cache sharing. arXiv preprint arXiv:2602.03560, 2026.
+
+S. Garre, C. Mutty, S. Mehta, and E. Chen. Chartography: A benchmark for professional chart
+   understanding. arXiv preprint arXiv:2608.10677, 2026.
+
+A. Glentis, J. Li, A. Han, and M. Hong. Memory-efficient llm pretraining via minimalist optimizer
+  design. arXiv preprint arXiv:2506.16659, 2025.
+
+Y. Gu, L. Dong, F. Wei, and M. Huang. Minillm: Knowledge distillation of large language
+   models. In The Twelfth International Conference on Learning Representations, 2024.
+
+L. Haas, G. Yona, G. D’Antonio, S. Goldshtein, and D. Das. Simpleqa verified: A reliable
+  factuality benchmark to measure parametric knowledge. arXiv preprint arXiv:2509.07968,
+  2025.
+
+D. Hendrycks, C. Burns, S. Kadavath, A. Arora, S. Basart, E. Tang, D. Song, and J. Steinhardt. Mea-
+  suring mathematical problem solving with the math dataset. arXiv preprint arXiv:2103.03874,
+  2021.
+
+Y. Huang, Y. Bai, Z. Zhu, J. Zhang, J. Zhang, T. Su, J. Liu, C. Lv, Y. Zhang, J. Lei, et al. C-Eval: A
+   multi-level multi-discipline chinese evaluation suite for foundation models. arXiv preprint
+   arXiv:2305.08322, 2023.
+
+D. Hupkes and N. Bogoychev. Multiloko: a multilingual local knowledge benchmark for llms
+  spanning 31 languages. CoRR, abs/2504.10356, 2025. doi: 10.48550/ARXIV.2504.10356. URL
+  https://doi.org/10.48550/arXiv.2504.10356.
+B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam, and D. Kalenichenko.
+  Quantization and training of neural networks for efficient integer-arithmetic-only inference.
+  In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR),
+  June 2018.
+
+K. Jordan, Y. Jin, V. Boza, J. You, F. Cesista, L. Newhouse, and J. Bernstein. Muon: An optimizer
+  for hidden layers in neural networks. Cited on, page 10, 2024.
+
+M. Kazemi, B. Fatemi, H. Bansal, J. Palowitch, C. Anastasiou, S. V. Mehta, L. K. Jain, V. Aglietti,
+ D. Jindal, Y. P. Chen, et al. Big-bench extra hard. In Proceedings of the 63rd Annual Meeting of
+ the Association for Computational Linguistics (Volume 1: Long Papers), pages 26473–26501,
+ 2025.
+
+S. Kazemzadeh, V. Ordonez, M. Matten, and T. Berg. Referitgame: Referring to objects in
+  photographs of natural scenes. In Proceedings of the 2014 conference on empirical methods
+   in natural language processing (EMNLP), pages 787–798, 2014.
+
+
+                                                 40
+R. Kondra, S. Mhatre, A. Kumar, E. Chu, B. B. Ahmad, A. Nangia, R. Agarwal, A. Dasgupta,
+  A. Sinha, B. Sridharan, K. Dave, B. Graham, G. Song, A. Rahul, W. H. Lim, A. Thangamuthu,
+  R. Singh, D. Liu, N. Pour, C. Chen, and J. Mattern. Frontierswe v2. Proximal Blog, 2026.
+  https://frontierswe.com/blog/v2.
+
+H. Lee, J. Liu, D. Kim, W. Xia, Z. Zhang, C. S. Xia, and L. Zhang. Sec-bench pro: Can language
+  models solve long-horizon software security tasks? arXiv preprint arXiv:2605.26548, 2026.
+
+J. Li and S. Liu. Flashmla: Efficient multi-head latent attention kernels. https://github.com
+   /deepseek-ai/FlashMLA, 2025.
+J. Liu, J. Su, X. Yao, Z. Jiang, G. Lai, Y. Du, Y. Qin, W. Xu, E. Lu, J. Yan, Y. Chen, H. Zheng,
+   Y. Liu, S. Liu, B. Yin, W. He, H. Zhu, Y. Wang, J. Wang, M. Dong, Z. Zhang, Y. Kang, H. Zhang,
+   X. Xu, Y. Zhang, Y. Wu, X. Zhou, and Z. Yang. Muon is scalable for LLM training. CoRR,
+   abs/2502.16982, 2025. URL https://doi.org/10.48550/arXiv.2502.16982.
+
+I. Loshchilov and F. Hutter. Decoupled weight decay regularization. In International Conference
+   on Learning Representations, 2019. URL https://openreview.net/forum?id=Bkg6Ri
+   CqY7.
+K. Lu and T. M. Lab. On-policy distillation. Thinking Machines Lab: Connectionism, 2025. doi:
+  10.64434/tml.20251026. https://thinkingmachines.ai/blog/on-policy-distillation.
+
+J. Mao, J. Huang, A. Toshev, O. Camburu, A. L. Yuille, and K. Murphy. Generation and
+   comprehension of unambiguous object descriptions. In Proceedings of the IEEE conference
+   on computer vision and pattern recognition, pages 11–20, 2016.
+
+A. Marafioti, O. Zohar, M. Farré, M. Noyan, E. Bakouch, P. Cuenca, C. Zakka, L. B. Allal,
+  A. Lozhkov, N. Tazi, V. Srivastav, J. Lochner, H. Larcher, M. Morlon, L. Tunstall, L. von Werra,
+  and T. Wolf. Smolvlm: Redefining small and efficient multimodal models. arXiv preprint
+  arXiv:2504.05299, 2025.
+
+R. Marten, A. Shaw, I. Bercovich, B. Droste, T. Cerruti, S. Dillmann, R. Wang, D. Wahdany,
+  A. Hart, K. Krauth, ScaleAI, Snorkel AI, Turing, gNucleus AI, Boolean AI, N. Carlini, S. Lyu,
+  A. Wei, A. Khatua, B. Plüster, C. Dwivedi, C. Sutcliffe, Yuming, D. Tivris, D. Wang, H. W.
+  Goh, H. Xing, H. Lin, I. Salia, J. Seol, J. Bao, J. Ouyang, J. Park, L. Walsh, L. Kong, M. Ivanov,
+  M. Ubl, M. Liamets, O. Menis, P. Migdal, Q. Bao, R. Movva, R. Ben Chaim, N. Srinath,
+  S. Bogdanik, S. Yadav, S. Benjamin, T. Kung, W. Hughes, X. Lan, H. Gupta, S. Mishra, C. Wang,
+  H. He, J. Tu, K. Montgomery, Z. Tu, A. Naik, D. Mortensen, I. Zhang, Y. Mathur, E. Liu,
+  K. Singh, M. Yu, S. Feng, V. Gangal, Z. Tao, S. Ruan, J. Mueller, J. Cabezas, J. Bauer, K. X.
+  Li, R. Zhang, A. Feller, A. Madayan, L. Chen, B. Feuer, X. Li, B. Li, H. Raj, S. Galler, L. Shi,
+  I. Segal, K. Buchanan, S. P., R. Desai, A. Schneider, C. Settles, X. Lin, M. Nezhurina, A. Wang,
+  M. Kowalczyk, J.-X. Zhao, S. Satia, J. Hu, S. Atef, K. Chen, S. Vance, G. Segato, J. Jitsev,
+  A. Dimakis, M. Merrill, A. Konwinski, and L. Schmidt. Terminal-Bench, Aug. 2026a. URL
+  https://github.com/harbor-framework/terminal-bench.
+R. Marten, A. Shaw, A. Konwinski, and Terminal-Bench Contributors. Terminal-bench 3.0:
+  Harder tasks for better agents. https://www.tbench.ai/news/terminal-bench-3-0,
+  2026b. An Open Benchmark for Agent Work in Terminal Environments.
+
+M. Mathew, D. Karatzas, and C. Jawahar. Docvqa: A dataset for vqa on document images. In
+ 2021 IEEE Winter Conference on Applications of Computer Vision (WACV), pages 2199–2208.
+ IEEE, 2021.
+
+                                                41
+M. A. Merrill, A. G. Shaw, N. Carlini, B. Li, H. Raj, I. Bercovich, L. Shi, J. Y. Shin, T. Walshe, E. K.
+ Buchanan, et al. Terminal-bench: Benchmarking agents on hard, realistic tasks in command
+ line interfaces. arXiv preprint arXiv:2601.11868, 2026.
+
+V. K. Nagaraja, V. I. Morariu, and L. S. Davis. Modeling context between objects for refer-
+  ring expression understanding. In European conference on computer vision, pages 792–807.
+  Springer, 2016.
+
+Y. Nesterov. A method of solving a convex programming problem with convergence rate 𝑂 (1/𝑘2 ).
+   Soviet Mathematics Doklady, 27:372–376, 1983.
+
+OpenAI. gpt-oss-120b & gpt-oss-20b model card. CoRR, abs/2508.10925, 2025. doi: 10.48550/A
+ RXIV.2508.10925. URL https://doi.org/10.48550/arXiv.2508.10925.
+
+OpenAI. Codex. https://github.com/openai/codex, 2026.
+
+L. Phan, A. Gatti, Z. Han, N. Li, J. Hu, H. Zhang, C. B. C. Zhang, M. Shaaban, J. Ling, S. Shi, et al.
+   Humanity’s last exam. arXiv preprint arXiv:2501.14249, 2025.
+
+Y. Qian, S. Liu, and Y. Li. Deepselect: High-performance topk kernels for deepseek sparse
+   attention and sampling. https://github.com/deepseek-ai/DeepSelect, 2026.
+
+D. Rein, B. L. Hou, A. C. Stickland, J. Petty, R. Y. Pang, J. Dirani, J. Michael, and S. R. Bowman.
+  GPQA: A graduate-level google-proof q&a benchmark. arXiv preprint arXiv:2311.12022, 2023.
+
+J. Roberts, M. R. Taesiri, A. Sharma, A. Gupta, S. Roberts, I. Croitoru, S.-V. Bogolin, J. Tang,
+   F. Langer, V. Raina, et al. Zerobench: An impossible visual benchmark for contemporary large
+   multimodal models. arXiv preprint arXiv:2502.09696, 2025.
+
+B. D. Rouhani, R. Zhao, A. More, M. Hall, A. Khodamoradi, S. Deng, D. Choudhary, M. Cornea,
+   E. Dellinger, K. Denolf, S. Dusan, V. Elango, M. Golub, A. Heinecke, P. James-Roxby, D. Jani,
+   G. Kolhe, M. Langhammer, A. Li, L. Melnick, M. Mesmakhosroshahi, A. Rodriguez, M. Schulte,
+   R. Shafipour, L. Shao, M. Siu, P. Dubey, P. Micikevicius, M. Naumov, C. Verrilli, R. Wittig,
+   D. Burger, and E. Chung. Microscaling data formats for deep learning, 2023.
+
+M. Scetbon, C. Ma, W. Gong, and E. Meeds. Gradient multi-normalization for efficient LLM
+ training. In The Thirty-ninth Annual Conference on Neural Information Processing Systems,
+ 2025. URL https://openreview.net/forum?id=oanhUGY6un.
+
+N. Shazeer. Glu variants improve transformer. arXiv preprint arXiv:2002.05202, 2020.
+
+N. Shazeer and M. Stern. Adafactor: Adaptive learning rates with sublinear memory cost. In
+  International conference on machine learning, pages 4596–4604. PMLR, 2018.
+
+D. Shepard and R. Salimans. Automationbench. arXiv preprint arXiv:2604.18934, 2026.
+
+F. Shi, M. Suzgun, M. Freitag, X. Wang, S. Srivats, S. Vosoughi, H. W. Chung, Y. Tay, S. Ruder,
+   D. Zhou, D. Das, and J. Wei. Language models are multilingual chain-of-thought reasoners.
+   In The Eleventh International Conference on Learning Representations, ICLR 2023, Kigali,
+   Rwanda, May 1-5, 2023. OpenReview.net, 2023. URL https://openreview.net/forum?i
+   d=fR3wGCk-IXp.
+Y. Sun, L. Dong, Y. Zhu, S. Huang, W. Wang, S. Ma, Q. Zhang, J. Wang, and F. Wei. You only cache
+   once: Decoder-decoder architectures for language models. Advances in Neural Information
+   Processing Systems, 37:7339–7361, 2024.
+
+                                                  42
+Y. Sun, X. Han, W. Zhang, Y. Pang, T. Wang, Y. Cao, Y. Huang, C. Duroiu, H. Zhang, J. Lin, et al.
+   Agents’ last exam. arXiv preprint arXiv:2606.05405, 2026a.
+
+Y. Sun, Y. Zhang, L. Dong, J. Wang, and F. Wei. You only index once: Cross-layer sparse attention
+   with shared routing. arXiv preprint arXiv:2606.06467, 2026b.
+
+M. Suzgun, N. Scales, N. Schärli, S. Gehrmann, Y. Tay, H. W. Chung, A. Chowdhery, Q. V. Le,
+ E. H. Chi, D. Zhou, et al. Challenging big-bench tasks and whether chain-of-thought can solve
+ them. arXiv preprint arXiv:2210.09261, 2022.
+
+K. Team, T. Bai, Y. Bai, Y. Bao, J. Cai, X. Cai, P. Cao, Y. Cao, Z. Chai, Y. Charles, et al. Kimi k3:
+  Open frontier intelligence. arXiv preprint arXiv:2607.24653, 2026a.
+
+K. Team, T. Bai, Y. Bai, Y. Bao, S. Cai, Y. Cao, Z. Chai, Y. Charles, H. Che, C. Chen, et al. Kimi
+  k2.5: Visual agentic intelligence. arXiv preprint arXiv:2602.02276, 2026b.
+
+M. L. Team, B. Wang, B. Xiao, B. Zhang, B. Rong, B. Chen, C. Wan, C. Zhang, C. Huang, C. Chen,
+ et al. Longcat-flash-omni technical report. arXiv preprint arXiv:2511.00279, 2025.
+
+S. Tong, E. Brown, P. Wu, S. Woo, M. Middepogu, S. C. Akula, J. Yang, S. Yang, A. Iyer, X. Pan,
+   A. Wang, R. Fergus, Y. LeCun, and S. Xie. Cambrian-1: A fully open, vision-centric exploration
+   of multimodal llms, 2024.
+
+L. Wang, H. Gao, C. Zhao, X. Sun, and D. Dai. Auxiliary-loss-free load balancing strategy for
+  mixture-of-experts. CoRR, abs/2408.15664, 2024a. URL https://doi.org/10.48550/arX
+  iv.2408.15664.
+X. Wang, C. Xu, H. Cao, R. Tian, W. Zhao, K. Yu, and C. Zhao. Tilekernels. https://github.c
+  om/deepseek-ai/TileKernels, 2026a.
+Y. Wang, X. Ma, G. Zhang, Y. Ni, A. Chandra, S. Guo, W. Ren, A. Arulraj, X. He, Z. Jiang, T. Li,
+   M. Ku, K. Wang, A. Zhuang, R. Fan, X. Yue, and W. Chen. Mmlu-pro: A more robust and
+   challenging multi-task language understanding benchmark. CoRR, abs/2406.01574, 2024b.
+   URL https://doi.org/10.48550/arXiv.2406.01574.
+
+Z. Wang, N. Schiller, H. Li, S. S. Narayana, M. Nasr, N. Carlini, X. Qi, E. Wallace, E. Bursztein,
+  L. Invernizzi, et al. Exploitgym: Can ai agents turn security vulnerabilities into real attacks?
+  arXiv preprint arXiv:2605.11086, 2026b.
+
+Z. Wang, T. Shi, J. He, M. Cai, J. Zhang, and D. Song. Cybergym: Evaluating ai agents’ real-world
+  cybersecurity capabilities at scale. In International Conference on Learning Representations,
+  volume 2026, pages 123341–123386, 2026c.
+
+Z. Wen, Y. Shi, J. Wang, P. Luo, L. Qiao, D. Li, and T. Sun. Sron: State-free llm training via
+  row-wise gradient normalization. 2025.
+
+Z. Xie, Y. Wei, H. Cao, C. Zhao, C. Deng, J. Li, D. Dai, H. Gao, J. Chang, K. Yu, L. Zhao, S. Zhou,
+  Z. Xu, Z. Zhang, W. Zeng, S. Hu, Y. Wang, J. Yuan, L. Wang, and W. Liang. mhc: Manifold-
+  constrained hyper-connections, 2026. URL https://arxiv.org/abs/2512.24880.
+
+R. Xu, J. Li, and Y. Lu. On the width scaling of neural optimizers under matrix operator norms i:
+  Row/column normalization and hyperparameter transfer. arXiv preprint arXiv:2603.09952,
+  2026a.
+
+
+
+                                                 43
+Y. Xu, F. Meng, F. Jiang, Y. Wang, R. Zhou, Z. Wang, J. Wu, Z. Pan, X. Tang, W. Pei, et al. Hisa: Effi-
+   cient hierarchical indexing for fine-grained sparse attention. arXiv preprint arXiv:2603.28458,
+   2026b.
+
+J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. R. Narasimhan, and O. Press. SWE-agent:
+   Agent-computer interfaces enable automated software engineering. In The Thirty-eighth
+   Annual Conference on Neural Information Processing Systems, 2024. URL https://arxi
+   v.org/abs/2405.15793.
+J. Yang, K. Lieret, J. Ma, P. Thakkar, D. Pedchenko, S. Sootla, E. McMilin, P. Yin, R. Hou,
+   G. Synnaeve, D. Yang, and O. Press. Programbench: Can language models rebuild programs
+   from scratch?, 2026. URL https://arxiv.org/abs/2605.03546.
+
+L. Yu, P. Poirson, S. Yang, A. C. Berg, and T. L. Berg. Modeling context in referring expressions.
+   In European conference on computer vision, pages 69–85. Springer, 2016.
+
+J. Yuan, J. Zou, S. Wang, Y. Liu, and F. Nie. Nora: Normalized orthogonal row alignment for
+   scalable matrix optimizer. arXiv preprint arXiv:2605.03769, 2026.
+
+X. Yue, T. Zheng, Y. Ni, Y. Wang, K. Zhang, S. Tong, Y. Sun, B. Yu, G. Zhang, H. Sun, et al. Mmmu-
+  pro: A more robust multi-discipline multimodal understanding benchmark. In Proceedings of
+  the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long
+  Papers), pages 15134–15186, 2025.
+
+M. Zechner. Pi: The coding-agent harness you can make your own. https://github.com/e
