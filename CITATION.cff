@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this recipe, the engine, or its measurements, please cite it as below."
+title: "deepseek-v41-flash-spark: DeepSeek-V4.1-Flash on a single DGX Spark"
+abstract: >-
+  A serving recipe and PyTorch/Triton engine that runs the 510 GB DeepSeek-V4.1-Flash checkpoint
+  on one 128 GB GB10 (DGX Spark class) box: resident FP4 expert arena with NVMe expert streaming,
+  Engram tables read from NVMe, CUDA-graph decode with DSpark speculative decoding, FP8 dense
+  projections, and a measured expert-pruning ladder (quality vs speed), all with dated,
+  append-only results.
+authors:
+  - family-names: Bakeer
+    given-names: Khaled
+    alias: 0xBakeer
+repository-code: "https://github.com/0xBakeer/deepseek-v41-flash-spark"
+url: "https://github.com/0xBakeer/deepseek-v41-flash-spark"
+license: MIT
+version: 0.2.0-wip
+date-released: "2026-09-11"
+keywords:
+  - DeepSeek-V4.1-Flash
+  - DGX Spark
+  - GB10
+  - mixture-of-experts
+  - expert streaming
+  - speculative decoding
+  - Triton
+references:
+  - type: software
+    title: "DeepSeek-V4.1-Flash"
+    authors:
+      - name: "DeepSeek-AI"
+    url: "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash"
+    year: 2026
+  - type: software
+    title: "qwen38-flash-next-spark (NVMe-resident n-gram table streaming, the origin of the Engram-on-NVMe path)"
+    authors:
+      - family-names: Bakeer
+        given-names: Khaled
+    url: "https://github.com/0xBakeer/qwen38-flash-next-spark"
+    year: 2026

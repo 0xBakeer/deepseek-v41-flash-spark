@@ -290,6 +290,27 @@ docs/                 install · architecture · openai-api · benchmarking · g
 | [`CHANGELOG.md`](CHANGELOG.md) | a version is a measurement epoch |
 | [`CREDITS.md`](CREDITS.md) | whose work this is a thin layer over |
 
+## Citation
+
+If you refer to this recipe, its engine or its measurements, please cite the repository (GitHub's
+"Cite this repository" button reads `CITATION.cff`):
+
+```bibtex
+@software{bakeer2026dsv41spark,
+  author  = {Bakeer, Khaled},
+  title   = {deepseek-v41-flash-spark: {DeepSeek-V4.1-Flash} on a single {DGX Spark}},
+  year    = {2026},
+  month   = sep,
+  version = {0.2.0-wip},
+  url     = {https://github.com/0xBakeer/deepseek-v41-flash-spark},
+  note    = {Resident FP4 expert arena with NVMe expert streaming, CUDA-graph decode with DSpark,
+             FP8 dense projections, measured expert-pruning ladder; append-only dated results}
+}
+```
+
+When citing a specific number, name the tag and the section of RESULTS.md it comes from
+(e.g. "v0.2.0-wip, RESULTS.md §2.3"), since every tag keeps its own measured tables.
+
 ## License
 
 MIT (this repo). DeepSeek-V4.1-Flash weights and reference code are MIT (deepseek-ai) — read
