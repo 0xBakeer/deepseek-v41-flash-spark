@@ -73,7 +73,8 @@ class V41Engine:
     def __init__(self, model_dir: str, max_seq: int = 32768, arena_gb: float | None = None, device: str = "cuda",
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
-                 hot_profile: str | None = None, prune_keep: float | None = None):
+                 hot_profile: str | None = None, prune_keep: float | None = None,
+                 sim_bits: int | None = None, sim_cold_frac: float = 1.0):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
@@ -163,6 +164,20 @@ class V41Engine:
             ranked.sort(reverse=True)
             ranked = [(L, e) for _, L, e in ranked]
             self.model_prune_mask = masks
+            if sim_bits:
+                # simulated low-bit format on the coldest `sim_cold_frac` of the KEPT experts of every layer
+                from engine.codebook_sim import CodebookSim
+                self.store.requant_sims = {sim_bits: CodebookSim(sim_bits, device)}
+                pol = {}
+                for L in range(40):
+                    c = cc[L] / cc[L].sum() + cg[L] / cg[L].sum()
+                    keep = np.argsort(c)[::-1][:n_keep]
+                    n_cold = int(round(sim_cold_frac * n_keep))
+                    for e in keep[n_keep - n_cold:]:
+                        pol[(L, int(e))] = sim_bits
+                self.store.requant = pol
+                log(f"simulated {sim_bits}-bit codebook format on {len(pol)} of {n_keep * 40} kept experts "
+                    f"(coldest {sim_cold_frac:.0%} per layer)")
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
             log(f"pruned mode: keep {prune_keep:.2f} = {n_keep}/384 experts per layer, {len(ranked)} total, "
@@ -528,6 +543,8 @@ if __name__ == "__main__":
                     help="with --teacher-forced: comma list of keep fractions (e.g. 0.25,0.4,1.0); per layer only the "
                          "top-N experts by trace frequency stay routable; writes --tf-out with one entry per fraction")
     ap.add_argument("--prune-profile", default="mixed", choices=["mixed", "coding", "general"])
+    ap.add_argument("--sim-bits", type=int, default=None, help="simulate a 2/3-bit per-row codebook expert format (quality only)")
+    ap.add_argument("--sim-cold-frac", type=float, default=1.0, help="fraction of the kept experts (coldest first) that get --sim-bits")
     ap.add_argument("--prune-keep", type=float, default=None,
                     help="serve a REAP-style pruned model: only the top-F experts per layer are routable and all of "
                          "them are resident (F <= ~0.25 fits the arena on a 128 GB box)")
@@ -542,7 +559,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
-                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep)
+                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep,
+                    sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac)
     if a.verify_replay:
         short = "def fib(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
         res = eng.verify_replay([short, open(os.path.join(HERE, "..", "corpus", "sources", "dsv41_readme.md")).read()[:1400]])

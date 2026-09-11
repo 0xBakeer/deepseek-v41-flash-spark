@@ -262,6 +262,11 @@ class ExpertStore:
                 self.arena.load_slot(slot, w1.view(*W13_SHAPE), s1.view(*S13_SHAPE), w2.view(*W2_SHAPE),
                                      s2.view(*S2_SHAPE), w3.view(*W13_SHAPE), s3.view(*S13_SHAPE),
                                      non_blocking=True)
+                sim = getattr(self, "requant", None)  # simulated low-bit format (engine/codebook_sim.py)
+                if sim is not None:
+                    bits = sim.get(key)
+                    if bits:
+                        self.requant_sims[bits].requant_slot(self.arena, slot)
             stream.synchronize()  # the staging buffer is leased to another expert right after
             self.stats["h2d_s"] += time.perf_counter() - t0
             return slot

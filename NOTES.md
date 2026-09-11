@@ -706,3 +706,34 @@ Triton kernel, bf16 head, fixed-length masked indexer scoring. Verify step with 
 4.8); streaming unpruned: NVMe-bound, unchanged. Greedy argmax agreement with the reference path
 100% on the tested positions; hidden states differ 2-5% from bf16 GEMM noise amplified by router
 near-ties (same class as chunk-boundary noise before the tiling work).
+
+### 2026-09-11 morning -- results after the fix, quant landscape, the mix question
+
+Post-fix teacher-forced baseline (engine, trace corpus): coding 1.371 nats / top-1 74.4%, general
+2.864 / 55.1% (was 2.16 / 3.43 with the bug). Pruning sweep redone (mixed profile keep-sets):
+
+| kept / layer | in-sample coding / general | held-out coding / general |
+|---|---|---|
+| 100% | 1.371 / 2.864 | 1.507 / 3.188 |
+| 60% | +0.011 / +0.008 | -- |
+| 50% | +0.012 / +0.021 | +0.017 / +0.064 |
+| 40% | +0.015 / +0.086 | +0.022 / +0.113 |
+| 30% | +0.067 / +0.140 | +0.090 / +0.236 |
+| 25% | +0.130 / +0.189 | +0.162 / +0.320 |
+
+Speed (fast path, FP8 dense, greedy, same code prompt): unpruned streaming 3.5 tok/s (hit 0.83);
+keep 40% 6.4 (hit 0.94); keep 30% 9.5 (hit 0.99); keep 25% all-resident 13.6 (accept 3.09).
+Graphed step 173 ms + 15 ms draft with everything resident. Arena 78.9 GB = 4,198 slots (27%).
+
+Quant landscape (agent sweep, 33 repos up to 05:00 UTC): nothing fits one CUDA box. Lowest
+expert bpw published: 2.25 (GGUF, converter only, no runtime). One EXL3 K3 pack (3.0 bpw measured)
+is a 4-Spark TP4 target, 14% uploaded, not loadable. REAP checkpoints are MLX-only (REAP-50 +17%
+ppl per its author, consistent with our +0.06-0.11 nats). One 128 GB single-box claim: 15 tok/s on
+an M5 Max via SSD streaming, code unpublished.
+
+Khaled's mix idea (2/3/4-bit per layer): the resident budget is 1.16 bit/weight over ALL experts,
+so any mix must be paired with pruning to be resident: keep 40% at ~3 bpw (~82 GB) or keep 30%
+with the coldest 40% of those at 3 bpw (~77 GB). A per-row 8-of-16 codebook (subset of the FP4
+grid, so it runs in the FP4 arena for measurement) has 21% relative weight error (2-bit: 37%) --
+near the scalar-quantizer floor, roughly double FP4's own error. Teacher-forced runs of the
+candidates are in `results/simq/`.
