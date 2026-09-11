@@ -264,3 +264,13 @@ thinking off, 200 output tokens: **TTFT 39.6 s (207 prompt tok/s), decode 16.9 t
 3.28**, output a coherent summary of the prompt. The 8k prefill runs through the chunked encoder +
 decoder-replay path (2048-token chunks); decode at an 8k KV is not slower than at 100 tokens
 because the CSA2 index keeps the attended set at 512 tokens.
+
+### 2.9 Addendum 2026-09-11 10:55 — FP8 grouped `wo_a` kernel and fused decode attention (same served config)
+
+Step A/B on `engine/profile_fast.py` (keep 31 %, arena 90.5 GB): **165.7 → 152.7 ms** verify step,
+draft 14.3 → 13.7 ms. Two hundred greedy tokens, same prompt and flags as 2.6: **16.86 tok/s**
+(acceptance 3.06) with the new kernels vs 15.28 (acceptance 2.97) with `DSV41_WOA_FP8=0
+DSV41_FUSED_ATTN=0` back to back. The `wo_a` projection now runs from its stored FP8 (7.95 ms/step,
+was 13.89 as a bf16 einsum) and attention scores/softmax/PV run in one Triton kernel with bf16
+keys and fp32 math (1.0 ms/step, was 3.1 fp32 SIMT). Unit tests in `engine/test_kernels.py`;
+details and caveats in NOTES.md (2026-09-11 10:25-10:55).

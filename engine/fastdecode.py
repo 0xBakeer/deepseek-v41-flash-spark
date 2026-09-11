@@ -22,6 +22,7 @@ model.py does not extend across the two paths). `engine/test_fastdecode.py` meas
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -30,6 +31,15 @@ import torch.nn.functional as F
 from engine import model as M
 from engine.hc_sinkhorn import hc_split_sinkhorn
 import v41_ref as R
+
+try:
+    from decode_attn import decode_attention  # tools/decode_attn.py (Triton)
+except Exception:  # noqa: BLE001
+    decode_attention = None
+
+# One fused Triton kernel for the sinked softmax attention instead of two fp32 SIMT batched GEMMs
+# and the elementwise passes around them. DSV41_FUSED_ATTN=0 restores the torch path.
+FUSED_ATTN = os.environ.get("DSV41_FUSED_ATTN", "1") == "1" and decode_attention is not None
 
 T_VERIFY = 6   # tok + 5 drafts
 T_DRAFT = 5
@@ -139,14 +149,17 @@ class FastDecoder:
             mask = torch.cat([(wpos >= 0)[None].expand(T, -1),
                               torch.ones(T, T, dtype=torch.bool, device=self.dev)], dim=1)
         scale = a.head_dim ** -0.5
-        scores = torch.einsum("thd,tnd->thn", q.float(), kv_all.float()) * scale
-        scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
-        mx = scores.amax(dim=-1, keepdim=True).clamp_min(-1e30)
-        p = torch.exp(scores - mx)
-        denom = p.sum(-1, keepdim=True) + torch.exp(w.attn_sink[None, :, None] - mx)
-        o = torch.einsum("thn,tnd->thd", p / denom, kv_all.float()).to(torch.bfloat16)
+        if FUSED_ATTN:
+            o = decode_attention(q, kv_all, mask, w.attn_sink, scale)
+        else:
+            scores = torch.einsum("thd,tnd->thn", q.float(), kv_all.float()) * scale
+            scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
+            mx = scores.amax(dim=-1, keepdim=True).clamp_min(-1e30)
+            p = torch.exp(scores - mx)
+            denom = p.sum(-1, keepdim=True) + torch.exp(w.attn_sink[None, :, None] - mx)
+            o = torch.einsum("thn,tnd->thd", p / denom, kv_all.float()).to(torch.bfloat16)
         o = self._rope(o, fq, inverse=True).reshape(T, a.o_groups, -1)
-        o = torch.einsum("sgd,grd->sgr", o, w.wo_a)
+        o = R.wo_a_proj(o, w.wo_a)
         return _lin(o.flatten(1), w.wo_b)
 
     def _compressed(self, x, qr, w, L, pos, st):

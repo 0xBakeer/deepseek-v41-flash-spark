@@ -45,6 +45,11 @@ try:
 except Exception:  # noqa: BLE001
     FP8Weight, fp8_linear = None, None
 
+try:
+    from fp8_linear import FP8GroupedWeight, fp8_grouped_linear  # wo_a stays fp8 too (grouped GEMM)
+except Exception:  # noqa: BLE001
+    FP8GroupedWeight, fp8_grouped_linear = None, None
+
 FP4_TABLE = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
@@ -232,7 +237,7 @@ class LayerWeights:
         self.wq_a = fp8lin("attn.wq_a")
         self.wq_b = fp8lin("attn.wq_b")
         self.wkv = fp8lin("attn.wkv")
-        self.wo_a = dequant_fp8_block(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev)).view(args.o_groups, args.o_lora_rank, -1)  # convert.py dequantizes it; used in a grouped einsum
+        self.wo_a = make_wo_a(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev), args)
         self.wo_b = fp8lin("attn.wo_b")
         self.hc_attn_fn = f32("hc_attn_fn")
         self.hc_ffn_fn = f32("hc_ffn_fn")
@@ -254,6 +259,28 @@ class LayerWeights:
                 self.comp_wgate = f32("attn.compressor.wgate.weight")
             else:
                 self.comp_wkv = bf("attn.compressor.wkv.weight")
+
+
+def make_wo_a(weight, scale, args):
+    """The attention output LoRA. `convert.py` dequantizes wo_a to bf16 and everything downstream
+    kept it that way: [8, 1024, 4096] bf16 = 67 MB per layer, 2.7 GB read per decode step. With
+    DSV41_WOA_FP8=1 (default) it stays in the stored fp8 format and the grouped Triton GEMM reads
+    half the bytes; DSV41_WOA_FP8=0 restores the dequantized-bf16 tensor and the einsum."""
+    if FP8GroupedWeight is not None and os.environ.get("DSV41_WOA_FP8", "1") == "1":
+        return FP8GroupedWeight(weight, scale, args.o_groups, args.o_lora_rank)
+    return dequant_fp8_block(weight, scale).view(args.o_groups, args.o_lora_rank, -1)
+
+
+def wo_a_proj(o: torch.Tensor, w, tiled: bool = False) -> torch.Tensor:
+    """o bf16 [T, G, K] -> [T, G, R]; einsum("sgd,grd->sgr", o, wo_a) or its fp8 grouped GEMM.
+
+    The Triton kernel is already row-count- and row-offset-invariant, so it never needs the
+    MM_TILE row tiling the bf16 einsum needs for chunk invariance.
+    """
+    if FP8GroupedWeight is not None and isinstance(w, FP8GroupedWeight):
+        return fp8_grouped_linear(o, w)
+    fn = (lambda t: torch.einsum("sgd,grd->sgr", t, w))
+    return tiled_rows(fn, o) if tiled else fn(o)
 
 
 class EngramWeights:
@@ -500,7 +527,7 @@ def attention(x: torch.Tensor, w: LayerWeights, st: SeqState, args: Args) -> tor
     o = torch.cat([o[..., :-rd], apply_rotary(o[..., -rd:], freqs, inverse=True)], dim=-1)
 
     o = o.reshape(T, args.o_groups, -1)
-    o = torch.einsum("sgd,grd->sgr", o, w.wo_a)
+    o = wo_a_proj(o, w.wo_a)
     return qlinear(o.flatten(1), w.wo_b)
 
 

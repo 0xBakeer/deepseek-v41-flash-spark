@@ -154,7 +154,7 @@ class MTPWeights:
         self.attn_norm = bf("attn_norm.weight"); self.ffn_norm = bf("ffn_norm.weight")
         self.attn_sink = f32("attn.attn_sink"); self.q_norm = bf("attn.q_norm.weight"); self.kv_norm = bf("attn.kv_norm.weight")
         self.wq_a = fp8lin("attn.wq_a"); self.wq_b = fp8lin("attn.wq_b"); self.wkv = fp8lin("attn.wkv")
-        self.wo_a = R.dequant_fp8_block(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev)).view(args.o_groups, args.o_lora_rank, -1); self.wo_b = fp8lin("attn.wo_b")
+        self.wo_a = R.make_wo_a(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev), args); self.wo_b = fp8lin("attn.wo_b")
         self.hc_attn_fn = f32("hc_attn_fn"); self.hc_ffn_fn = f32("hc_ffn_fn")
         self.hc_attn_base = f32("hc_attn_base"); self.hc_ffn_base = f32("hc_ffn_base")
         self.hc_attn_scale = f32("hc_attn_scale"); self.hc_ffn_scale = f32("hc_ffn_scale")
@@ -316,7 +316,7 @@ class Model:
         o = o.reshape(T, a.o_groups, -1)
         # grouped output projection: "sgd,grd->sgr" is a GEMM with M = number of tokens, so it too
         # has to run on fixed-size token tiles (it differs most visibly at a 1-token chunk).
-        o = R.tiled_rows(lambda t: torch.einsum("sgd,grd->sgr", t, w.wo_a), o)
+        o = R.wo_a_proj(o, w.wo_a, tiled=True)
         out = R.qlinear(o.flatten(1), w.wo_b)
         self._tap("attn_out", L, out)
         return out

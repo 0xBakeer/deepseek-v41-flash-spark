@@ -799,3 +799,97 @@ instead of an fp32 copy; `DSV41_HEAD_FP32=1` restores the fp32 reference math. T
 always ran a bf16 head copy, so served numerics are unchanged, and the 2.65 GB fp32 copy is gone
 (~140 expert slots). Teacher-forced check (uniform 31 %, same corpus) with the bf16 head: coding
 1.5716 / general 3.3769 vs 1.5729 / 3.3788 with fp32 -- inside run-to-run noise.
+
+### 2026-09-11 10:25-10:55 -- two decode kernels: wo_a stays fp8, fused sinked-softmax attention
+
+Two GPU-side costs of the graphed verify step, both replaced by Triton kernels, both behind an env
+switch that restores the old path (`DSV41_WOA_FP8=0`, `DSV41_FUSED_ATTN=0`).
+
+**1. `wo_a` in its stored fp8 format.** `convert.py` dequantizes the attention output LoRA and
+everything downstream kept it that way: `[8, 1024, 4096]` bf16 = 67 MB per layer, 2.7 GB read per
+step, measured 347 us per layer (120 calls of `cutlass_80_wmma_tensorop_bf16` in the profile) =
+13.9 ms per step. `tools/fp8_linear.py` now has `FP8GroupedWeight` (fp8 e4m3 `[G*R, K]` + the UE8M0
+32x32 block scales, addressed as G matrices; group g is just rows `g*R..(g+1)*R` of W and rows
+`g*R/32..` of the scale table, nothing is copied) and `_fp8_grouped_kernel`, which is
+`_fp8_linear_kernel` with a third grid axis for the group. `v41_ref.make_wo_a` / `v41_ref.wo_a_proj`
+route both the graphed path (engine/fastdecode.py) and the non-graphed one (engine/model.py
+`attention`, tools/v41_ref.py `attention`) through the same weight object, so prefill uses it too
+(BLOCK_M=64 there; no transient dequant). Measured in the step: 198.6 us per layer = 7.95 ms, and
+1.1 GB less resident (`CUDA free` 95.0 -> 96.1 GB).
+
+The kernel reads 33.5 MB per layer in ~188 us = 178 GB/s. That is not a tiling problem: with the L2
+flushed between calls, BLOCK_N 32/64/128/256 x num_stages 2/3/4 all land within 3 % of each other,
+and a plain 64 MB device write on this box runs at ~169 GB/s. It is at the achievable bandwidth, so
+the remaining factor-of-1.5 to the 273 GB/s nameplate is the box, not the kernel.
+
+Being a Triton kernel it is also row-count- and row-offset-invariant by construction (each output
+element is one fp32 accumulation over K in fixed BLOCK_K steps), unlike cuBLAS, so it does not need
+the `MM_TILE` row tiling: rows [0:6], [7:13] and [1000:1006] of a 2048-row call come out
+bit-identical to the 6-row calls.
+
+**2. Fused decode attention.** `tools/decode_attn.py`: `_dattn_kernel` (flash-decoding over the key
+axis, one program per (token, 16 heads, key split)) + `_dattn_combine`. Q and K are read bf16, the
+scores and the whole softmax are fp32 and are never rounded to bf16. The PV product is the one place
+that has to hand `tl.dot` a tensor-core dtype, so p is split into a bf16 high part and a bf16
+remainder and both are accumulated (`PV_SPLIT`): that is the difference between 1.0e-4 and 2.5e-3
+relative error against the fp32 torch path, i.e. between "below the bf16 rounding of the output" and
+"above it". The all-masked row keeps working the way the torch path did: the max is clamped to
+-1e30, so `exp(sink + 1e30) = inf` and the row comes out exactly zero (checked).
+
+Note for anyone reading the old profile: `head_dim` = 512 **already contains** the 64 RoPE dims, so
+the kernel's d is 512, not 576. The kernel still carries a DA+DB split for non-power-of-two head
+dims (tested at 576); for this checkpoint DB = 0 and the second block is compiled away.
+
+Also a correction to an earlier reading of `results/profile_fast.txt`: the 258 x 122 us
+`gemmSN_TN_kernel<float,...>` calls are **not** the attention. They are the fp32 HC-mix GEMMs
+(`F.linear(x.flatten(1).float() [6, 20480], hc_attn_fn/hc_ffn_fn [24, 20480])`, 2 per layer) plus
+the ratio-2 compressor projections -- 86 launches, 10.5 ms per step, completely unchanged by this
+work and now the single largest non-MoE item. 2.5 MB of fp32 weights in 122 us is 20 GB/s; that is
+the next thing to fix. The attention itself was the two `cutlass_80_simt_sgemm_128x32` entries,
+51.1 + 27.0 us per layer = 3.13 ms per step, now `_dattn_kernel` + `_dattn_combine` = 1.01 ms, plus
+2.45 ms less in `unrolled_elementwise_kernel` (the two `.float()` casts and the exp that went away:
+3036 -> 2676 launches).
+
+**Measured A/B** (same box, back to back, nothing else running).
+
+`engine/profile_fast.py` (PK=0.31 AG=90.5), wall ms:
+
+| | step | draft |
+|---|---|---|
+| `DSV41_WOA_FP8=0 DSV41_FUSED_ATTN=0` | 165.7 ms | 14.3 ms |
+| both on (default) | 152.7 ms | 13.7 ms |
+
+Served config, 200 greedy tokens, same prompt as RESULTS 2.x
+(`--prune-keep 0.31 --arena-gb 90.5 --transient-slots 8 --keep-free-gb 10`):
+
+| | decode_tok_s | accept_len_mean | steps | decode_s | prefill_s |
+|---|---|---|---|---|---|
+| switches off | 15.28 | 2.97 | 68 | 13.221 | 5.159 |
+| both on | **16.86** | 3.06 | 65 | 11.802 | 2.824 |
+
+Output coherent in both (the usual `lru_ttl_cache` module). Part of the 15.28 -> 16.86 is the
+acceptance difference (2.97 vs 3.06), which moves by itself run to run; the step-time A/B above is
+the cleaner number: 13.0 ms of 165.7.
+
+**Correctness.** New `engine/test_kernels.py`: `wo_a` against the real checkpoint weight (layers 0
+and 7, `mtp.0`) dequantized exactly as before, at T = 1/5/6/16/64/2048 -- rel 2.6e-8..6.1e-5, max
+abs at bf16 ulp; plus the row-invariance checks above. Attention against the fp32 torch path at
+(T=6, n=640), (6, 128), (5, 133), (1, 640) and d=576, split 1/2/4 -- rel 7.4e-5..1.3e-4, max abs
+2.4e-4..4.9e-4; all-masked rows exactly zero; one visible key everywhere finite; and the same
+numbers after a CUDA-graph capture and two replays with fresh inputs.
+`engine/test_fastdecode.py` (which replays one verify block through `FastDecoder` and through the
+un-graphed `Model.forward` on identical state, then compares drafts, logits and `main_hidden`)
+still passes and if anything agrees better than before: parity 0/1 logits rel err 0.0713 / 0.0458
+and argmax agreement 1.00 / 1.00, against 0.1496 / 0.0343 and 1.00 / 0.83 with the switches off.
+Its own timing: step 143.1 / 144.7 ms vs 154.3 / 150.1 ms (that harness runs a smaller auto-sized
+arena than the served config, so its absolute step time is not comparable to the table above).
+
+**Caveats.**
+* `kv_all` is still materialised by a `torch.cat` of the window rows and the CSA2 rows before the
+  kernel runs (4.4 MB written and read again per layer, ~1.3 ms per step). Giving the kernel two
+  base pointers and a boundary instead would remove it; not done.
+* With only T x 64/16 = 24 programs the key axis has to be split to fill 48 SMs; `DSV41_ATTN_SPLIT`
+  defaults to 2 (split 4 measured the same, split 1 is ~35 % slower).
+* The two paths are not bit-identical to the old ones -- they were never meant to be (the fast
+  decode path already differs from `Model.forward`), and the gap to `Model.forward` got smaller,
+  not larger.
