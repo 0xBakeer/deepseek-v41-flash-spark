@@ -893,3 +893,99 @@ arena than the served config, so its absolute step time is not comparable to the
 * The two paths are not bit-identical to the old ones -- they were never meant to be (the fast
   decode path already differs from `Model.forward`), and the gap to `Model.forward` got smaller,
   not larger.
+
+### 2026-09-11 11:00-11:20 -- the fp32 HC-mix GEMMs, and the kv_all cat
+
+**What the 258 `gemmSN_TN_kernel<float, 128, 16, ...>` calls were.** Exactly two things, and the
+count now checks out:
+
+| op | per step | shape (M, N, K) | weight |
+|---|---|---|---|
+| `_hc_mixes`: `F.linear(h.flatten(1).float(), hc_attn_fn / hc_ffn_fn)` -- one before attention, one before the FFN, x 40 backbone layers | 80 | 6, 24, 20480 | fp32 1.97 MB |
+| `_compressed`: `F.linear(x.float(), comp_wkv / comp_wgate)` on the three ratio-2 KV-source layers (2, 8, 14) | 6 | 6, 512, 5120 | fp32 10.5 MB |
+
+86 per step x 3 profiler iterations = 258. (Layer 20 is also a KV source but has ratio 1 and a bf16
+`comp_wkv`, so it is not in this row. The draft's six `_hc_mixes` calls are not either --
+`profile_fast.py`'s `one()` replays only the step graph.) After the change the row is down to 18
+calls, i.e. precisely the 6 compressor calls x 3, which confirms the inventory.
+
+**The HC shape is latency-bound, the compressor shape is not.** Measured standalone on the GB10:
+
+| shape | `F.linear` fp32 | this kernel |
+|---|---|---|
+| M=6 N=24 K=20480 (hc_fn) | 84.0 us = 29.2 GB/s | 22.7 us = 108 GB/s |
+| M=6 N=512 K=5120 (compressor) | 30.8 us = 344 GB/s | 39.0 us = 272 GB/s |
+
+So cuBLAS is only bad when N is tiny; with N=512 it is already near bandwidth and beats the kernel.
+`tools/fp32_skinny.py` therefore has a `wins(N)` gate (N <= 64, `DSV41_SKINNY_MAX_N`) and the six
+compressor GEMMs deliberately stay on cuBLAS. `DSV41_HC_KERNEL=0` puts everything back on `F.linear`.
+
+**The kernel.** N=24 is a single BLOCK_N tile and M is 6, so the only axis to parallelise is K:
+`_skinny_kernel` gives each program `ceil(ceil(K/BLOCK_K)/SPLIT_K)*BLOCK_K` columns (46 programs on
+48 SMs, none idle), accumulates fp32, and `_skinny_reduce` sums the partials. No fp32 `atomic_add`:
+its summation order is non-deterministic, and this has to replay identically. The first version of
+the reduce looped over the splits and cost 15 us for 94 kB -- 46 dependent loads, pure latency; one
+wide `[SPLIT, 8, 32]` load plus `tl.sum` over the split axis brought the pair to 22.7 us. `x` is
+passed in bf16 and upcast on the loaded tile (the same values `x.float()` produces, half the bytes);
+the fp32 copy is still made for the rsqrt.
+
+The two hc GEMMs of a layer are **not** fused into one call: the first reads `h` before attention and
+the second reads `h` after `hc_post`, so they are not available at the same time and fusing them
+would change the math order.
+
+Accuracy: 4.2e-7 relative to `F.linear` (the gate was 1e-6), bit-reproducible across calls. Against
+an fp64 reference over 20 random draws, cuBLAS is 1.8e-7 off and this kernel 4.1e-7 -- both at the
+fp32 rounding floor, cuBLAS consistently the closer of the two (its K tree is deeper). That
+difference is what makes the greedy text diverge; see the A/B caveat below.
+
+**kv_all.** `decode_attention` now takes the two key pieces as two base pointers plus the boundary
+n1 (`_seg` walks a segment; the mask stays one `[T, n1+n2]` tensor -- catting the masks is 3.8 kB per
+layer). The `torch.cat` that built `kv_all` is gone from both branches, and the draft's window, which
+was a stride-0 `expand`, is now passed as that broadcast view instead of being materialised. In the
+profile the 114-call `CatArrayBatchedCopy` row (9.05 us each = 0.34 ms per step; 114 = 38 layers with
+a compressed cache x 3) disappears. That is less than the 1.3 ms estimated last round -- the estimate
+assumed the cat cost a full write plus a read at DRAM bandwidth, but the 3.9 MB it touched was L2
+-resident. The two-segment kernel is **bit-identical** to the single-tensor one (unit test, three
+different boundaries), which the A/B below confirms end to end.
+
+**Measured.** `engine/profile_fast.py` (PK=0.31 AG=90.5):
+
+| | step | draft | Self CUDA total (3 iters) |
+|---|---|---|---|
+| before this round | 152.7 ms | 13.7 ms | 460.164 ms |
+| after | **147.2 ms** | 13.0 ms | **432.757 ms** |
+
+`gemmSN_TN_kernel<float>` 258 calls / 31.635 ms -> 18 calls / 1.083 ms; `_skinny_kernel` 240 calls
+at 22.086 us = 1.77 ms per step (`_skinny_reduce` falls below the top-28 cut, so < 0.25 ms/step).
+GPU time per step is 9.1 ms lower but wall is only 5.5 ms lower: ~3.6 ms of the step is not GPU-busy
+time (gaps between the per-layer graph replays and the host work between them), which is now the
+next thing worth looking at.
+
+`engine/test_fastdecode.py`: parity 0/1 drafts equal, logits rel err 0.0916 / 0.0350, argmax
+agreement **1.00 / 1.00**, main_hidden rel 0.0813 / 0.0564; its own step timing 133.9 / 136.3 ms
+against 143.1 / 144.7 ms last round.
+
+Served config, 200 greedy tokens, same prompt:
+
+| | decode_tok_s | accept_len_mean | steps | decode_s | ms per step+draft |
+|---|---|---|---|---|---|
+| `DSV41_HC_KERNEL=0` | 17.11 | 3.06 | 65 | 11.633 | 178.9 |
+| defaults | 16.71 | 2.83 | 71 | 12.031 | **169.5** |
+
+**Read that table carefully.** The step got 9.4 ms (5.3 %) faster and tok/s went *down*, because the
+mean accepted length fell from 3.06 to 2.83. The 4e-7 change in the HC mixes flips borderline
+decisions in the Sinkhorn and the router, the greedy text diverges after a few tokens (both outputs
+are coherent `lru_ttl_cache` modules, worded differently), and this prompt happened to land on a
+worse draft-acceptance trajectory. Nothing about the acceptance is caused by the kernel being
+"worse" -- 4e-7 is 300x below the tolerance and either direction of rounding would reshuffle the same
+decisions. The prompt-independent measurements (profile wall, GPU total, `test_fastdecode` step) all
+move the same way, so the default stays on. Note also that the `DSV41_HC_KERNEL=0` arm reproduces
+last round's numbers exactly (3.06 acceptance, 65 steps) -- that is the end-to-end proof that the
+kv_all change is bit-identical.
+
+**Caveats.**
+* One A/B sample cannot separate a real acceptance effect from this kind of coin flip. If acceptance
+  on this recipe is ever measured properly it should be over several prompts, not one.
+* The six compressor GEMMs (1.08 ms per step) stay on cuBLAS by measurement, not by omission.
+* `engine/model.py`'s prefill `hc_mixes` still goes through `R.mm`; at prefill M (up to 2048) cuBLAS
+  is in its element and the skinny kernel would not help.

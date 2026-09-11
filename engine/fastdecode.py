@@ -37,9 +37,25 @@ try:
 except Exception:  # noqa: BLE001
     decode_attention = None
 
+try:
+    from fp32_skinny import skinny_linear, wins as skinny_wins  # tools/fp32_skinny.py (Triton)
+except Exception:  # noqa: BLE001
+    skinny_linear, skinny_wins = None, None
+
 # One fused Triton kernel for the sinked softmax attention instead of two fp32 SIMT batched GEMMs
 # and the elementwise passes around them. DSV41_FUSED_ATTN=0 restores the torch path.
 FUSED_ATTN = os.environ.get("DSV41_FUSED_ATTN", "1") == "1" and decode_attention is not None
+# Split-K Triton kernel for the skinny fp32 projections (the HC mix GEMM: M=6, N=24, K=20480, where
+# cuBLAS is latency-bound at ~30 GB/s). DSV41_HC_KERNEL=0 restores F.linear everywhere.
+HC_KERNEL = os.environ.get("DSV41_HC_KERNEL", "1") == "1" and skinny_linear is not None
+
+
+def _fp32_lin(x, w):
+    """fp32 y = x @ w^T with an fp32 weight. `x` may be bf16: the Triton kernel upcasts the loaded
+    tile itself (same values, half the activation bytes); the cuBLAS fallback needs the fp32 copy."""
+    if HC_KERNEL and skinny_wins(w.size(0)):
+        return skinny_linear(x, w)
+    return F.linear(x.float(), w)
 
 T_VERIFY = 6   # tok + 5 drafts
 T_DRAFT = 5
@@ -119,9 +135,9 @@ class FastDecoder:
         return torch.cat([x[..., :-rd], R.apply_rotary(x[..., -rd:], fq, inverse=inverse)], dim=-1)
 
     def _hc_mixes(self, x, hc_fn, hc_scale, hc_base):
-        xf = x.flatten(1).float()
-        rsqrt = torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.a.norm_eps)
-        mixes = F.linear(xf, hc_fn) * rsqrt
+        xb = x.flatten(1)
+        rsqrt = torch.rsqrt(xb.float().square().mean(-1, keepdim=True) + self.a.norm_eps)
+        mixes = _fp32_lin(xb, hc_fn) * rsqrt
         return hc_split_sinkhorn(mixes, hc_scale, hc_base, self.a.hc_mult, self.a.hc_sinkhorn_iters, self.a.hc_eps)
 
     # ------------------------------------------------------------------ attention (decode, T tokens)
@@ -132,26 +148,29 @@ class FastDecoder:
         qr = R.rmsnorm(_lin(x, w.wq_a), w.q_norm, a.norm_eps)
         q = self._rope(_lin(qr, w.wq_b).view(T, a.n_heads, a.head_dim), fq)
         kv = self._rope(R.rmsnorm(_lin(x, w.wkv), w.kv_norm, a.norm_eps), fq)
+        # The key set is two pieces: the window rows and (verify) the CSA2 rows / (draft) the draft
+        # keys. The fused kernel takes both as base pointers, so they are never cat'ed; only the
+        # torch fallback materialises kv_all. The draft's window is a stride-0 broadcast view.
         if mtp_last is None:
             wpos = pos[:, None] - self.win_off[None, :]
             ring[pos % M.RING] = kv
-            wkv = ring[wpos.clamp_min(0) % M.RING]
-            wmask = wpos >= 0
-            kv_all, mask = wkv, wmask
+            kv1 = ring[wpos.clamp_min(0) % M.RING]
+            kv2 = None
+            mask = wpos >= 0
             if w.ratio:
-                rows, cmask = self._compressed(x, qr, w, L, pos, sh_state)
-                kv_all = torch.cat([wkv, rows], dim=1)
-                mask = torch.cat([wmask, cmask], dim=1)
+                kv2, cmask = self._compressed(x, qr, w, L, pos, sh_state)
+                mask = torch.cat([mask, cmask], dim=1)
         else:
             wpos = mtp_last - self.win_off  # [128]
-            wkv = ring[wpos.clamp_min(0) % M.RING][None].expand(T, -1, -1)
-            kv_all = torch.cat([wkv, kv[None].expand(T, -1, -1)], dim=1)
+            kv1 = ring[wpos.clamp_min(0) % M.RING][None].expand(T, -1, -1)
+            kv2 = kv[None].expand(T, -1, -1)
             mask = torch.cat([(wpos >= 0)[None].expand(T, -1),
                               torch.ones(T, T, dtype=torch.bool, device=self.dev)], dim=1)
         scale = a.head_dim ** -0.5
         if FUSED_ATTN:
-            o = decode_attention(q, kv_all, mask, w.attn_sink, scale)
+            o = decode_attention(q, kv1, kv2, mask, w.attn_sink, scale)
         else:
+            kv_all = kv1 if kv2 is None else torch.cat([kv1, kv2], dim=1)
             scores = torch.einsum("thd,tnd->thn", q.float(), kv_all.float()) * scale
             scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
             mx = scores.amax(dim=-1, keepdim=True).clamp_min(-1e30)
@@ -170,8 +189,7 @@ class FastDecoder:
         T = x.size(0)
         if w.is_kv_source:
             if r > 1:
-                xf = x.float()
-                kvl, sc = F.linear(xf, w.comp_wkv), F.linear(xf, w.comp_wgate)
+                kvl, sc = _fp32_lin(x, w.comp_wkv), _fp32_lin(x, w.comp_wgate)
                 # static per-layer copies for Caches.rollback (host patches the tuple after the step)
                 self.kvl_buf[L].copy_(kvl); self.sc_buf[L].copy_(sc)
                 buf = self.pend_buf[L]  # [2, 512]: kv, score of the pending token (host-maintained)

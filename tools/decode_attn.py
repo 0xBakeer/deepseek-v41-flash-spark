@@ -2,12 +2,20 @@
 decode_attn.py -- one Triton kernel for the sinked softmax attention of the decode path.
 
 Shape of the problem (engine/fastdecode.py `_attention`): T query tokens (6 in a verify block,
-5 in a DSpark draft), h = 64 query heads, and a per-token key set kv_all [T, n, d] that every head
-of that token shares (128 window rows + 512 indexer-selected compressed rows, or 128 + T in the
-draft). d = head_dim = 512 (the last 64 dims carry RoPE). The torch version ran this as two fp32 SIMT batched GEMMs
-plus the masked_fill / exp / sum elementwise passes around them: 86 launches and 10.6 ms per step.
+5 in a DSpark draft), h = 64 query heads, and a per-token key set that every head of that token
+shares. That key set comes in two pieces which the caller used to `torch.cat` into one [T, n, d]
+tensor: the 128 sliding-window rows gathered from the layer's ring, and either the 512 rows the
+CSA2 indexer selected from the compressed cache or (in the draft) the T draft keys themselves.
+d = head_dim = 512 (the last 64 dims carry RoPE). The torch version ran this as two fp32 SIMT
+batched GEMMs plus the masked_fill / exp / sum elementwise passes around them.
 
-This kernel is a flash-decoding of the same math:
+The kernel takes the two pieces as two base pointers plus the boundary n1 and walks them as one key
+axis, so the `torch.cat` disappears (it wrote and re-read ~3.9 MB per layer, ~1.3 ms per step). The
+second piece may also be a stride-0 broadcast view, which is what the draft's window is, so that
+expand is not materialised either. The mask stays a single [T, n1+n2] tensor -- catting the two
+masks costs 3.8 kB per layer and keeps the indexing simple.
+
+The math is flash-decoding of exactly what the torch path did:
   scores = q . k * head_dim**-0.5, masked to -inf,
   m      = max_n scores, clamped to >= -1e30 (an all-masked row keeps a finite m),
   denom  = sum_n exp(scores - m) + exp(sink_h - m),
@@ -42,15 +50,57 @@ _NEG = tl.constexpr(-1e30)  # module-level constexpr so the jitted kernels may r
 
 
 @triton.jit
-def _dattn_kernel(Q, KV, MSK, SINK, OUT, MP, LP,
-                  T, H, N,
-                  stride_qt, stride_qh, stride_kt, stride_kn, stride_mt,
+def _seg(KV, MB, lo, hi, base, q1, q2, m_i, l_i, acc1, acc2, stride_kn, scale,
+         DA: tl.constexpr, DB: tl.constexpr, DBP: tl.constexpr,
+         BLOCK_H: tl.constexpr, BLOCK_N: tl.constexpr, PV_SPLIT: tl.constexpr):
+    """Online-softmax pass over the key rows [lo, hi) of one segment. `base` is subtracted from the
+    global key index to get the row inside this segment; the mask is always indexed globally."""
+    da = tl.arange(0, DA)
+    db = tl.arange(0, DBP)
+    for n0 in range(lo, hi, BLOCK_N):
+        offs_n = n0 + tl.arange(0, BLOCK_N)
+        nm = offs_n < hi
+        kp = KV + (offs_n - base)[:, None] * stride_kn
+        k1 = tl.load(kp + da[None, :], mask=nm[:, None], other=0.0)
+        s = tl.dot(q1, tl.trans(k1), out_dtype=tl.float32)
+        if DB > 0:
+            k2 = tl.load(kp + (DA + db)[None, :], mask=nm[:, None], other=0.0)
+            s += tl.dot(q2, tl.trans(k2), out_dtype=tl.float32)
+        else:
+            k2 = tl.zeros((BLOCK_N, DBP), tl.bfloat16)
+        s = s * scale
+        keep = tl.load(MB + offs_n, mask=nm, other=0) != 0
+        s = tl.where(keep[None, :] & nm[None, :], s, float("-inf"))
+        m_new = tl.maximum(m_i, tl.max(s, 1))
+        m_new = tl.maximum(m_new, _NEG)  # all-masked rows keep a finite max, as the torch path does
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(s - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        acc1 = acc1 * alpha[:, None]
+        acc2 = acc2 * alpha[:, None]
+        ph = p.to(tl.bfloat16)
+        acc1 += tl.dot(ph, k1, out_dtype=tl.float32)
+        if PV_SPLIT:
+            pl = (p - ph.to(tl.float32)).to(tl.bfloat16)
+            acc1 += tl.dot(pl, k1, out_dtype=tl.float32)
+        if DB > 0:
+            acc2 += tl.dot(ph, k2, out_dtype=tl.float32)
+            if PV_SPLIT:
+                acc2 += tl.dot(pl, k2, out_dtype=tl.float32)
+        m_i = m_new
+    return m_i, l_i, acc1, acc2
+
+
+@triton.jit
+def _dattn_kernel(Q, KV1, KV2, MSK, SINK, OUT, MP, LP,
+                  T, H, N, N1,
+                  stride_qt, stride_qh, stride_k1t, stride_k1n, stride_k2t, stride_k2n, stride_mt,
                   stride_ot, stride_oh, stride_os,
                   stride_pt, stride_ph,
                   scale,
                   DA: tl.constexpr, DB: tl.constexpr, DBP: tl.constexpr, BLOCK_H: tl.constexpr,
                   BLOCK_N: tl.constexpr, SPLIT: tl.constexpr, FINAL: tl.constexpr,
-                  PV_SPLIT: tl.constexpr):
+                  PV_SPLIT: tl.constexpr, TWO: tl.constexpr):
     pid_h = tl.program_id(0)
     pid_t = tl.program_id(1)
     pid_s = tl.program_id(2)
@@ -74,40 +124,15 @@ def _dattn_kernel(Q, KV, MSK, SINK, OUT, MP, LP,
     l_i = tl.zeros((BLOCK_H,), tl.float32)
     acc1 = tl.zeros((BLOCK_H, DA), tl.float32)
     acc2 = tl.zeros((BLOCK_H, DBP), tl.float32)
-    kb = KV + pid_t * stride_kt
     mb = MSK + pid_t * stride_mt
 
-    for n0 in range(n_lo, n_hi, BLOCK_N):
-        offs_n = n0 + tl.arange(0, BLOCK_N)
-        nm = offs_n < n_hi
-        kp = kb + offs_n[:, None] * stride_kn
-        k1 = tl.load(kp + da[None, :], mask=nm[:, None], other=0.0)
-        s = tl.dot(q1, tl.trans(k1), out_dtype=tl.float32)
-        if DB > 0:
-            k2 = tl.load(kp + (DA + db)[None, :], mask=nm[:, None], other=0.0)
-            s += tl.dot(q2, tl.trans(k2), out_dtype=tl.float32)
-        else:
-            k2 = tl.zeros((BLOCK_N, DBP), tl.bfloat16)
-        s = s * scale
-        keep = tl.load(mb + offs_n, mask=nm, other=0) != 0
-        s = tl.where(keep[None, :] & nm[None, :], s, float("-inf"))
-        m_new = tl.maximum(m_i, tl.max(s, 1))
-        m_new = tl.maximum(m_new, _NEG)  # all-masked rows keep a finite max, as the torch path does
-        alpha = tl.exp(m_i - m_new)
-        p = tl.exp(s - m_new[:, None])
-        l_i = l_i * alpha + tl.sum(p, 1)
-        acc1 = acc1 * alpha[:, None]
-        acc2 = acc2 * alpha[:, None]
-        ph = p.to(tl.bfloat16)
-        acc1 += tl.dot(ph, k1, out_dtype=tl.float32)
-        if PV_SPLIT:
-            pl = (p - ph.to(tl.float32)).to(tl.bfloat16)
-            acc1 += tl.dot(pl, k1, out_dtype=tl.float32)
-        if DB > 0:
-            acc2 += tl.dot(ph, k2, out_dtype=tl.float32)
-            if PV_SPLIT:
-                acc2 += tl.dot(pl, k2, out_dtype=tl.float32)
-        m_i = m_new
+    m_i, l_i, acc1, acc2 = _seg(KV1 + pid_t * stride_k1t, mb, n_lo, tl.minimum(n_hi, N1), 0,
+                                q1, q2, m_i, l_i, acc1, acc2, stride_k1n, scale,
+                                DA, DB, DBP, BLOCK_H, BLOCK_N, PV_SPLIT)
+    if TWO:
+        m_i, l_i, acc1, acc2 = _seg(KV2 + pid_t * stride_k2t, mb, tl.maximum(n_lo, N1), n_hi, N1,
+                                    q1, q2, m_i, l_i, acc1, acc2, stride_k2n, scale,
+                                    DA, DB, DBP, BLOCK_H, BLOCK_N, PV_SPLIT)
 
     if FINAL:
         sink = tl.load(SINK + offs_h, mask=h_mask, other=0.0).to(tl.float32)
@@ -167,15 +192,21 @@ NUM_WARPS = int(os.environ.get("DSV41_ATTN_WARPS", 4))
 NUM_STAGES = int(os.environ.get("DSV41_ATTN_STAGES", 2))
 
 
-def decode_attention(q: torch.Tensor, kv: torch.Tensor, mask: torch.Tensor, sink: torch.Tensor,
-                     scale: float, split: int | None = None, pv_split: int | None = None,
+def decode_attention(q: torch.Tensor, kv1: torch.Tensor, kv2: torch.Tensor | None,
+                     mask: torch.Tensor, sink: torch.Tensor, scale: float,
+                     split: int | None = None, pv_split: int | None = None,
                      block_n: int | None = None) -> torch.Tensor:
-    """q bf16 [T, H, D], kv bf16 [T, N, D], mask bool [T, N], sink fp32 [H] -> o bf16 [T, H, D]."""
+    """q bf16 [T, H, D]; kv1 bf16 [T, N1, D] and optional kv2 bf16 [T, N2, D] (either may be a
+    stride-0 broadcast along T); mask bool [T, N1+N2]; sink fp32 [H] -> o bf16 [T, H, D]."""
     T, H, D = q.shape
-    assert kv.shape[0] == T and kv.shape[2] == D and mask.shape == (T, kv.shape[1])
-    assert q.stride(-1) == 1 and kv.stride(-1) == 1 and mask.stride(-1) == 1
-    assert q.dtype == torch.bfloat16 and kv.dtype == torch.bfloat16
-    N = kv.shape[1]
+    N1 = kv1.shape[1]
+    N2 = 0 if kv2 is None else kv2.shape[1]
+    N = N1 + N2
+    assert kv1.shape[2] == D and mask.shape == (T, N)
+    assert q.stride(-1) == 1 and kv1.stride(-1) == 1 and mask.stride(-1) == 1
+    assert q.dtype == torch.bfloat16 and kv1.dtype == torch.bfloat16
+    if kv2 is not None:
+        assert kv2.shape[2] == D and kv2.stride(-1) == 1 and kv2.dtype == torch.bfloat16
     DA, DB = _split_d(D)   # head_dim 512 is a power of two -> DB = 0 and the second block vanishes
     DBP = max(DB, 16)
     bn = BLOCK_N if block_n is None else block_n
@@ -185,23 +216,26 @@ def decode_attention(q: torch.Tensor, kv: torch.Tensor, mask: torch.Tensor, sink
     if sp & (sp - 1):  # the combine kernel indexes the splits with a power-of-two arange
         sp = 1 << (sp.bit_length() - 1)
     msk = mask if mask.dtype == torch.int8 else mask.view(torch.int8)  # metadata-only, graph-safe
+    k2 = kv1 if kv2 is None else kv2
+    s2t, s2n = k2.stride(0), k2.stride(1)
     o = torch.empty(T, H, D, dtype=torch.bfloat16, device=q.device)
     grid = (triton.cdiv(H, BLOCK_H), T, sp)
+    args = (q, kv1, k2, msk, sink)
+    common = dict(DA=DA, DB=DB, DBP=DBP, BLOCK_H=BLOCK_H, BLOCK_N=bn, PV_SPLIT=pv,
+                  TWO=1 if kv2 is not None else 0, num_warps=NUM_WARPS, num_stages=NUM_STAGES)
     if sp == 1:
-        _dattn_kernel[grid](q, kv, msk, sink, o, o, o, T, H, N,
-                            q.stride(0), q.stride(1), kv.stride(0), kv.stride(1), msk.stride(0),
-                            o.stride(0), o.stride(1), 0, 0, 0, scale,
-                            DA=DA, DB=DB, DBP=DBP, BLOCK_H=BLOCK_H, BLOCK_N=bn, SPLIT=1, FINAL=1,
-                            PV_SPLIT=pv, num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+        _dattn_kernel[grid](*args, o, o, o, T, H, N, N1,
+                            q.stride(0), q.stride(1), kv1.stride(0), kv1.stride(1), s2t, s2n,
+                            msk.stride(0), o.stride(0), o.stride(1), 0, 0, 0, scale,
+                            SPLIT=1, FINAL=1, **common)
         return o
     acc = torch.empty(T, H, sp, D, dtype=torch.float32, device=q.device)
     mp = torch.empty(T, H, sp, dtype=torch.float32, device=q.device)
     lp = torch.empty(T, H, sp, dtype=torch.float32, device=q.device)
-    _dattn_kernel[grid](q, kv, msk, sink, acc, mp, lp, T, H, N,
-                        q.stride(0), q.stride(1), kv.stride(0), kv.stride(1), msk.stride(0),
-                        acc.stride(0), acc.stride(1), acc.stride(2), mp.stride(0), mp.stride(1), scale,
-                        DA=DA, DB=DB, DBP=DBP, BLOCK_H=BLOCK_H, BLOCK_N=bn, SPLIT=sp, FINAL=0,
-                        PV_SPLIT=pv, num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+    _dattn_kernel[grid](*args, acc, mp, lp, T, H, N, N1,
+                        q.stride(0), q.stride(1), kv1.stride(0), kv1.stride(1), s2t, s2n,
+                        msk.stride(0), acc.stride(0), acc.stride(1), acc.stride(2),
+                        mp.stride(0), mp.stride(1), scale, SPLIT=sp, FINAL=0, **common)
     BD = 1 << (D - 1).bit_length()
     _dattn_combine[(T * H,)](acc, mp, lp, sink, o, H, D,
                              acc.stride(0), acc.stride(1), acc.stride(2), o.stride(0), o.stride(1),

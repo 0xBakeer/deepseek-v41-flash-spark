@@ -24,6 +24,7 @@ from safetensors import safe_open  # noqa: E402
 import v41_ref as R  # noqa: E402
 from fp8_linear import FP8GroupedWeight, fp8_grouped_linear  # noqa: E402
 from decode_attn import decode_attention, decode_attention_ref  # noqa: E402
+from fp32_skinny import skinny_linear  # noqa: E402
 
 MD = os.environ.get("MODEL_DIR", os.path.expanduser("~/models/DeepSeek-V4.1-Flash"))
 fails = []
@@ -113,44 +114,72 @@ for T, N, lbl in ((6, 640, f"verify 128 window + 512 csa2, d={D}"), (6, 128, "ve
     q, kv, mask, sink = case(T, N)
     ref = decode_attention_ref(q, kv, mask, sink, scale)
     for sp in (1, 2, 4):
-        got = decode_attention(q, kv, mask, sink, scale, split=sp)
+        got = decode_attention(q, kv, None, mask, sink, scale, split=sp)
         check(f"T={T} n={N} split={sp}  ({lbl})", got, ref, 2e-3, 6e-3)
-    got = decode_attention(q, kv, mask, sink, scale, split=2, pv_split=0)
+    got = decode_attention(q, kv, None, mask, sink, scale, split=2, pv_split=0)
     check(f"T={T} n={N} split=2 PV in plain bf16", got, ref, 8e-3, 3e-2)
 
 print("  -- non-power-of-two head dim (exercises the DA+DB split) --")
 q, kv, mask, sink = case(6, 640, d=576)
 ref = decode_attention_ref(q, kv, mask, sink, scale)
 for sp in (1, 2):
-    check(f"T=6 n=640 d=576 split={sp}", decode_attention(q, kv, mask, sink, scale, split=sp), ref, 2e-3, 6e-3)
+    check(f"T=6 n=640 d=576 split={sp}", decode_attention(q, kv, None, mask, sink, scale, split=sp), ref, 2e-3, 6e-3)
+
+print("  -- two key segments (no torch.cat) --")
+q, kv, mask, sink = case(6, 640, seed=5)
+ref = decode_attention_ref(q, kv, mask, sink, scale)
+one = decode_attention(q, kv, None, mask, sink, scale)
+for n1 in (128, 512, 32):
+    a_, b_ = kv[:, :n1].contiguous(), kv[:, n1:].contiguous()
+    got = decode_attention(q, a_, b_, mask, sink, scale)
+    same = bool(torch.equal(got, one))
+    print(f"  {'PASS' if same else 'FAIL'} split at n1={n1:4d}: bit-identical to the single-tensor call")
+    if not same:
+        fails.append(f"two-segment n1={n1}")
+    check(f"two segments n1={n1} vs fp32 torch", got, ref, 2e-3, 6e-3)
+
+print("  -- draft shape: stride-0 broadcast window + T draft keys --")
+torch.manual_seed(11)
+Td = 5
+win = (torch.randn(128, D, device="cuda") * 0.5).to(torch.bfloat16)
+dkv = (torch.randn(Td, D, device="cuda") * 0.5).to(torch.bfloat16)
+kv1b = win[None].expand(Td, -1, -1)
+kv2b = dkv[None].expand(Td, -1, -1)
+mk = torch.ones(Td, 128 + Td, dtype=torch.bool, device="cuda")
+mk[:, 3:9] = False
+sk_ = (torch.randn(H, device="cuda") * 0.5).float()
+qd = (torch.randn(Td, H, D, device="cuda") * 0.5).to(torch.bfloat16)
+print(f"       kv1 strides {tuple(kv1b.stride())}  kv2 strides {tuple(kv2b.stride())} (0 on the token axis)")
+refd = decode_attention_ref(qd, torch.cat([kv1b, kv2b], dim=1), mk, sk_, scale)
+check("draft, broadcast segments", decode_attention(qd, kv1b, kv2b, mk, sk_, scale), refd, 2e-3, 6e-3)
 
 print("  -- all-masked rows --")
 q, kv, mask, sink = case(6, 640, masked_rows=(2, 5))
 ref = decode_attention_ref(q, kv, mask, sink, scale)
-got = decode_attention(q, kv, mask, sink, scale)
+got = decode_attention(q, kv, None, mask, sink, scale)
 check("T=6 n=640 rows 2 and 5 fully masked", got, ref, 2e-3, 6e-3)
 print(f"       masked rows are exactly zero: ref {bool((ref[[2, 5]] == 0).all())}  kernel {bool((got[[2, 5]] == 0).all())}")
 if not bool((got[[2, 5]] == 0).all()):
     fails.append("all-masked rows not zero")
 q, kv, mask, sink = case(6, 640, all_masked_col=True)
 ref = decode_attention_ref(q, kv, mask, sink, scale)
-got = decode_attention(q, kv, mask, sink, scale)
+got = decode_attention(q, kv, None, mask, sink, scale)
 check("T=6 n=640 one key visible, row 0 none", got, ref, 2e-3, 6e-3)
 print(f"       finite: {bool(torch.isfinite(got.float()).all())}")
 
 print("  -- CUDA graph replay --")
 q, kv, mask, sink = case(6, 640, seed=3)
 ref = decode_attention_ref(q, kv, mask, sink, scale)
-decode_attention(q, kv, mask, sink, scale)  # warm up / JIT before capture
+decode_attention(q, kv[:, :128].contiguous(), kv[:, 128:].contiguous(), mask, sink, scale)  # JIT before capture
 torch.cuda.synchronize()
 st = torch.cuda.Stream(); st.wait_stream(torch.cuda.current_stream())
 with torch.cuda.stream(st):
-    decode_attention(q, kv, mask, sink, scale)
+    decode_attention(q, kv[:, :128].contiguous(), kv[:, 128:].contiguous(), mask, sink, scale)
 torch.cuda.current_stream().wait_stream(st)
 torch.cuda.synchronize()
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(g):
-    out = decode_attention(q, kv, mask, sink, scale)
+    out = decode_attention(q, kv[:, :128].contiguous(), kv[:, 128:].contiguous(), mask, sink, scale)
 g.replay(); torch.cuda.synchronize()
 check("graph replay", out, ref, 2e-3, 6e-3)
 q2, kv2, mask2, sink2 = case(6, 640, seed=9)
@@ -161,15 +190,46 @@ check("graph replay, new inputs", out, decode_attention_ref(q, kv, mask, sink, s
 print("  -- one-layer timing (T=6, n=640) --")
 q, kv, mask, sink = case(6, 640)
 for lbl, fn in (("torch fp32 path (old)", lambda: decode_attention_ref(q, kv, mask, sink, scale)),
-                ("fused kernel split=1", lambda: decode_attention(q, kv, mask, sink, scale, split=1)),
-                ("fused kernel split=2", lambda: decode_attention(q, kv, mask, sink, scale, split=2)),
-                ("fused kernel split=4", lambda: decode_attention(q, kv, mask, sink, scale, split=4))):
+                ("fused kernel split=1", lambda: decode_attention(q, kv, None, mask, sink, scale, split=1)),
+                ("fused kernel split=2", lambda: decode_attention(q, kv, None, mask, sink, scale, split=2)),
+                ("fused kernel split=4", lambda: decode_attention(q, kv, None, mask, sink, scale, split=4))):
     fn(); torch.cuda.synchronize(); t0 = time.perf_counter()
     for _ in range(50):
         fn()
     torch.cuda.synchronize()
     dt = (time.perf_counter() - t0) / 50
     print(f"       {lbl:24s} {dt * 1e6:7.1f} us/layer   -> {dt * 40 * 1e3:5.2f} ms/step over 40 layers")
+
+# ----------------------------------------------------------------- 3. skinny fp32 GEMM
+print("== skinny fp32 GEMM (HC mix projection) vs F.linear ==")
+torch.backends.cuda.matmul.allow_tf32 = False
+hc = args.hc_mult
+for M, N, K, lbl in ((6, (2 + hc) * hc, hc * args.dim, "verify hc_fn"),
+                     (5, (2 + hc) * hc, hc * args.dim, "draft hc_fn"),
+                     (6, args.head_dim, args.dim, "ratio-2 compressor")):
+    torch.manual_seed(1)
+    w = (torch.randn(N, K, device="cuda") * 0.02).float()
+    for xdt in (torch.bfloat16, torch.float32):
+        x = (torch.randn(M, K, device="cuda") * 0.3).to(xdt)
+        ref = torch.nn.functional.linear(x.float(), w)
+        y = skinny_linear(x, w)
+        rel = float((y - ref).norm() / ref.norm())
+        mx = float((y - ref).abs().max() / ref.abs().max())
+        det = bool(torch.equal(y, skinny_linear(x, w)))
+        ok = rel <= 1e-6 and mx <= 1e-6 and det
+        print(f"  {'PASS' if ok else 'FAIL'} {lbl:20s} M={M} N={N:4d} K={K:6d} x={str(xdt)[6:]:9s}"
+              f" rel {rel:.2e}  max rel {mx:.2e}  reproducible {det}")
+        if not ok:
+            fails.append(f"skinny {lbl} {xdt}")
+    x = (torch.randn(M, K, device="cuda") * 0.3).to(torch.bfloat16)
+    for lb, fn in (("F.linear fp32", lambda: torch.nn.functional.linear(x.float(), w)),
+                   ("skinny split-K", lambda: skinny_linear(x, w))):
+        fn(); torch.cuda.synchronize(); t0 = time.perf_counter()
+        for _ in range(100):
+            fn()
+        torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) / 100
+        print(f"       {lb:16s} {dt * 1e6:7.1f} us  ({(N * K + M * K) * 4 / 1e9 / dt:6.1f} GB/s)")
 
 print()
 print("FAILURES:", fails if fails else "none")

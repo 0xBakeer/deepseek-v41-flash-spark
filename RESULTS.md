@@ -274,3 +274,21 @@ DSV41_FUSED_ATTN=0` back to back. The `wo_a` projection now runs from its stored
 was 13.89 as a bf16 einsum) and attention scores/softmax/PV run in one Triton kernel with bf16
 keys and fp32 math (1.0 ms/step, was 3.1 fp32 SIMT). Unit tests in `engine/test_kernels.py`;
 details and caveats in NOTES.md (2026-09-11 10:25-10:55).
+
+### 2.10 Addendum 2026-09-11 11:20 — split-K fp32 kernel for the HC mixing projections, no `kv_all` copy
+
+The two Hyper-Connection mixing GEMMs per layer (M=6, N=24, K=20480, fp32) ran on a cuBLAS kernel
+at 29 GB/s (84 µs each); a split-K Triton kernel (`tools/fp32_skinny.py`, fp32 math, 4e-7 relative
+to cuBLAS, both at the fp32 floor against an fp64 check) runs them at 108 GB/s (22.7 µs). The
+compressor projections (N=512) stay on cuBLAS, which is faster there. The attention kernel now
+reads the window ring and the CSA2 rows through two base pointers instead of a concatenated copy
+(bit-identical output). Verify step on `engine/profile_fast.py`: **152.7 → 147.2 ms**, draft
+13.7 → 13.0 ms; GPU time per step −9.1 ms.
+
+The single 200-token greedy decode line moved the other way: 16.71 tok/s (acceptance 2.83, 71
+steps) vs 17.11 (acceptance 3.06, 65 steps) with `DSV41_HC_KERNEL=0`. The 4e-7 change in the
+mixing values flips borderline routing decisions, the greedy text diverges after a few tokens (both
+outputs are coherent), and this prompt landed on a lower-acceptance trajectory; one sample cannot
+separate that from run-to-run acceptance spread (±5 %, see 2.6). Every prompt-independent number
+(step time, GPU time, the un-graphed comparison in `engine/test_fastdecode.py`) improved, so the
+kernel stays on by default. Details in NOTES.md (2026-09-11 11:00-11:20).
