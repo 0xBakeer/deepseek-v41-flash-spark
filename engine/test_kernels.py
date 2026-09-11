@@ -23,6 +23,8 @@ from safetensors import safe_open  # noqa: E402
 
 import v41_ref as R  # noqa: E402
 from fp8_linear import FP8GroupedWeight, fp8_grouped_linear  # noqa: E402
+from fp4_linear import (FP4GroupedWeight, fp4_grouped_linear,  # noqa: E402
+                        quantize_fp8_grouped_to_fp4)
 from decode_attn import decode_attention, decode_attention_ref  # noqa: E402
 from fp32_skinny import skinny_linear  # noqa: E402
 
@@ -72,17 +74,59 @@ for name in ("layers.0.attn.wo_a", "layers.7.attn.wo_a", "mtp.0.attn.wo_a"):
         if not same:
             fails.append(f"{name} invariance {lo}:{hi}")
     torch.cuda.synchronize()
+
+    # ---- the same weight in the packed FP4 format, on the grouped FP4 kernel
+    W4 = quantize_fp8_grouped_to_fp4(W)
+    deq4 = W4.dequant()                     # [G, R, K] bf16 -- the dequantized reference
+    b8, b4 = W.w.numel() + W.s.numel(), W4.nbytes
+    g_err = (deq4.float() - ref_w.float()).reshape(-1, 32).norm(dim=1) / \
+        ref_w.float().reshape(-1, 32).norm(dim=1).clamp_min(1e-20)
+    print(f"  {name} fp4: {b8 / 2**20:.1f} MiB -> {b4 / 2**20:.1f} MiB ({b4 / b8:.4f}x)  weight rel err "
+          f"{float((deq4.float() - ref_w.float()).norm() / ref_w.float().norm()):.4f}  per-32-group "
+          f"mean {float(g_err.mean()):.4f} p99 {float(g_err.quantile(0.99)):.4f} max {float(g_err.max()):.4f}")
+    for T in (1, 6, 16, 64, 2048):
+        x = (torch.randn(T, W.G, W.K, device="cuda") * 0.25).to(torch.bfloat16)
+        y4 = fp4_grouped_linear(x, W4)
+        r4 = torch.einsum("sgd,grd->sgr", x, deq4)          # bf16 einsum on the SAME fp4 weights
+        r32 = torch.einsum("sgd,grd->sgr", x.float(), deq4.float())
+        rel32 = float((y4.float() - r32).norm() / r32.norm())
+        relc = float((r4.float() - r32).norm() / r32.norm())
+        check(f"{name} fp4 T={T} (vs bf16 einsum on fp4 weights)", y4, r4, 6e-3, None)
+        print(f"       vs fp32(fp4): kernel {rel32:.2e} / einsum-bf16 {relc:.2e}")
+    x = (torch.randn(2048, W.G, W.K, device="cuda") * 0.25).to(torch.bfloat16)
+    full4 = fp4_grouped_linear(x, W4)
+    for lo, hi in ((0, 6), (7, 13), (1000, 1006)):
+        sub = fp4_grouped_linear(x[lo:hi].contiguous(), W4)
+        same = bool(torch.equal(sub, full4[lo:hi]))
+        print(f"  {'PASS' if same else 'FAIL'} {name} fp4 rows [{lo}:{hi}] bit-identical to the full call")
+        if not same:
+            fails.append(f"{name} fp4 invariance {lo}:{hi}")
+    del full4
+    torch.cuda.synchronize()
+
+    # ---- bandwidth at T=6. Steady state: cycle the call over ~300 MB of copies of the weight so
+    # nothing is L2-resident (an explicit L2 flush would put a flush write on the same DRAM).
     x6 = (torch.randn(6, W.G, W.K, device="cuda") * 0.25).to(torch.bfloat16)
-    for lbl, fn in (("fp8 grouped kernel", lambda: fp8_grouped_linear(x6, W)),
-                    ("bf16 einsum (old)", lambda: torch.einsum("sgd,grd->sgr", x6, ref_w))):
-        fn(); torch.cuda.synchronize(); t0 = time.perf_counter()
-        for _ in range(50):
-            fn()
+    nc = max(2, min(8, int(300e6 // b4)))
+    c8 = [W] + [FP8GroupedWeight(W.w.clone(), W.s.clone(), W.G, W.R) for _ in range(nc - 1)]
+    c4 = [W4] + [FP4GroupedWeight(W4.w.clone(), W4.s.clone(), W4.G, W4.R, W4.K) for _ in range(nc - 1)]
+    cases = [("fp8 grouped kernel", lambda c: fp8_grouped_linear(x6, c8[c]), b8),
+             ("fp4 grouped kernel", lambda c: fp4_grouped_linear(x6, c4[c]), b4),
+             ("fp4 grouped BLOCK_N=32", lambda c: fp4_grouped_linear(x6, c4[c], block_n=32), b4),
+             ("fp4 grouped BLOCK_N=128", lambda c: fp4_grouped_linear(x6, c4[c], block_n=128), b4),
+             ("bf16 einsum (original)", lambda c: torch.einsum("sgd,grd->sgr", x6, ref_w), 2 * b8)]
+    for lbl, fn, nb in cases:
+        for c in range(nc):
+            fn(c)
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        for _ in range(6):
+            for c in range(nc):
+                fn(c)
         torch.cuda.synchronize()
-        dt = (time.perf_counter() - t0) / 50
-        gb = (W.G * W.R * W.K * (1 if "fp8" in lbl else 2)) / 1e9
-        print(f"       T=6 {lbl:22s} {dt * 1e6:7.1f} us  ({gb / dt:5.0f} GB/s of weights)")
-    del W, ref_w, old, x, full
+        dt = (time.perf_counter() - t0) / (6 * nc)
+        print(f"       T=6 {lbl:24s} {dt * 1e6:7.1f} us  ({nb / dt / 1e9:5.0f} GB/s of weights, "
+              f"{nb / 2**20:.1f} MiB)")
+    del c8, c4, W, W4, deq4, ref_w, old, x, full
     torch.cuda.empty_cache()
 
 # ----------------------------------------------------------------- 2. fused decode attention

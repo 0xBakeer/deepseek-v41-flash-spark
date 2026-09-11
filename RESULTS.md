@@ -377,3 +377,34 @@ back to back: 19.11 tok/s (acceptance 3.03) → **20.85 tok/s** (acceptance 3.23
 3.28 s on the same prompt; verify step on `engine/profile_fast.py` 134.4 → 125.6 ms; 1.75 GiB of
 resident weights freed. The shared experts are the one dense FFN every token passes through and
 the FP4 weight error (12 % relative) shows there; `wo_a` stays FP8 through the grouped kernel.
+
+### 3.3 Addendum 2026-09-11 17:40 — `wo_a` in FP4 and a leaner decode loop
+
+The output projection's first factor (`attn.wo_a`, 1,343 MB read per verify step) now runs through a
+grouped FP4 kernel (`tools/fp4_linear.py::fp4_grouped_linear`, one group per third grid axis),
+quantized at load from the stored FP8. Held-out teacher-forced against the 3.1 baseline
+(1.5384 / 3.2087): **coding 1.5346 (−0.004), general 3.1498 (−0.059)** — inside what this corpus can
+resolve, and on the good side of zero. Resident weights 8.34 → 7.70 GiB. Kernel time in the step
+7.95 → 4.56 ms; at T=6 in isolation the FP4 grouped kernel is 150-158 GB/s against the FP8 one's
+207-215, and reads 0.53x the bytes, so 1.31-1.44x in wall time.
+
+`DSV41_LEAN_STEP=1` (default; `=0` restores the previous code) computes the greedy accept/reject on
+the GPU and reads back one 7-element pinned tensor instead of up to eleven separate syncs, builds
+the verify block into a preallocated buffer, and drops redundant clones and a duplicate buffer
+preparation. Sampling semantics are unchanged: at temperature 0 both paths produce byte-identical
+text, and the temperature path is the original code.
+
+| | verify step (`engine/profile_fast.py`) | wall per step, 200-token run |
+|---|---|---|
+| 3.2 configuration (`attn`) | 125.6 ms | 156.5 ms |
+| this addendum (`attn,wo_a`, lean step) | **118.9 ms** | **149.1 ms** |
+
+The decode line on the standard prompt moved 20.62 → 20.02 tok/s because the DSpark acceptance on
+that one prompt fell from 3.23 to 2.99; at equal acceptance the new configuration is 21.7 tok/s.
+Per-step time is the number this addendum claims. Prefill on the same prompt 3.27 → 2.61 s.
+
+Instrumenting the loop (`DSV41_STEP_TIMING=1`) also corrected an earlier reading: the gap between
+the graph harness and a fresh 200-token run is not removable Python. It is one un-graphed drafter
+call on the first step, the Engram host-to-device copy absorbing queued graph work by design, and a
+cold Engram row cache — a second decode in the same process costs ~140 ms/step and a third ~133 ms,
+tracking the Engram read time and nothing else.

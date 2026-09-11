@@ -51,6 +51,12 @@ HC_KERNEL = os.environ.get("DSV41_HC_KERNEL", "1") == "1" and skinny_linear is n
 # Capture whole runs of layers into one graph instead of one graph per layer (resident mode only).
 # DSV41_GRAPH_SEGMENTS=0 restores one graph per layer.
 GRAPH_SEGMENTS = os.environ.get("DSV41_GRAPH_SEGMENTS", "1") == "1"
+# Lean step: the same switch engine/v41_engine.py reads. It removes the per-step host work that is
+# not the graph replay itself -- the `torch.arange` and the `repeat` of the embedding rebuilt every
+# step, the constant pre_mix, the second `prepare_pending_buffers()` (only the capture run needs it)
+# and the self-copy of the block ids. DSV41_LEAN_STEP=0 restores the original sequence exactly; the
+# math is identical either way (the buffers get the same values).
+LEAN_STEP = os.environ.get("DSV41_LEAN_STEP", "1") == "1"
 
 
 def _fp32_lin(x, w):
@@ -115,6 +121,10 @@ class FastDecoder:
         self.markov_embed_bf16 = self.W.mtp[2].markov_embed.to(torch.bfloat16)
         self.markov_head_bf16 = self.W.mtp[2].markov_head.to(torch.bfloat16)
         self.win_off = torch.arange(a.window_size - 1, -1, -1, device=dev)
+        # constants the lean step reuses instead of rebuilding them per step
+        self._ar_t = torch.arange(T, device=dev)
+        self._premix0 = torch.zeros(T, a.hc_mult, dtype=torch.float32, device=dev)
+        self._premix0[:, 0] = 1.0
         self.graphs = {}
         self.pool = None
         # resident mode: (layer, expert) -> arena slot as a device table, so the router's expert ids can be
@@ -446,18 +456,29 @@ class FastDecoder:
         a = self.a
         assert block_ids.numel() == T_VERIFY
         assert self.c.len == S, (self.c.len, S)
-        self.ids.copy_(block_ids)
-        self.pos.copy_(S + torch.arange(T_VERIFY, device=self.dev))
+        if LEAN_STEP:
+            if block_ids is not self.ids:
+                self.ids.copy_(block_ids)
+            torch.add(self._ar_t, S, out=self.pos)
+        else:
+            self.ids.copy_(block_ids)
+            self.pos.copy_(S + torch.arange(T_VERIFY, device=self.dev))
         rows_fn = engram_rows if callable(engram_rows) else None
         if rows_fn is None:
             for L, rows in engram_rows.items():
                 self.eg_rows[L].copy_(rows)
-        self.h.copy_(self.W.embed[self.ids].unsqueeze(1).repeat(1, a.hc_mult, 1))
-        self.pre_mix.zero_(); self.pre_mix[:, 0] = 1.0
+        if LEAN_STEP:
+            # expand, not repeat: copy_ reads the stride-0 view directly, nothing is materialised
+            self.h.copy_(self.W.embed[self.ids].unsqueeze(1).expand(-1, a.hc_mult, -1))
+            self.pre_mix.copy_(self._premix0)
+        else:
+            self.h.copy_(self.W.embed[self.ids].unsqueeze(1).repeat(1, a.hc_mult, 1))
+            self.pre_mix.zero_(); self.pre_mix[:, 0] = 1.0
         parity = S % 2
         self.prepare_pending_buffers()
-        self.capture(parity)
-        self.prepare_pending_buffers()  # capture's warm-up/capture runs overwrite the buffers
+        if not LEAN_STEP or parity not in self.graphs:
+            self.capture(parity)
+            self.prepare_pending_buffers()  # capture's warm-up/capture runs overwrite the buffers
         t0 = time.perf_counter()
         futs = rows_fn() if rows_fn is not None else None  # {layer: Future} -- reads already in flight
         if self.use_graphs:

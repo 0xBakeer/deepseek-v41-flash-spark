@@ -51,9 +51,11 @@ except Exception:  # noqa: BLE001
     FP8GroupedWeight, fp8_grouped_linear = None, None
 
 try:  # dense projections re-quantized from fp8 to fp4 at load time (opt-in, see dense_fp4_groups)
-    from fp4_linear import FP4Weight, fp4_linear, quantize_fp8_to_fp4
+    from fp4_linear import (FP4GroupedWeight, FP4Weight, fp4_grouped_linear, fp4_linear,
+                            quantize_fp8_grouped_to_fp4, quantize_fp8_to_fp4)
 except Exception:  # noqa: BLE001
     FP4Weight, fp4_linear, quantize_fp8_to_fp4 = None, None, None
+    FP4GroupedWeight, fp4_grouped_linear, quantize_fp8_grouped_to_fp4 = None, None, None
 
 
 # --------------------------------------------------------------------------- dense FP4 opt-in
@@ -63,10 +65,12 @@ except Exception:  # noqa: BLE001
 #   off              (default) -- everything stays fp8, the old path
 #   shared           -- ffn.shared_experts.w1/w2/w3 of every backbone layer and DSpark block
 #   attn             -- attn.wq_a, attn.wq_b, attn.wkv, attn.wo_b (the `_fp8_linear_kernel` group)
-#   shared,attn      -- both;  "all" is the same thing
-# attn.wo_a (the grouped kernel), the indexer wq_b, the engram wkv and mtp.0.main_proj always stay
-# fp8 -- they are not covered by this switch.
-_FP4_ALIASES = {"all": ("shared", "attn"), "on": ("shared", "attn"), "1": ("shared", "attn")}
+#   wo_a             -- attn.wo_a, the [8, 1024, 4096] output LoRA on the GROUPED kernel
+#   any comma combination;  "all" = shared,attn,wo_a
+# The indexer wq_b, the engram wkv and mtp.0.main_proj always stay fp8 -- they are not covered by
+# this switch.
+_ALL_FP4_GROUPS = ("shared", "attn", "wo_a")
+_FP4_ALIASES = {"all": _ALL_FP4_GROUPS, "on": _ALL_FP4_GROUPS, "1": _ALL_FP4_GROUPS}
 
 
 def dense_fp4_groups() -> frozenset:
@@ -78,9 +82,10 @@ def dense_fp4_groups() -> frozenset:
         if not part:
             continue
         out.update(_FP4_ALIASES.get(part, (part,)))
-    unknown = out - {"shared", "attn"}
+    unknown = out - set(_ALL_FP4_GROUPS)
     if unknown:
-        raise ValueError(f"DSV41_DENSE_FP4: unknown group(s) {sorted(unknown)}; use shared / attn / all / off")
+        raise ValueError(f"DSV41_DENSE_FP4: unknown group(s) {sorted(unknown)}; "
+                         f"use {' / '.join(_ALL_FP4_GROUPS)} / all / off")
     if out and FP4Weight is None:
         raise RuntimeError("DSV41_DENSE_FP4 is set but tools/fp4_linear.py could not be imported")
     return frozenset(out)
@@ -291,7 +296,7 @@ class LayerWeights:
         self.wq_a = fp8lin("attn.wq_a")
         self.wq_b = fp8lin("attn.wq_b")
         self.wkv = fp8lin("attn.wkv")
-        self.wo_a = make_wo_a(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev), args)
+        self.wo_a = make_wo_a(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev), args, fp4_groups)
         self.wo_b = fp8lin("attn.wo_b")
         self.hc_attn_fn = f32("hc_attn_fn")
         self.hc_ffn_fn = f32("hc_ffn_fn")
@@ -315,22 +320,37 @@ class LayerWeights:
                 self.comp_wkv = bf("attn.compressor.wkv.weight")
 
 
-def make_wo_a(weight, scale, args):
+def make_wo_a(weight, scale, args, groups=None):
     """The attention output LoRA. `convert.py` dequantizes wo_a to bf16 and everything downstream
     kept it that way: [8, 1024, 4096] bf16 = 67 MB per layer, 2.7 GB read per decode step. With
     DSV41_WOA_FP8=1 (default) it stays in the stored fp8 format and the grouped Triton GEMM reads
-    half the bytes; DSV41_WOA_FP8=0 restores the dequantized-bf16 tensor and the einsum."""
+    half the bytes; DSV41_WOA_FP8=0 restores the dequantized-bf16 tensor and the einsum.
+
+    With "wo_a" in DSV41_DENSE_FP4 it is re-quantized once more, to the packed FP4 format, and the
+    grouped FP4 kernel reads 0.5307x of the fp8 bytes (17.8 MB instead of 33.6 per layer)."""
     if FP8GroupedWeight is not None and os.environ.get("DSV41_WOA_FP8", "1") == "1":
-        return FP8GroupedWeight(weight, scale, args.o_groups, args.o_lora_rank)
+        w = FP8GroupedWeight(weight, scale, args.o_groups, args.o_lora_rank)
+        if "wo_a" in (dense_fp4_groups() if groups is None else groups):
+            out = quantize_fp8_grouped_to_fp4(w)
+            del w
+            return out
+        return w
     return dequant_fp8_block(weight, scale).view(args.o_groups, args.o_lora_rank, -1)
 
 
 def wo_a_proj(o: torch.Tensor, w, tiled: bool = False) -> torch.Tensor:
-    """o bf16 [T, G, K] -> [T, G, R]; einsum("sgd,grd->sgr", o, wo_a) or its fp8 grouped GEMM.
+    """o bf16 [T, G, K] -> [T, G, R]; einsum("sgd,grd->sgr", o, wo_a) or its grouped GEMM.
 
-    The Triton kernel is already row-count- and row-offset-invariant, so it never needs the
-    MM_TILE row tiling the bf16 einsum needs for chunk invariance.
+    Three stored formats: a bf16 [G, R, K] tensor (the einsum), an FP8GroupedWeight (the fp8
+    grouped kernel) or an FP4GroupedWeight (the fp4 grouped kernel, at every T; with
+    DSV41_FP4_DENSE_PREFILL=dequant prefill falls back to a transient dequant + einsum).
+    Both Triton kernels are row-count- and row-offset-invariant by construction, so they never need
+    the MM_TILE row tiling the bf16 einsum needs for chunk invariance.
     """
+    if FP4GroupedWeight is not None and isinstance(w, FP4GroupedWeight):
+        if o.size(0) <= 16 or os.environ.get("DSV41_FP4_DENSE_PREFILL", "kernel") == "kernel":
+            return fp4_grouped_linear(o, w)
+        return torch.einsum("sgd,grd->sgr", o.to(torch.bfloat16), w.dequant())
     if FP8GroupedWeight is not None and isinstance(w, FP8GroupedWeight):
         return fp8_grouped_linear(o, w)
     fn = (lambda t: torch.einsum("sgd,grd->sgr", t, w))

@@ -1375,3 +1375,251 @@ the setting worth having (.env is exported by start.sh, so one line there is eno
 * `DSV41_FP4_DENSE_F16=0` feeds the tensor cores bf16 activations and bf16 (exact) decoded weights
   instead of fp16. Implemented and compiled, not measured: the fp16 path is what the routed-expert
   kernel already does with the same activations.
+
+### 2026-09-11 16:05-17:05 -- `attn.wo_a` in FP4, and where the decode loop's non-graph time goes
+
+Two independent things, each behind its own switch.
+
+#### 1. The grouped FP4 kernel for `attn.wo_a`
+
+`attn.wo_a` is the attention output LoRA: G = 8 independent [1024, 4096] matrices sharing one
+row-major buffer. Since the 10:25-10:55 round it has been read in the checkpoint's fp8 format by
+`_fp8_grouped_kernel` -- 33.55 MB per layer, 1,343.5 MB per verify step, 198.6 us per layer -- and it
+was the last dense group outside the `DSV41_DENSE_FP4` switch (14:30-16:00 above: "still fp8, 630.5 MB
+of it saveable, untouched, unmeasured").
+
+`tools/fp4_linear.py` now carries the grouped variant next to the dense one: `FP4GroupedWeight`
+(E2M1 codes [G*R, K/2] + one UE8M0 scale per 32 consecutive K weights of a row, [G*R, K/32]),
+`_fp4_grouped_kernel`, `fp4_grouped_linear` and `quantize_fp8_grouped_to_fp4`. The kernel is
+`_fp4_linear_kernel` with a third grid axis for the group -- exactly the relationship
+`_fp8_grouped_kernel` has to `_fp8_linear_kernel`. A group is a row range `g*R .. (g+1)*R` of the
+code matrix and the *same* row range of the scale table: the fp4 table has one row per weight row,
+so unlike the fp8 32x32 block table it needs no division by 32. Nothing is copied, and the clamp on
+the masked N lane keeps a program from reading another group's rows.
+
+The re-quantization is the dense one applied to the flat [8192, 4096] matrix. That is not a
+shortcut: the quantizer works per row per 32 consecutive K weights and a group is a row range, so no
+amax ever crosses a group boundary and re-quantizing the flat matrix is the same arithmetic as
+re-quantizing each group separately.
+
+`DSV41_DENSE_FP4` grew a third group name -- `off | shared | attn | wo_a` and any comma combination,
+with `all` now meaning all three rather than `shared,attn`. `v41_ref.make_wo_a` takes the group set
+and returns an `FP4GroupedWeight` when `wo_a` is in it; `v41_ref.wo_a_proj` dispatches on the weight
+object, so the graphed decode path (engine/fastdecode.py `_attention`), the un-graphed
+`Model.attention` and tools/v41_ref.py's own `attention` all follow. Prefill runs the same kernel at
+BLOCK_M = 64; `DSV41_FP4_DENSE_PREFILL=dequant` restores a transient dequant + einsum above T = 16,
+as it does for the dense groups. `DSV41_WOA_FP8=0` still restores the original bf16 tensor and the
+einsum, ahead of either kernel.
+
+**BLOCK_N.** The group axis already supplies 8-fold parallelism, so at T = 6 a 64-wide N tile gives
+8 x 1024/64 = 128 programs for 48 SMs -- the dense kernel's reason for preferring 32 does not apply
+here. Measured on the real weight at T = 6, 32 / 64 / 128: 114.6 / 119.1 / 123.6 us on layer 0 and
+116.7 / 112.9 / 120.1 us on layer 7, i.e. inside this shape's run-to-run spread. `pick_block_n_grouped`
+takes 64 at decode M and 128 at prefill M.
+
+**Correctness** (`engine/test_kernels.py`, section 1 extended; three real checkpoint weights).
+
+| weight | fp8 -> fp4 | weight rel err | per-32-group mean / p99 / max |
+|---|---|---|---|
+| `layers.0.attn.wo_a` | 32.0 -> 17.0 MiB (0.5307x) | 0.1215 | 0.1201 / 0.1643 / 0.2212 |
+| `layers.7.attn.wo_a` | 32.0 -> 17.0 MiB | 0.1214 | 0.1203 / 0.1639 / 0.2340 |
+| `mtp.0.attn.wo_a` | 32.0 -> 17.0 MiB | 0.1221 | 0.1205 / 0.1647 / 0.2345 |
+
+The same 0.12 the dense weights showed, which is what four bits with eight magnitude levels costs.
+Against the bf16 einsum on the same fp4 weights at T = 1, 6, 16, 64 and 2048 the kernel is 0.0 to
+4.9e-5 relative with max |delta| at one bf16 ulp of the output (<= 7.8e-3 against outputs of order
+2). Against an fp32 matmul on those weights the kernel is 1.62e-3 to 1.66e-3 -- and the bf16 einsum
+scores the identical 1.62e-3 to 1.66e-3 on the same inputs, so the kernel is at the output's bf16
+rounding, not above it. Rows [0:6], [7:13] and [1000:1006] of a 2048-row call come out bit-identical
+to the short calls, so like the other two it needs no `MM_TILE` row tiling.
+
+**Bandwidth at T = 6**, steady state (the call cycled over ~300 MB of copies of the weight, so
+nothing is L2-resident and no flush write competes for DRAM):
+
+| weight | bf16 einsum (original) | fp8 grouped | fp4 grouped |
+|---|---|---|---|
+| `layers.0.attn.wo_a` | 295.0 us, 228 GB/s of 64.1 MiB | 156.4 us, 215 GB/s of 32.0 MiB | 119.1 us, 150 GB/s of 17.0 MiB |
+| `layers.7.attn.wo_a` | 301.6 us, 223 GB/s | 162.2 us, 207 GB/s | 112.9 us, 158 GB/s |
+
+Read that in wall time: fp4 reads 0.5307x the bytes at 0.70-0.76x the GB/s, so it is 1.31-1.44x
+faster than fp8 standalone. In the real step, where the L2 is thrashed by everything else, the gap
+is larger: the profile below has `_fp4_grouped_kernel` at 114.0 us per layer against the fp8
+kernel's 198.6 us, i.e. 4.56 ms per step instead of 7.95.
+
+**Resident weights.** `attn` alone reports 8.34 GiB allocated after the weight load; `attn,wo_a`
+reports 7.70 GiB -- 0.64 GiB less, which is the predicted 43 x 15.72 MB. At the fixed 90.5 GB arena
+that is headroom, not extra experts: 6,260 CB3 slots either way.
+
+#### 2. Where the decode loop's non-graph time goes
+
+`engine/v41_engine.py` grew a per-phase host wall-clock timer (`StepPhases`, `DSV41_STEP_TIMING=1`,
+off by default: with the flag off the loop runs one `if ph is not None` per phase and nothing else).
+Every number in the tables below is *host* time: the graphs are queued asynchronously, so a phase's
+figure is the time the host spent there, including whatever GPU work it waited for. Three derived
+rows come from `FastDecoder.stats` and are already inside the `step` phase.
+
+**The first reading was wrong, and the table is what corrected it.** A fresh command-line run at
+`DSV41_DENSE_FP4=attn` reports 162.8 ms per step against the graph harness's 125.6 + 13.1 = 138.7 ms,
+and the obvious conclusion -- 24 ms per step of removable Python -- does not survive the breakdown:
+
+| phase | ms/step (fresh run, 62 steps) | what it is |
+|---|---|---|
+| draft | 8.33 | **one** un-graphed `_draft()` call, amortized: on the first step `self.graphs` is still empty, so `draft()` falls through to the eager path (~0.5 s) before any graph exists |
+| block | 13.48 | `torch.cat([torch.tensor([tok], device=cuda), drafts])` -- the pageable H2D is stream-ordered, so it blocks until the draft graph has finished; this is the draft's 13.1 ms of GPU time, not overhead |
+| hash | 0.39 | `NgramHashState.forward` for 6 positions |
+| hash_d2h | 0.02 | the hash ids to the host (free here -- `block` already drained the stream) |
+| submit | 0.05 | two `ThreadPoolExecutor.submit` calls |
+| step | 58.92 | 3 graph-segment replays + the Engram row waits; of it 48.5 ms is the Engram wait |
+| verify | 81.54 | the accept/reject loop -- and the first `.item()` in it waits for the whole verify step |
+| rollback / emit / consumer | 0.06 | |
+
+The `step` phase's 48.5 ms of "Engram wait" is `fut.result()` plus `to_device`, and `to_device`'s
+pageable H2D is stream-ordered too: at the layer-14 boundary roughly a third of the step's graph
+work is queued ahead of it. So both of the two big non-`verify` numbers are GPU time that the host is
+correctly using to run the next NVMe read, exactly as the pipeline was designed to. The genuinely
+host-side residue of a *warm* step is about 1 ms.
+
+What the 162.8 ms is made of, then: one eager draft (8.3), the CUDA-graph capture inside the first
+step, first-call Triton compilation, and a cold Engram row cache (`engram_read_s` 1.33 s over the
+run). A second run in the same process costs ~140 ms per step and a third ~133 ms, with the
+difference tracking `engram_read_s` (1.208 s on the second, 0.193 s on the third) and nothing else.
+
+**What was removed anyway** (`DSV41_LEAN_STEP`, default 1, `=0` restores the original code path in
+both `engine/v41_engine.py` and `engine/fastdecode.py`):
+
+* Greedy accept/reject on the GPU. `logits.argmax(-1)`, the five draft comparisons and the count of
+  leading accepts (`cumprod` then `sum`, which is the index of the first mismatch) are one small
+  graph of kernels, and the result reaches the host as a single 7-element copy into a pinned buffer
+  instead of up to eleven separate `int()`/`bool()` syncs, six `sample_probs` calls and their six
+  130k-wide `zeros_like` allocations. The bonus token is `argmax[a]` for every a, including a = 5,
+  which is what the loop computed. An accepted stop token still ends the block with no bonus.
+* The verify block is filled into a preallocated [6] buffer with `fill_` (a kernel argument, no H2D)
+  and a device copy, instead of `torch.cat([torch.tensor([tok], device=cuda), drafts])`.
+* `drafts.clone()` and `q.clone()` are gone on the greedy path: the drafter's static buffers are not
+  written again until the next `draft()` call, which is after verification. `q` (5 x 130k fp32,
+  2.6 MB) is not read at all when the temperature is 0.
+* In `FastDecoder.step`: a preallocated `arange` for the positions, `expand` instead of `repeat` for
+  the embedding rows, a constant `pre_mix` copy instead of `zero_()` + a scatter, and
+  `prepare_pending_buffers()` once per step instead of twice (only the capture run overwrites them).
+
+**Sampling is untouched.** The temperature > 0 path is the original code, RNG draw for RNG draw --
+the rejection sampler draws a variable number of scalars depending on where it stops, so batching it
+would move the RNG stream. The greedy path takes the argmax of the same logits in the same order.
+Verified end to end: at temperature 0 the two paths produce byte-identical output text and identical
+token lists (205 tokens, no divergence) in both A/B runs below.
+
+**Phase table before and after**, same process, `DSV41_DENSE_FP4=attn,wo_a`, 200 greedy tokens, the
+standard prompt. The two runs of a pair are back to back; the arms were run in both orders because
+the second decode of a process still pays Engram NVMe reads that the third does not.
+
+| phase, ms/step | run 2: original | run 3: lean | run 2: lean | run 3: original |
+|---|---|---|---|---|
+| draft | 0.045 | 0.034 | 0.033 | 0.043 |
+| block | 13.233 | 0.012 | 0.012 | 13.243 |
+| hash | 0.374 | 0.463 | 0.451 | 0.359 |
+| hash_d2h | 0.021 | 12.914 | 12.960 | 0.021 |
+| submit | 0.027 | 0.029 | 0.028 | 0.024 |
+| step | 48.840 | 41.296 | 47.898 | 41.429 |
+| verify | 78.399 | 77.763 | 78.130 | 78.320 |
+| rollback + emit + consumer | 0.034 | 0.032 | 0.035 | 0.029 |
+| **total** | **140.973** | **132.548** | **139.548** | **133.468** |
+| decode_tok_s | 21.93 | 23.32 | 22.15 | 23.16 |
+| `engram_read_s` over the run | not recorded | not recorded | 1.208 s | 0.193 s |
+
+Read the columns pairwise by position, not by arm: the 2nd decode of a process costs ~140 ms per
+step and the 3rd ~133 ms whichever arm is in it, because the 3rd finds every Engram row in the
+process-local cache. At matched positions the lean path is 1.43 ms/step faster (position 2) and
+0.92 ms/step faster (position 3). Note also that `block` and `hash_d2h` simply trade places: the wait
+for the draft graph has to happen somewhere, because the Engram hash ids depend on the drafted
+tokens and have to reach the host before the NVMe reads can start.
+
+Acceptance was 3.09 and the output text identical in all four columns, so unlike the earlier
+kernel rounds none of this is an acceptance coin flip.
+
+#### Gates
+
+**`engine/test_fastdecode.py`** (graphed `FastDecoder` against `Model.forward` on identical state),
+shipped config, `DSV41_DENSE_FP4=attn,wo_a`:
+
+| parity | drafts equal | logits rel err | argmax agreement | main_hidden rel | step / draft |
+|---|---|---|---|---|---|
+| 0 | no | 0.0746 | **1.00** | 0.0863 | 116.7 / 14.4 ms |
+| 1 | yes | 0.0158 | **1.00** | 0.0211 | 117.9 / 13.5 ms |
+
+Against the `attn` row of the 14:30-16:00 section (0.0613 / 0.0249, 1.00 / 1.00, 120.5 / 124.8 ms
+for the two parities in the earlier harness run) the agreement is unchanged at 1.00 / 1.00. The
+parity-0 draft now differs by one token, which makes the verify block different; the block's argmax
+agreement is still 6 of 6.
+
+**Teacher-forced held-out** (`corpus/heldout_corpus.jsonl`, 5,430 coding + 5,231 general scored
+positions), one run, shipped config:
+
+| `DSV41_DENSE_FP4` | coding NLL | delta vs `off` | general NLL | delta vs `off` |
+|---|---|---|---|---|
+| off (12:15-14:10 section) | 1.5384 | -- | 3.2087 | -- |
+| attn (14:30-16:00 section) | 1.5403 | +0.0019 | 3.1738 | -0.0349 |
+| **attn,wo_a** | **1.5346** | **-0.0038** | **3.1498** | **-0.0589** |
+
+Top-1 accuracy 0.6862 coding / 0.4580 general. Both deltas are on the good side of zero, which on a
+53-sequence corpus means indistinguishable from it -- the same caveat as the `attn` row's -0.035.
+The point is the negative sign, not its size: the 0.12 weight error of the output LoRA does not show,
+for the same reason it does not show on `wq_b` and `wo_b`, namely that the output is a sum over 4,096
+terms and the error averages out. `results/densefp4/wo_a.json`.
+
+**`engine/profile_fast.py`**, one graphed verify step, shipped config:
+
+| | step | draft |
+|---|---|---|
+| `attn` (14:30-16:00 section) | 125.6 ms | 13.1 ms |
+| `attn,wo_a` + lean step | **118.9 ms** | 13.5 ms |
+
+Top eight kernels, per step (the profile runs three iterations):
+
+| kernel | calls/step | ms/step |
+|---|---|---|
+| `_cb3v3_up_kernel` | 40 | 41.01 |
+| `_cb3v3_down_kernel` | 40 | 22.54 |
+| `_fp4_linear_kernel` | 163 | 16.15 |
+| `_fp8_linear_kernel` | 131 | 9.78 |
+| `cutlass_80_wmma_tensorop_bf16` (the LM head, 1.34 GB at 232 GB/s) | 1 | 5.79 |
+| `_fp4_grouped_kernel` (`wo_a`) | 40 | 4.56 |
+| `unrolled_elementwise_kernel` | 895 | 2.12 |
+| `_skinny_kernel` | 80 | 1.85 |
+
+Self CUDA total 116.6 ms per step against 118.9 ms of wall, i.e. ~2.3 ms of the step is not GPU-busy
+time. The dense fp8/fp4 group is 30.5 ms per step (163 fp4 + 131 fp8 + 40 fp4-grouped) against
+33.4 ms with `wo_a` in fp8.
+
+**Decode line**, two fresh command-line runs back to back, 200 greedy tokens, the standard prompt:
+
+| | decode_tok_s | accept_len_mean | steps | decode_s | prefill_s | ms per step |
+|---|---|---|---|---|---|---|
+| `attn`, original step | 20.62 | 3.23 | 62 | 9.701 | 3.268 | 156.5 |
+| `attn,wo_a`, lean step | 20.02 | 2.99 | 67 | 9.989 | 2.609 | **149.1** |
+
+**Read that table the way the 11:00-11:20 one had to be read.** The step got 7.4 ms (4.7 %) faster
+and tok/s went down, because the mean accepted length fell from 3.23 to 2.99 on this one prompt. The
+0.12 weight error on `wo_a` moves the logits enough to change which drafts the target accepts, and
+this prompt landed on a worse trajectory; at the old run's acceptance the new configuration would be
+3.24 / 0.1491 = 21.7 tok/s. Every prompt-independent number moves the same way: the profile wall
+(125.6 -> 118.9), the dense GPU time (33.4 -> 30.5 ms), the in-process step time at matched positions
+(140.97 -> 139.55 as the 2nd decode of a process, 133.47 -> 132.55 as the 3rd) and prefill (3.27 -> 2.61 s, because `wo_a`'s prefill call is
+now the kernel instead of a bf16 dequant plus cuBLAS). Both outputs are coherent `lru_ttl_cache`
+modules.
+
+**Shipped.** `.env` on the serving box now carries `DSV41_DENSE_FP4=attn,wo_a`; the code default for
+`DSV41_DENSE_FP4` stays `off` and `DSV41_LEAN_STEP` defaults to 1.
+
+**Caveats.**
+* One prompt cannot separate the acceptance drop from a coin flip; the two decode lines differ by
+  five steps out of sixty-something.
+* The four small-N decode shapes noted in the 14:30-16:00 section are still latency-bound, and the
+  grouped kernel does not change that -- `wo_a`'s R = 1024 is wide enough.
+* The lean step is worth about 1 ms per step, not the 24 ms the first reading of the fresh-run table
+  suggested. The rest of that gap is one eager draft call, the graph capture and a cold Engram row
+  cache, all of which a long generation amortizes away by itself.
+* `DSV41_LEAN_STEP` only changes the greedy path. Sampled decoding still runs the sequential
+  rejection loop with its per-position syncs, deliberately: batching it would change the RNG stream.
+* The `to_device` H2D of the Engram rows remains the place where a third of the step's GPU time is
+  absorbed. `DSV41_ENGRAM_PINNED=1` moves that wait elsewhere without removing it (measured
+  2026-09-11 09:36, unchanged here).

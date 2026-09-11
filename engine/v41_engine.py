@@ -28,6 +28,59 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), "[engine]", *a, flush=True)
 
 
+# Per-phase host wall-clock timing of the decode loop (DSV41_STEP_TIMING=1, off by default: with
+# the flag off nothing but one `if` per phase runs). Everything on this loop is host time -- the
+# graphs are queued asynchronously, so a phase's number is the time the HOST spent in it, including
+# any wait for GPU work queued earlier. That is the quantity that explains the gap between
+# engine/profile_fast.py's step+draft and the tok/s the generator actually reaches.
+STEP_TIMING = os.environ.get("DSV41_STEP_TIMING", "0") == "1"
+
+# Lean step: keep the per-step host work off the critical path -- the greedy accept/reject decision
+# is taken on the GPU and read back as ONE 7-element tensor instead of up to eleven separate
+# device->host syncs, and the per-step `torch.tensor` / `torch.cat` / `torch.arange` allocations are
+# replaced by preallocated buffers (see also DSV41_LEAN_STEP in engine/fastdecode.py, which is the
+# same switch). DSV41_LEAN_STEP=0 restores the original per-position Python loop exactly.
+# Sampling semantics are untouched: the temperature > 0 path is the ORIGINAL code, RNG draw for RNG
+# draw, and the greedy path computes argmax of the same logits in the same order.
+LEAN_STEP = os.environ.get("DSV41_LEAN_STEP", "1") == "1"
+
+
+class StepPhases:
+    """Accumulating per-phase timer, printed as a table over a whole run."""
+
+    __slots__ = ("acc", "order", "steps", "_t", "t0")
+
+    def __init__(self):
+        self.acc, self.order, self.steps = {}, [], 0
+        self.t0 = self._t = time.perf_counter()
+
+    def start(self):
+        self._t = time.perf_counter()
+
+    def mark(self, name):
+        t = time.perf_counter()
+        if name not in self.acc:
+            self.acc[name] = 0.0
+            self.order.append(name)
+        self.acc[name] += t - self._t
+        self._t = t
+
+    def table(self, notes=()) -> str:
+        n = max(1, self.steps)
+        total = sum(self.acc.values())
+        wall = time.perf_counter() - self.t0
+        rows = [f"  {'phase':<14} {'ms/step':>9} {'% of step':>10} {'total s':>9}"]
+        for k in self.order:
+            v = self.acc[k]
+            rows.append(f"  {k:<14} {v / n * 1e3:9.3f} {v / total * 100:10.1f} {v:9.3f}")
+        rows.append(f"  {'-- accounted':<14} {total / n * 1e3:9.3f} {100.0:10.1f} {total:9.3f}")
+        rows.append(f"  {'-- loop wall':<14} {wall / n * 1e3:9.3f} {'':>10} {wall:9.3f}"
+                    f"   ({n} steps)")
+        for name, v in notes:
+            rows.append(f"  {name:<14} {v / n * 1e3:9.3f} {'':>10} {v:9.3f}   (already inside a phase)")
+        return "\n".join(rows)
+
+
 def host_available_bytes():
     """MemAvailable from /proc/meminfo, or None off Linux."""
     try:
@@ -276,6 +329,11 @@ class V41Engine:
             if resident:
                 self.fast.build_lut()
             log("fast decode path enabled (CUDA graphs=%s, device slot LUT=%s)" % (self.fast.use_graphs, self.fast.lut is not None))
+        # preallocated staging for the lean decode step (see LEAN_STEP): the verify block, the
+        # [n_accepted, argmax x 6] readback and its pinned host landing buffer.
+        self._blk = torch.empty(6, dtype=torch.long, device=device)
+        self._vout = torch.empty(7, dtype=torch.long, device=device)
+        self._vhost = torch.empty(7, dtype=torch.long).pin_memory()
         torch.cuda.synchronize()
         self.last_stats = {}
         log("ready")
@@ -333,6 +391,16 @@ class V41Engine:
             accepted_hist = _st.get("accepted", accepted_hist)
             t_prefill = _st.get("t_prefill", t_prefill)
             t_dec = max(time.perf_counter() - _st.get("t_decode0", t_start), 1e-9)
+            _ph = _st.get("phases")
+            if _ph is not None and _ph.steps:
+                _notes = []
+                _fd0 = _st.get("fd0")
+                if _fd0 is not None and self.fast is not None:
+                    _notes = [("of it: engram", self.fast.stats["engram_s"] - _fd0["engram_s"]),
+                              ("of it: graphs", self.fast.stats["graph_s"] - _fd0["graph_s"]),
+                              ("of it: draft g", self.fast.stats["draft_s"] - _fd0["draft_s"])]
+                print(f"[step timing] host wall clock per decode step, {_ph.steps} steps "
+                      f"(DSV41_STEP_TIMING=1)\n{_ph.table(_notes)}", flush=True)
             st = self.store.stats
             m = self.model
             self.last_stats = {
@@ -388,28 +456,105 @@ class V41Engine:
         n_out = 1
         pos = P  # position of `tok` (not yet forwarded)
         accepted_hist = []
-        out_st.update(n_out=1, steps=0, accepted=accepted_hist, t_decode0=time.perf_counter())
+        ph = StepPhases() if STEP_TIMING else None
+        if ph is not None and self.fast is not None:
+            # the engram row wait and the graph queueing both live inside the "step" phase; record
+            # where they started so the table can break that phase down
+            out_st["fd0"] = dict(self.fast.stats)
+        out_st.update(n_out=1, steps=0, accepted=accepted_hist, t_decode0=time.perf_counter(), phases=ph)
         steps = 0
         yield [tok]
         while n_out < max_tokens and tok not in stop_ids:
+            if ph is not None:
+                ph.start()
             if self.spec:
+                # the lean path applies to greedy decoding only; temperature > 0 keeps the original
+                # sequential rejection-sampling loop so its RNG stream is bit-for-bit unchanged
+                lean = LEAN_STEP and self.fast is not None and temperature <= 0
                 if self.fast is not None:
                     drafts, q = self.fast.draft(tok, pos - 1, temperature)
-                    drafts = drafts.clone(); q = q.clone()
-                    block = torch.cat([torch.tensor([tok], device=self.device), drafts])
+                    if not lean:
+                        # the drafter's static buffers survive until the next draft() call, which is
+                        # after this step's verification, so the lean path does not need the copies
+                        drafts = drafts.clone(); q = q.clone()
+                    if ph is not None:
+                        ph.mark("draft")
+                    if lean:
+                        # no H2D and no allocation: fill_ bakes the token into the kernel argument
+                        block = self._blk
+                        block[0].fill_(tok)
+                        block[1:].copy_(drafts)
+                    else:
+                        block = torch.cat([torch.tensor([tok], device=self.device), drafts])
+                    if ph is not None:
+                        ph.mark("block")
                     hashes = m.hash_state(block[None], pos)[0]
+                    if ph is not None:
+                        ph.mark("hash")
                     # both tables' rows are read in background threads (NVMe only, no CUDA calls there) and
                     # each is dequantized on the main thread when its layer needs it. The hash ids go to the
                     # host HERE, before any graph is queued: a .cpu() later would wait for the whole step.
                     h_np = hashes.cpu().numpy()
+                    if ph is not None:
+                        ph.mark("hash_d2h")
                     futs = {L: (self.eg_pool.submit(self.tables[L].read_raw, h_np[:, li, :]), self.tables[L].to_device)
                             for li, L in enumerate(self.args.engram_layer_ids)}
+                    if ph is not None:
+                        ph.mark("submit")
                     logits, mh = self.fast.step(block, pos, lambda: futs)
+                    if ph is not None:
+                        ph.mark("step")
                 else:
                     drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
                     block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # 6 tokens at pos..pos+5
                     logits, mh = m.forward(block, pos, prefill=False)
                 # verify drafts[i] (position pos+1+i) against logits[i]
+                if lean:
+                    # Greedy verification, entirely on the GPU: argmax of the six logit rows, the
+                    # five draft comparisons, and the number of LEADING accepts (cumprod-then-sum,
+                    # which is the index of the first mismatch). The bonus token is argmax[a] for
+                    # every a, including a = 5 -- exactly what the loop below computes. One 7-wide
+                    # D2H is the only host sync of the whole step.
+                    am = logits.argmax(-1)                                   # [6]
+                    acc = am[:5].eq(drafts).to(torch.int32).cumprod(0)       # 1 while still accepting
+                    self._vout[0] = acc.sum()
+                    self._vout[1:].copy_(am)
+                    self._vhost.copy_(self._vout)
+                    v = self._vhost.tolist()
+                    a, cand = v[0], v[1:]
+                    new = cand[:a]
+                    bonus = cand[a]
+                    for j, t in enumerate(new):   # an accepted stop token ends the block, no bonus
+                        if t in stop_ids:
+                            a, new, bonus = j + 1, new[:j + 1], None
+                            break
+                    if ph is not None:
+                        ph.mark("verify")
+                    m.c.rollback(pos + a + 1)
+                    if ph is not None:
+                        ph.mark("rollback")
+                    accepted_hist.append(a)
+                    emitted = list(new)
+                    if bonus is not None:
+                        emitted.append(bonus)
+                    pos = pos + a + 1
+                    tok = emitted[-1] if emitted else tok
+                    if emitted:
+                        out += emitted
+                        n_out += len(emitted)
+                        out_st["n_out"] = n_out
+                        if ph is not None:
+                            ph.mark("emit")
+                        yield emitted
+                        if ph is not None:
+                            ph.mark("consumer")
+                        if any(t in stop_ids for t in emitted):
+                            break
+                    steps += 1
+                    out_st["steps"] = steps
+                    if ph is not None:
+                        ph.steps = steps
+                    continue
                 a = 0
                 new = []
                 bonus = None
@@ -438,10 +583,14 @@ class V41Engine:
                 if bonus is None and not (new and new[-1] in stop_ids):
                     pt = sample_probs(logits[a] if a < 5 else logits[5], temperature, top_p)
                     bonus = int(torch.multinomial(pt, 1)) if temperature > 0 else int(pt.argmax())
+                if ph is not None:
+                    ph.mark("verify")
                 # caches valid for positions < pos + a + 1 (tok + accepted drafts)
                 m.c.rollback(pos + a + 1)
                 if self.fast is None:
                     m.dspark_seed(mh[:a + 1], pos)
+                if ph is not None:
+                    ph.mark("rollback")
                 accepted_hist.append(a)
                 emitted = list(new)
                 if bonus is not None:
@@ -452,11 +601,17 @@ class V41Engine:
                     out += emitted
                     n_out += len(emitted)
                     out_st["n_out"] = n_out
+                    if ph is not None:
+                        ph.mark("emit")
                     yield emitted
+                    if ph is not None:
+                        ph.mark("consumer")
                     if any(t in stop_ids for t in emitted):
                         break
                 steps += 1
                 out_st["steps"] = steps
+                if ph is not None:
+                    ph.steps = steps
             else:
                 logits, mh = m.forward(torch.tensor([tok], device=self.device), pos, prefill=False)
                 pt = sample_probs(logits[0], temperature, top_p)

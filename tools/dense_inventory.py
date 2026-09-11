@@ -3,7 +3,7 @@ bytes of them, and what FP4 would save. Reads only the safetensors headers; noth
 
 The verify step graph (engine/fastdecode.py `step`) runs, once per step:
   * 40 backbone layers: attn.wq_a, attn.wq_b, attn.wkv, attn.wo_b (the `_fp8_linear_kernel` group),
-    attn.wo_a (the grouped fp8 kernel) and ffn.shared_experts.w1/w2/w3;
+    attn.wo_a (the grouped fp8/fp4 kernel) and ffn.shared_experts.w1/w2/w3;
   * one indexer wq_b on each of the 8 index_source_layers;
   * one engram wkv on each of the 2 engram layers;
   * `_final`: mtp.0.main_proj once and mtp.k.attn.wkv for k = 0,1,2.

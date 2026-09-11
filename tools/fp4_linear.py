@@ -13,6 +13,10 @@ go from 1 + 1/1024 to 1/2 + 1/32, i.e. 0.5307x.
 
 Two tile shapes as in fp8_linear.py: BLOCK_M=16 for decode-sized M, BLOCK_M=64 for prefill.
 Accumulation is fp32; the group scale is applied to the fp32 partial of each 32-wide K step.
+
+The bottom of the file carries the grouped variant (`FP4GroupedWeight`, `_fp4_grouped_kernel`,
+`fp4_grouped_linear`) for `attn.wo_a`, which is G=8 independent [1024, 4096] matrices sharing one
+row-major buffer -- the same relationship `fp8_grouped_linear` has to `fp8_linear`.
 """
 
 from __future__ import annotations
@@ -215,3 +219,116 @@ def fp4_linear(x: torch.Tensor, W: FP4Weight, use_f16: bool | None = None,
                              USE_F16=USE_F16_DEFAULT if use_f16 is None else use_f16,
                              num_warps=num_warps, num_stages=num_stages)
     return y.view(*shape[:-1], W.N)
+
+
+# --------------------------------------------------------------------------- grouped (attn.wo_a)
+@triton.jit
+def _fp4_grouped_kernel(X, W, S, Y, T, R, KQ,
+                        stride_xt, stride_xg, stride_wn, stride_sn, stride_yt, stride_yg,
+                        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, USE_F16: tl.constexpr):
+    """Per group g: Y[:, g, :] = X[:, g, :] @ W[g*R:(g+1)*R, :]^T, W in the packed FP4 format.
+
+    `_fp4_linear_kernel` with a third grid axis for the group, exactly as `_fp8_grouped_kernel` is
+    `_fp8_linear_kernel` with one: a group is nothing but the row range g*R .. (g+1)*R of the code
+    matrix and the SAME row range of the scale table (the fp4 scale table has one row per weight
+    row, so unlike the fp8 32x32 block table it needs no division), so no data is copied and no
+    group can read another group's rows.
+
+    Row-count- and row-offset-invariant by construction, like the dense kernel: each output element
+    is one fp32 accumulation over K in fixed 128-wide steps.
+    """
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    g = tl.program_id(2)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = rn < R
+    wrow = g * R + tl.where(n_mask, rn, 0)   # clamp: the weight tile is loaded unmasked (64-byte rows)
+    m_mask = (rm < T)[:, None]
+    rm_ = tl.where(rm < T, rm, 0)
+    xk = 2 * tl.arange(0, 16)[None, :]
+    x_base = X + g * stride_xg + rm_[:, None] * stride_xt
+    w_tile = W + wrow[:, None] * stride_wn + tl.arange(0, 64)[None, :]
+    s_tile = S + wrow[:, None] * stride_sn + tl.arange(0, 4)[None, :]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for q in range(0, KQ):
+        acc += _quad_dot(x_base + q * 128, xk, m_mask, w_tile + q * 64, s_tile + q * 4,
+                         BLOCK_N, USE_F16)
+    tl.store(Y + rm[:, None] * stride_yt + g * stride_yg + rn[None, :], acc.to(tl.bfloat16),
+             mask=m_mask & n_mask[None, :])
+
+
+class FP4GroupedWeight:
+    """The attention output LoRA `wo_a` as FP4: E2M1 codes [G*R, K/2] + UE8M0 scales [G*R, K/32],
+    addressed as G independent [R, K] matrices (the same addressing `FP8GroupedWeight` uses).
+
+    For this checkpoint G=8, R=1024, K=4096: 33.55 MB of stored fp8 (+ 32 kB of block scales) per
+    layer become 17.83 MB, i.e. 15.7 MB per layer and 630 MB per verify step less to read.
+    """
+
+    def __init__(self, codes: torch.Tensor, scales: torch.Tensor, groups: int, rank: int, K: int):
+        assert codes.dtype == torch.uint8 and scales.dtype == torch.uint8
+        assert K % 128 == 0 and rank % 32 == 0, (K, rank)
+        N = groups * rank
+        assert tuple(codes.shape) == (N, K // 2), (codes.shape, N, K)
+        assert tuple(scales.shape) == (N, K // 32), (scales.shape, N, K)
+        self.w = codes.contiguous()
+        self.s = scales.contiguous()
+        self.G, self.R, self.K = groups, rank, K
+
+    @property
+    def shape(self):
+        return (self.G, self.R, self.K)
+
+    @property
+    def nbytes(self) -> int:
+        return self.w.numel() + self.s.numel()
+
+    def dequant(self) -> torch.Tensor:
+        """[G, R, K] bf16 -- the tensor the bf16 einsum path held resident."""
+        return dequant_fp4_packed(self.w, self.s).view(self.G, self.R, self.K)
+
+
+def quantize_fp8_grouped_to_fp4(w, group: int = 32, rows: int = 2048) -> FP4GroupedWeight:
+    """`fp8_linear.FP8GroupedWeight` -> FP4GroupedWeight.
+
+    The quantizer works per row per 32 consecutive K weights, and a group is a row range, so
+    re-quantizing the flat [G*R, K] matrix is exactly the same thing as re-quantizing each group
+    separately -- no group boundary is crossed by any amax.
+    """
+    from fp8_linear import FP8Weight  # local import: fp8_linear does not import this module
+    flat = quantize_fp8_to_fp4(FP8Weight(w.w, w.s), group, rows)
+    return FP4GroupedWeight(flat.w, flat.s, w.G, w.R, w.K)
+
+
+def pick_block_n_grouped(R: int, G: int, M: int, BLOCK_M: int) -> int:
+    """Decode-sized M: 64. Prefill: 128.
+
+    Unlike the dense case the group axis already supplies G-fold parallelism, so at M = 6 a 64-wide
+    N tile still gives G * R/64 = 128 programs for 48 SMs (BLOCK_N = 32 gives 256, which is past the
+    point where more programs help and pays a second pass over the activation). Measured on the real
+    wo_a in engine/test_kernels.py.
+    """
+    return 64 if BLOCK_M <= 16 else 128
+
+
+def fp4_grouped_linear(x: torch.Tensor, W: FP4GroupedWeight, use_f16: bool | None = None,
+                       block_n: int | None = None, num_warps: int = 4,
+                       num_stages: int = 3) -> torch.Tensor:
+    """x bf16 [T, G, K] -> bf16 [T, G, R]; equals einsum("tgk,grk->tgr", x, W.dequant())."""
+    assert x.dim() == 3 and x.size(1) == W.G and x.size(2) == W.K, (x.shape, W.shape)
+    if x.dtype != torch.bfloat16:
+        x = x.to(torch.bfloat16)
+    x = x.contiguous()
+    T = x.size(0)
+    y = torch.empty(T, W.G, W.R, dtype=torch.bfloat16, device=x.device)
+    BLOCK_M = 16 if T <= 16 else 64
+    BLOCK_N = pick_block_n_grouped(W.R, W.G, T, BLOCK_M) if block_n is None else block_n
+    grid = (triton.cdiv(W.R, BLOCK_N), triton.cdiv(T, BLOCK_M), W.G)
+    _fp4_grouped_kernel[grid](x, W.w, W.s, y, T, W.R, W.K // 128,
+                              x.stride(0), x.stride(1), W.w.stride(0), W.s.stride(0),
+                              y.stride(0), y.stride(1),
+                              BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                              USE_F16=USE_F16_DEFAULT if use_f16 is None else use_f16,
+                              num_warps=num_warps, num_stages=num_stages)
+    return y
