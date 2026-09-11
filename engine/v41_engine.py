@@ -192,7 +192,12 @@ class V41Engine:
         if spec and os.environ.get("DSV41_FAST", "1") == "1":
             from engine.fastdecode import FastDecoder
             self.fast = FastDecoder(self.model, self, use_graphs=os.environ.get("DSV41_GRAPHS", "1") == "1")
-            log("fast decode path enabled (CUDA graphs=%s)" % (self.fast.use_graphs,))
+            resident = (self.prune_keep and self.prune_keep < 1.0 and
+                        len(self.store.lru) >= 40 * max(6, int(np.ceil(self.prune_keep * 384))) - 0 and
+                        os.environ.get("DSV41_LUT", "1") == "1")
+            if resident:
+                self.fast.build_lut()
+            log("fast decode path enabled (CUDA graphs=%s, device slot LUT=%s)" % (self.fast.use_graphs, self.fast.lut is not None))
         torch.cuda.synchronize()
         self.last_stats = {}
         log("ready")
@@ -263,6 +268,7 @@ class V41Engine:
                 "nvme_read_s": round(st["read_s"], 2),
                 "engram_rows": sum(t.stats["rows"] for t in self.tables.values()),
                 "engram_s": round(sum(t.stats["seconds"] for t in self.tables.values()), 3),
+            "engram_read_s": round(sum(t.stats.get("read_s", 0.0) for t in self.tables.values()), 3),
                 "attn_s": round(m.stats["attn_s"], 2), "moe_s": round(m.stats["moe_s"], 2),
                 # where the MoE time actually goes: routing+slot bookkeeping, waiting for the
                 # NVMe loads of this layer, and the Triton kernel itself (moe_s minus the rest).

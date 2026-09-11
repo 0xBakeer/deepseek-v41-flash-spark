@@ -88,6 +88,10 @@ class FastDecoder:
         self.win_off = torch.arange(a.window_size - 1, -1, -1, device=dev)
         self.graphs = {}
         self.pool = None
+        # resident mode: (layer, expert) -> arena slot as a device table, so the router's expert ids can be
+        # turned into slots inside the graph and the whole layer is ONE graph (no host round-trip per layer)
+        self.lut = None
+        self.lut_version = -1
         self.pend_buf = {L: torch.zeros(2, a.head_dim, dtype=torch.float32, device=dev)
                          for L in a.kv_source_layers if a.compress_ratios[L] > 1}
         self.kvl_buf = {L: torch.zeros(T, a.head_dim, dtype=torch.float32, device=dev) for L in self.pend_buf}
@@ -234,7 +238,7 @@ class FastDecoder:
         self.ffn_pre.copy_(ffn_pre); self.ffn_post.copy_(ffn_post); self.ffn_comb.copy_(ffn_comb)
         y = R.rmsnorm(R.hc_pre(h, attn_pre), w.ffn_norm, a.norm_eps)
         self.y.copy_(y)
-        scores = F.softplus(F.linear(y.float(), w.gate_w)).sqrt()  # fp32 like the reference: bf16 flips near-ties
+        scores = F.softplus(F.linear(y, self.gate_bf16[L]).float()).sqrt()  # bf16 weights (as stored) x bf16 act, fp32 accumulate
         logits = scores + w.gate_bias
         pm = getattr(self.m, "prune_mask", None)
         if pm is not None and L in pm:
@@ -283,7 +287,7 @@ class FastDecoder:
             residual = h
             ffn_pre, ffn_post, ffn_comb = self._hc_mixes(h, w.hc_ffn_fn, w.hc_ffn_scale, w.hc_ffn_base)
             y = R.rmsnorm(R.hc_pre(h, attn_pre), w.ffn_norm, a.norm_eps)
-            scores = F.softplus(F.linear(y.float(), w.gate_w)).sqrt()
+            scores = F.softplus(F.linear(y, self.mtp_gate_bf16[k]).float()).sqrt()
             idx = (scores + w.gate_bias).topk(3, dim=-1)[1]
             wts = scores.gather(1, idx); wts = wts / (wts.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
             slots = (idx.to(torch.int32) + k * 128)
@@ -307,6 +311,21 @@ class FastDecoder:
             self.d_probs[i].copy_(torch.where(temp > 0, p, onehot))
             self.d_out[i] = nxt
             prev = nxt
+
+    def build_lut(self):
+        """Device slot table from the store's LRU. Only valid while no expert is evicted/loaded; the
+        engine rebuilds it whenever the store reports a miss."""
+        st = self.m.store
+        lut = torch.full((self.a.n_layers, self.a.n_routed_experts), -1, dtype=torch.int32)
+        for (L, e), slot in st.lru.items():
+            lut[L, e] = slot
+        self.lut = lut.to(self.dev)
+        self.lut_version = st.stats.get("misses", 0)
+
+    def _layer_ab(self, L, sh_state):
+        self._layer_a(L, sh_state)
+        self.slots.copy_(self.lut[L][self.route_idx])  # -1 never occurs while the LUT is valid
+        self._layer_b(L)
 
     # ------------------------------------------------------------------ capture
     def capture(self, S_parity: int):
@@ -334,6 +353,12 @@ class FastDecoder:
         torch.cuda.synchronize()
         st = {"parity": S_parity, "ckv": None, "ik": None, "ratio": 0}
         for L in range(self.a.n_layers):
+            if self.lut is not None:
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, pool=self.pool):
+                    self._layer_ab(L, st)
+                gA.append(g); gB.append(None)
+                continue
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, pool=self.pool):
                 self._layer_a(L, st)
@@ -379,9 +404,13 @@ class FastDecoder:
             gA, gB, gF, gD = self.graphs[parity]
             for L in range(a.n_layers):
                 gA[L].replay()
-                self._resolve(L)
-                gB[L].replay()
+                if gB[L] is not None:
+                    self._resolve(L)
+                    gB[L].replay()
             gF.replay()
+            if self.lut is not None:
+                # bookkeeping the host resolve would have done: LRU touch is irrelevant while resident
+                self.m.store.stats["hits"] += int(a.n_layers * self.route_idx.numel())
         else:
             st = {"parity": parity, "ckv": None, "ik": None, "ratio": 0}
             for L in range(a.n_layers):

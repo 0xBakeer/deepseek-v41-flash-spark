@@ -60,7 +60,9 @@ class EngramTable:
         uniq, inv = np.unique(flat, return_inverse=True)
         n = len(uniq)
         chunk = max(8, n // (self.pool._max_workers * 2) + 1)
+        t1 = time.perf_counter()
         parts = list(self.pool.map(self._read_rows, [uniq[i:i + chunk] for i in range(0, n, chunk)]))
+        self.stats["read_s"] = self.stats.get("read_s", 0.0) + time.perf_counter() - t1
         raw = np.concatenate(parts) if parts else np.empty((0, 264), np.uint8)
         raw = torch.from_numpy(raw).to(self.device)
         vals = raw[:, :256].view(torch.float8_e4m3fn).float()

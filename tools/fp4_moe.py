@@ -346,6 +346,28 @@ def _next_pow2(v: int) -> int:
     return 1 << max(0, (v - 1).bit_length())
 
 
+def build_routing_small(slots: torch.Tensor, BM: int):
+    """Decode-sized routing (P <= 64 pairs) with plain torch ops: sort the pairs by slot, one BM-block per
+    distinct slot (a slot never has more than BM pairs at this size). Static shapes, graph-capturable,
+    ~10 tiny kernels instead of one program per ARENA slot (the Triton router costs ~29 ms per step
+    with a 4,800-slot arena). Same output contract as build_routing; NB = P."""
+    T, K = slots.shape
+    P = T * K
+    flat = slots.reshape(-1).to(torch.int32)
+    order = torch.argsort(flat, stable=True)
+    ss = flat[order]
+    first = torch.ones(P, dtype=torch.bool, device=flat.device)
+    first[1:] = ss[1:] != ss[:-1]
+    blk = torch.cumsum(first.to(torch.int32), 0) - 1            # block id per sorted pair
+    start = torch.cummax(torch.where(first, torch.arange(P, device=flat.device, dtype=torch.int32), torch.zeros_like(blk)), 0).values
+    rank = torch.arange(P, device=flat.device, dtype=torch.int32) - start
+    block_pair = torch.full((P * BM,), -1, dtype=torch.int32, device=flat.device)
+    block_pair[blk * BM + rank] = order.to(torch.int32)
+    block_slot = torch.full((P,), -1, dtype=torch.int32, device=flat.device)
+    block_slot[blk] = ss
+    return block_slot, block_pair, P
+
+
 def build_routing(slots: torch.Tensor, n_slots: int, BM: int):
     """Group the (token, k) pairs by arena slot, each slot's run padded to a multiple of BM, so that
     one program == one expert x BM pairs. One small Triton launch,
@@ -404,7 +426,10 @@ def moe_forward(
     BM = block_m or _pick_bm(P)
     bn1, nw1, ns1 = up_cfg or _UP_CFG[BM]
     bn2, nw2, ns2 = down_cfg or _DOWN_CFG[BM]
-    block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
+    if P <= 64:  # decode-sized call (<= 64 pairs, <= 6 per slot < BM): pure-torch routing, see build_routing_small
+        block_slot, block_pair, NB = build_routing_small(slots, BM)
+    else:
+        block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
     wgt = weights.reshape(-1)
     if wgt.dtype != torch.float32 or not wgt.is_contiguous():
         wgt = wgt.float().contiguous()
