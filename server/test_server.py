@@ -427,6 +427,47 @@ def teardown_module(module=None):  # pytest hook
     stop_server()
 
 
+def test_tolerant_tool_call_recovery():
+    """A completion whose DSML the checkpoint's strict parser rejects must still yield its calls.
+
+    Two deviations were seen in real traffic and cost the whole call (the client saw the sentence
+    before it and a `stop` finish): the parameter value placed in the `string` attribute, and prose
+    after the closing tag of the calls block.
+    """
+    import inspect
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+    import app as A
+    owner = next(o for _, o in vars(A).items()
+                 if inspect.isclass(o) and hasattr(o, "_parse_tool_calls_tolerant"))
+    parse = owner._parse_tool_calls_tolerant
+    D = "\uff5cDSML\uff5c"
+    spec = (f'\n\n<{D} calls>\n<{D} invoke name="get_weather">\n'
+            f'<{D} parameter name="city" string="true">Berlin<\n/{D} parameter>\n'
+            f'<{D} parameter name="days" string="false">3<\n/{D} parameter>\n</{D} invoke>\n</{D} calls>')
+    attr = (f'\n\n<{D} calls>\n<{D} invoke name="web_search">\n'
+            f'<{D} parameter name="query" string="unified memory specs">\n</{D} invoke>\n</{D} calls>')
+    two = (f'\n\n<{D} calls>\n<{D} invoke name="a">\n<{D} parameter name="x" string="true">1<\n/{D} parameter>\n'
+           f'</{D} invoke>\n<{D} invoke name="b">\n<{D} parameter name="y" string="true">2<\n/{D} parameter>\n'
+           f'</{D} invoke>\n</{D} calls>')
+
+    r = parse(spec)
+    assert len(r) == 1 and r[0]["function"]["name"] == "get_weather", r
+    args = json.loads(r[0]["function"]["arguments"])
+    assert args == {"city": "Berlin", "days": 3}, args
+
+    r = parse(attr)
+    assert len(r) == 1 and r[0]["function"]["name"] == "web_search", r
+    assert json.loads(r[0]["function"]["arguments"]) == {"query": "unified memory specs"}
+
+    r = parse(attr + "\nI will summarise the result for you.")
+    assert len(r) == 1 and json.loads(r[0]["function"]["arguments"]) == {"query": "unified memory specs"}
+
+    r = parse(two)
+    assert [c["function"]["name"] for c in r] == ["a", "b"], r
+
+    assert parse("there are no tool calls in this text") == []
+
+
 def main() -> int:
     start_server()
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

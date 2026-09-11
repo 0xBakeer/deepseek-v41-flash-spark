@@ -2024,3 +2024,39 @@ The DSpark drafter's own router (top-3 of 128 per MTP block) was left alone and 
 other k. `DSV41_BLOCK` was measured for throughput only: no held-out loss was scored at block 4 or
 8, and the reference (un-graphed) drafter was not compared against the graphed one at those widths,
 so only the default 5 has the `engine/test_fastdecode.py` parity evidence behind it.
+
+### 2026-09-11 19:55 -- tool calls were being dropped when the completion's DSML deviated
+
+Symptom, seen in two different clients at once: the model writes the sentence that precedes a tool
+call ("Let me check the workspace context.") and the turn ends there with `finish_reason: stop` and
+no call. The API itself was fine -- a single-tool request, streamed or not, returns a correct
+`tool_calls` delta with `index`, and `engine/test_server.py`'s tool test passed throughout.
+
+What the server log showed on the failing turns:
+
+```
+tool-call parse failed (Parameter format error: ' name="query" string="nvidia DGX Spark GB10 128GB unified memory specs"<'); returning raw text
+tool-call parse failed (Unexpected content after tool calls); returning raw text as content
+```
+
+The completion is parsed by the checkpoint's own routine
+(`corpus/sources/dsv41_encoding.py::parse_message_from_completion_text`), which is strict: a
+parameter must read `name="x" string="true|false">value<`, and nothing may follow the closing tag of
+the calls block. Real completions deviate in two recoverable ways -- the value placed in the
+`string` attribute with no value body, and ordinary prose after the block -- and on either the
+server discarded every call in the completion and returned the raw text as content. Since the tool
+marker is also a stop string, what reached the client was just the preamble sentence.
+
+`server/app.py` now runs a tolerant pass when the strict parser raises, and uses it only if it
+recovers at least one call: it reads each `invoke` by name and accepts both parameter spellings,
+ignores anything after the block, and returns `[]` on text that holds no call at all (so the
+existing raw-text fallback still applies). `DSV41_LOG_TOOL_TEXT=1` logs the first 2,000 characters
+of an unparsed completion so a future deviation is visible rather than silent. Regression test:
+`server/test_server.py::test_tolerant_tool_call_recovery` (spec form, value-in-attribute, trailing
+prose, two calls in one completion, and text with no calls).
+
+Verified after the restart against the same shape that failed: a search-style tool now comes back
+with `finish_reason: tool_calls` and two well-formed calls. Not diagnosed: why the model writes the
+attribute form at all. It is a formatting deviation of the model, more likely under long
+tool-definition prompts, and this configuration is pruned and re-quantized, so the deviation rate
+may differ from the full checkpoint's.

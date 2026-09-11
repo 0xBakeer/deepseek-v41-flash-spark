@@ -22,6 +22,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -530,6 +531,45 @@ class State:
         log.info("generation done: prompt=%d completion=%d reasoning=%d finish=%s %.2fs",
                  len(prompt_ids), len(result.gen_ids), result.reasoning_tokens, result.finish_reason, dt)
 
+    # A completion that calls tools is DSML, and the checkpoint's own parser
+    # (corpus/sources/dsv41_encoding.py::parse_message_from_completion_text) is strict about it: a
+    # parameter must read `name="x" string="true|false">value<`, and nothing may follow the calls
+    # block. Real completions deviate in two ways that are recoverable, and both were costing the
+    # whole tool call -- the client then saw only the sentence before it and a `stop` finish:
+    #   * the value is put in the `string` attribute (`name="query" string="a b c"`), with no
+    #     separate value body;
+    #   * ordinary prose follows the closing tag of the calls block.
+    # This tolerant pass runs only after the strict parser has raised, and only its result is used.
+    _RE_INVOKE = re.compile(r'<｜DSML｜ invoke name="(?P<name>[^"]*)"\s*>?\n?(?P<body>.*?)(?=<｜DSML｜ invoke |</｜DSML｜ calls>|\Z)', re.DOTALL)
+    _RE_PARAM_SPEC = re.compile(r'<｜DSML｜ parameter name="(?P<k>[^"]*)" string="(?P<s>true|false)"\s*>(?P<v>.*?)<', re.DOTALL)
+    _RE_PARAM_ATTR = re.compile(r'<｜DSML｜ parameter name="(?P<k>[^"]*)" string="(?P<v>.*?)"\s*>', re.DOTALL)
+
+    @classmethod
+    def _parse_tool_calls_tolerant(cls, text: str) -> List[dict]:
+        """Best-effort DSML tool calls. Returns [] when nothing parses."""
+        out: List[dict] = []
+        for m in cls._RE_INVOKE.finditer(text):
+            name, body = m.group("name"), m.group("body")
+            if not name:
+                continue
+            args: Dict[str, Any] = {}
+            for pm in cls._RE_PARAM_SPEC.finditer(body):
+                k, is_str, v = pm.group("k"), pm.group("s"), pm.group("v")
+                if is_str == "true":
+                    args[k] = v
+                else:
+                    try:
+                        args[k] = json.loads(v)
+                    except Exception:  # noqa: BLE001 - a malformed literal is still worth sending as text
+                        args[k] = v
+            consumed = {pm.group("k") for pm in cls._RE_PARAM_SPEC.finditer(body)}
+            for pm in cls._RE_PARAM_ATTR.finditer(body):
+                k, v = pm.group("k"), pm.group("v")
+                if k and k not in consumed and k not in args:
+                    args[k] = v
+            out.append({"function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
+        return out
+
     def _parse_tool_calls(self, router: OutputRouter, thinking: bool) -> List[dict]:
         if not router.tool_text:
             return []
@@ -543,10 +583,18 @@ class State:
             parsed = self.enc.parse_message_from_completion_text(
                 text, thinking_mode="thinking" if thinking else "chat")
         except Exception as e:
-            log.warning("tool-call parse failed (%s); returning raw text as content", e)
-            router.content += router.tool_text
-            router.tool_text = ""
-            return []
+            recovered = self._parse_tool_calls_tolerant(text)
+            if recovered:
+                log.warning("tool-call strict parse failed (%s); recovered %d call(s) tolerantly",
+                            e, len(recovered))
+                parsed = {"tool_calls": recovered}
+            else:
+                log.warning("tool-call parse failed (%s); returning raw text as content", e)
+                if os.environ.get("DSV41_LOG_TOOL_TEXT") == "1":
+                    log.warning("unparsed tool text: %r", router.tool_text[:2000])
+                router.content += router.tool_text
+                router.tool_text = ""
+                return []
         calls = []
         for tc in parsed.get("tool_calls") or []:
             fn = tc.get("function") or {}
