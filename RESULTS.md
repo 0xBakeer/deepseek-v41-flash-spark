@@ -250,3 +250,9 @@ Profile of the 168 ms: expert kernels ~86 ms (at the 273 GB/s floor for 30 exper
 layers), FP8 dense ~29 ms (at floor), remaining bf16 GEMMs (wo_a, head, draft) ~20 ms, fp32 mixing
 GEMMs ~8 ms, ~3,000 small elementwise/reduction kernels ~25 ms. Run-to-run spread of the e2e number
 is ±5 % (greedy acceptance varies with bf16 nondeterminism: 2.97-3.12 on the same prompt).
+
+### 2.7 Addendum 2026-09-11 09:50 — thinking on (served, keep 31 % resident, arena 90.5 GB, transient 8, LUT)
+
+One request through the gateway, `chat_template_kwargs.thinking=true`, `reasoning_effort=high`,
+temperature 0, 400 tokens (all reasoning): **TTFT 3.9 s, decode 21.4 tok/s, DSpark acceptance 4.11**,
+hit rate 1.0. Same prompt with thinking off (2.6 addendum): 15.2-15.7 tok/s at acceptance ~3.
