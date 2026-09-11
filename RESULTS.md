@@ -237,3 +237,16 @@ not yet fast (54 GB/s vs 190 for FP4), so no CB3 speed row exists yet.
 ### What is not measured in this tag
 Thinking-on decode, long-context (>2k) serving, sampled (temperature 1.0) quality A/B, any bench
 sweep, the CB3 format at speed, the container image end to end.
+
+### 2.6 Addendum 2026-09-11 09:30-09:50 — decode step after the routing fix (same config as the keep-31 % row)
+
+| change (commit) | verify step, everything resident | e2e decode tok/s (greedy, code prompt, 200 tokens) |
+|---|---|---|
+| baseline of 2.3 (22bd9a8) | 195 ms + 15 ms draft | 12.9-13.1 |
+| torch routing for decode-sized calls instead of the per-arena-slot Triton router, bf16 gate GEMM, device slot LUT (9f172fb) | **168 ms + 15 ms draft** | **15.2-15.7** (acceptance 2.97-3.12) |
+| Engram rows read in background threads, overlapped with the graphs (next commit) | unchanged | 15.4 (within run-to-run noise; the reads were 16 ms/step, now hidden) |
+
+Profile of the 168 ms: expert kernels ~86 ms (at the 273 GB/s floor for 30 experts x 18.8 MB x 40
+layers), FP8 dense ~29 ms (at floor), remaining bf16 GEMMs (wo_a, head, draft) ~20 ms, fp32 mixing
+GEMMs ~8 ms, ~3,000 small elementwise/reduction kernels ~25 ms. Run-to-run spread of the e2e number
+is ±5 % (greedy acceptance varies with bf16 nondeterminism: 2.97-3.12 on the same prompt).

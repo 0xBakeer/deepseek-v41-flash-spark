@@ -753,3 +753,15 @@ candidates are in `results/simq/`.
 * Cheaper win with FP4 only: in pruned all-resident mode the 400-slot transient ring (7.5 GB) and the
   20 GB host reserve are oversized; `--transient-slots 16 --keep-free-gb 14` should give ~5,000 slots
   (~32% kept, all resident) -- quality between the measured 30% and 40% rows, speed of the resident path.
+
+### 2026-09-11 09:30-09:50 -- resident step 195 -> 168 ms
+* The FP4 kernel's `_route_kernel` ran one program per ARENA slot (4,813) and scanned all pairs in
+  each: 29 ms per step at decode size. Replaced by `build_routing_small` (torch sort/cumsum, static
+  shapes, graph-capturable) for P <= 64 pairs. Unit test (`tools/test_fp4_moe.py`) still passes.
+* Gate GEMM back to bf16 tensor cores (weights are bf16 in the checkpoint; fp32 accumulation either
+  way) -- my earlier "fp32 to avoid near-tie flips" was chasing noise that came from elsewhere.
+* Device slot LUT + one graph per layer in resident mode: measurable but small (13.1 vs 12.95).
+* Engram rows: `.cpu()` of the hash ids inside a reader thread synchronized with the queued graphs
+  (48 ms waits). Now: ids to host before any replay, threads do only preads (32/table), dequant on
+  the main thread at the consuming layer. Reads (~6 ms both tables) are hidden behind layers 0..13.
+* e2e: 15.2-15.7 tok/s at keep 31 %; 168 ms step + 15 ms draft => ~16.5 tok/s at acceptance 3.
