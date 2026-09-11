@@ -102,6 +102,40 @@ so there is no measured long generation and no thinking-mode figure in this repo
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
 
+## 0.3.0-wip — 2026-09-11
+
+**The shipped default changes: keep 40 % of the routed experts, all resident in the 3-bit CB3
+format.** Decode 16.6 → 19.0 tok/s and held-out loss −0.03 (code) / −0.17 (prose) nats against
+the 0.2.0-wip default, on the same box (RESULTS.md v0.3.0-wip).
+
+### Added
+- `EXPERT_FORMAT=cb3` / `--expert-format cb3`: the resident arena holds 3-bit per-row codebook
+  experts (`tools/cb3.py`, 14.45 MB each), packed on the GPU at warm start from the FP4 shards;
+  decode runs the CB3 v3 Triton kernel (`tools/cb3_moe.py`, 182 GB/s of expert bytes, 0.79x the
+  FP4 kernel's time per expert); prefill unpacks to FP4 codes and runs the FP4 kernel. Unit test
+  `tools/test_cb3_moe.py`.
+- `tools/fp8_linear.py::fp8_grouped_linear`: the `wo_a` projection runs from its stored FP8
+  (`DSV41_WOA_FP8=0` restores the bf16 einsum).
+- `tools/decode_attn.py`: fused decode attention (bf16 keys, fp32 softmax with the sink, two KV
+  segments without a copy; `DSV41_FUSED_ATTN=0` restores the fp32 torch path).
+- `tools/fp32_skinny.py`: split-K fp32 kernel for the Hyper-Connection mixing GEMMs
+  (`DSV41_HC_KERNEL=0` restores `F.linear`).
+- `--prune-select global` / `PRUNE_SELECT`: cross-layer keep-set ranking; measured worse than
+  uniform on the held-out corpus (NOTES.md 2026-09-11 10:00) and left as a documented option.
+- CUDA graphs per step segmented at the Engram layers (`DSV41_GRAPH_SEGMENTS=0` restores per-layer
+  graphs; no measurable gain either way), pinned Engram staging (`DSV41_ENGRAM_PINNED=1`, off).
+- LM head and DSpark Markov head loaded in their stored bf16 (`DSV41_HEAD_FP32=1` restores fp32).
+
+### Changed
+- Default configuration in `env.example`/`docs/install.md`: `PRUNE_KEEP=0.40 EXPERT_FORMAT=cb3`
+  for a 128 GB box. Warm start is 183 s in this format (19 s for FP4).
+- Verify step with everything resident: 168 → 147 ms (FP4, keep 31 %); RESULTS.md addenda 2.9-2.11.
+
+### Measured on it
+RESULTS.md v0.3.0-wip: 18.98 tok/s greedy decode, TTFT 9.81 s on a 1,806-token prompt, held-out
+1.5384 / 3.2087 nats. Not measured: thinking-on in this configuration, 8k+ prompts in this
+configuration, sampled A/B, the image end to end.
+
 ## 0.2.0-wip — 2026-09-11
 
 **The model math fix and the resident pruned configuration.** Everything in 0.1.0-wip ran on a port
