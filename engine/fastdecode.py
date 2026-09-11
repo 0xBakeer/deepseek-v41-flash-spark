@@ -48,6 +48,9 @@ FUSED_ATTN = os.environ.get("DSV41_FUSED_ATTN", "1") == "1" and decode_attention
 # Split-K Triton kernel for the skinny fp32 projections (the HC mix GEMM: M=6, N=24, K=20480, where
 # cuBLAS is latency-bound at ~30 GB/s). DSV41_HC_KERNEL=0 restores F.linear everywhere.
 HC_KERNEL = os.environ.get("DSV41_HC_KERNEL", "1") == "1" and skinny_linear is not None
+# Capture whole runs of layers into one graph instead of one graph per layer (resident mode only).
+# DSV41_GRAPH_SEGMENTS=0 restores one graph per layer.
+GRAPH_SEGMENTS = os.environ.get("DSV41_GRAPH_SEGMENTS", "1") == "1"
 
 
 def _fp32_lin(x, w):
@@ -383,6 +386,29 @@ class FastDecoder:
         torch.cuda.current_stream().wait_stream(s)
         torch.cuda.synchronize()
         st = {"parity": S_parity, "ckv": None, "ik": None, "ratio": 0}
+        if self.lut is not None and GRAPH_SEGMENTS:
+            # Resident mode: routing is a device LUT lookup, so the ONLY host dependency inside a
+            # step is the Engram rows of layers 1 and 14. Capture the layers between those
+            # boundaries as single graphs -- 41 replays per step become 3 -- and keep the overlap:
+            # a segment is queued asynchronously, so the host blocks on the next boundary's NVMe
+            # reads while the GPU is still running the segment before it.
+            bounds = sorted({0, self.a.n_layers} | {L for L in self.a.engram_layer_ids if 0 < L < self.a.n_layers})
+            segs = []
+            for i in range(len(bounds) - 1):
+                lo, hi = bounds[i], bounds[i + 1]
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, pool=self.pool):
+                    for L in range(lo, hi):
+                        self._layer_ab(L, st)
+                    if hi == self.a.n_layers:
+                        self._final()  # the head + drafter seeding ride in the last segment
+                segs.append((lo, g))
+            gD = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(gD, pool=self.pool):
+                self._draft()
+            self.graphs[key] = (None, None, None, gD, segs)
+            torch.cuda.synchronize()
+            return
         for L in range(self.a.n_layers):
             if self.lut is not None:
                 g = torch.cuda.CUDAGraph()
@@ -404,7 +430,7 @@ class FastDecoder:
         gD = torch.cuda.CUDAGraph()
         with torch.cuda.graph(gD, pool=self.pool):
             self._draft()
-        self.graphs[key] = (gA, gB, gF, gD)
+        self.graphs[key] = (gA, gB, gF, gD, None)
         torch.cuda.synchronize()
 
     # ------------------------------------------------------------------ run
@@ -435,19 +461,29 @@ class FastDecoder:
         t0 = time.perf_counter()
         futs = rows_fn() if rows_fn is not None else None  # {layer: Future} -- reads already in flight
         if self.use_graphs:
-            gA, gB, gF, gD = self.graphs[parity]
-            for L in range(a.n_layers):
-                if futs is not None and L in futs:
-                    # this layer's rows were read while the previous layers ran on the GPU
-                    t0r = time.perf_counter()
-                    fut, finish = futs[L]
-                    self.eg_rows[L].copy_(finish(*fut.result()))
-                    self.stats["engram_s"] += time.perf_counter() - t0r
-                gA[L].replay()
-                if gB[L] is not None:
-                    self._resolve(L)
-                    gB[L].replay()
-            gF.replay()
+            gA, gB, gF, gD, segs = self.graphs[parity]
+            if segs is not None:
+                for lo, g in segs:
+                    if futs is not None and lo in futs:
+                        # this boundary's rows were read while the previous segment ran on the GPU
+                        t0r = time.perf_counter()
+                        fut, finish = futs[lo]
+                        self.eg_rows[lo].copy_(finish(*fut.result()))
+                        self.stats["engram_s"] += time.perf_counter() - t0r
+                    g.replay()
+            else:
+                for L in range(a.n_layers):
+                    if futs is not None and L in futs:
+                        # this layer's rows were read while the previous layers ran on the GPU
+                        t0r = time.perf_counter()
+                        fut, finish = futs[L]
+                        self.eg_rows[L].copy_(finish(*fut.result()))
+                        self.stats["engram_s"] += time.perf_counter() - t0r
+                    gA[L].replay()
+                    if gB[L] is not None:
+                        self._resolve(L)
+                        gB[L].replay()
+                gF.replay()
             if self.lut is not None:
                 # bookkeeping the host resolve would have done: LRU touch is irrelevant while resident
                 self.m.store.stats["hits"] += int(a.n_layers * self.route_idx.numel())

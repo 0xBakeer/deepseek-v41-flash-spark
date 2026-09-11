@@ -292,3 +292,30 @@ outputs are coherent), and this prompt landed on a lower-acceptance trajectory; 
 separate that from run-to-run acceptance spread (±5 %, see 2.6). Every prompt-independent number
 (step time, GPU time, the un-graphed comparison in `engine/test_fastdecode.py`) improved, so the
 kernel stays on by default. Details in NOTES.md (2026-09-11 11:00-11:20).
+
+### 2.11 Addendum 2026-09-11 12:10 — CB3 (3-bit) expert kernel at speed; graph merging measured as no gain
+
+**CB3 kernel (`tools/cb3_moe.py` v3, unit test `tools/test_cb3_moe.py`):** one real expert at decode
+shapes, expert bytes per second:
+
+| kernel | ms | GB/s of expert bytes |
+|---|---|---|
+| FP4 (18.80 MB/expert) | 2.14 | 184.1 |
+| CB3 v1 (the parked gather variant) | 17.41 | 19.9 |
+| CB3 v2 (new plane layout, Triton byte ops) | 1.97 | 154.0 |
+| **CB3 v3 (512-weight blocks, inline PTX decode)** | **1.67** | **181.5** (best run 182.0) |
+
+A 3-bit expert now costs 0.787× the time of an FP4 one; dequant is bit-identical to
+`engine/codebook_sim.py`, kernel output within 8.6e-5 of the FP4 kernel on the same re-quantized
+weights. The decisive factor was tile width, not instruction count: on this box a row-strided read
+runs at 101 GB/s for 16-32 B tiles and 185-218 GB/s from 64 B up, so the format's blocks were
+widened to 512 weights (w2's K=2304 is packed as 4×512 + 256). Arena arithmetic at 90.5 GB: 4,813
+experts all-FP4 (31.3 %), 6,260 all-CB3 (40.8 %). Keep 40 % at simulated 3-bit was measured in 2.4
+at coding 1.539 / general 3.212 nats held-out, better than the served keep-31 % FP4 on both. The
+kernel is not yet wired into the serving path (a second arena tier); that is the next step.
+
+**Graph merging:** 41 graph replays per step → 3 (at the Engram boundaries) and pinned staging for
+the Engram rows: step 147.2 → 146.6 ms, decode 16.56 vs 16.63 tok/s (bit-identical output). GPU
+busy time is 144.9 of the 146.6 ms; the rest is per-kernel latency inside the graphs (about 5,300
+kernels per step), not launch count. Segmentation stays on (`DSV41_GRAPH_SEGMENTS=0` restores);
+pinned staging is off by default (`DSV41_ENGRAM_PINNED=1`).

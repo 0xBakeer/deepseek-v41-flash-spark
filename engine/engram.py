@@ -40,6 +40,16 @@ class EngramTable:
         # small process-local row cache (exact n-gram repeats inside a conversation hit here)
         self.cache: dict[int, bytes] = {}
         self.cache_max = 200_000
+        # Pinned staging for the H2D (see to_device), OFF by default: it does make `to_device`
+        # itself ~10x cheaper (0.27 s vs 3.16 s of a 200-token run, because the pageable copy
+        # synchronises the stream and absorbs the queued graph work) but it does NOT make the run
+        # faster -- measured 12.04-13.57 s of decode against 12.03-12.14 s pageable, i.e. the host
+        # simply blocks somewhere else instead. Kept behind the switch rather than deleted.
+        self.pinned = os.environ.get("DSV41_ENGRAM_PINNED", "0") == "1"
+        self._stage = [None, None]
+        self._inv_stage = [None, None]
+        self._ev = [None, None]
+        self._cur = 0
 
     def _read_rows(self, ids: np.ndarray) -> np.ndarray:
         out = np.empty((len(ids), 264), np.uint8)
@@ -68,13 +78,41 @@ class EngramTable:
         return raw, inv, hashes_np.shape
 
     def to_device(self, raw, inv, shape) -> torch.Tensor:
-        """GPU part (main thread): dequantize the rows and expand to [T, 24, 256] float32."""
+        """GPU part (main thread): dequantize the rows and expand to [T, 24, 256] float32.
+
+        The raw rows and the row-index vector go through PINNED staging buffers and are copied
+        non-blocking. A plain `.to(device)` from pageable numpy memory synchronises the calling
+        stream, which inside a decode step means blocking the host until every graph queued so far
+        has finished -- exactly the overlap this pipeline exists to avoid. The buffers are reused
+        across steps, so the previous step's copy out of them is waited on first (`_ev`); a whole
+        step elapses in between, so that wait is free.
+        """
         t0 = time.perf_counter()
-        rawt = torch.from_numpy(raw).to(self.device)
+        n = raw.shape[0]
+        if not self.pinned:
+            rawt = torch.from_numpy(raw).to(self.device)
+            invt = torch.from_numpy(inv.reshape(-1)).to(self.device)
+        else:
+            i = self._cur
+            self._cur ^= 1  # two buffers: the wait is on the copy from two calls ago
+            if self._stage[i] is None or self._stage[i].shape[0] < n:
+                cap = max(n, 4096)
+                self._stage[i] = torch.empty(cap, 264, dtype=torch.uint8, pin_memory=True)
+                self._inv_stage[i] = torch.empty(cap * 64, dtype=torch.int64, pin_memory=True)
+                self._ev[i] = torch.cuda.Event()
+                self._ev[i].record()
+            self._ev[i].synchronize()  # the last H2D out of these buffers is done
+            self._stage[i][:n].copy_(torch.from_numpy(raw))
+            ni = inv.size if hasattr(inv, "size") else len(inv)
+            self._inv_stage[i][:ni].copy_(torch.from_numpy(inv.reshape(-1).astype(np.int64)))
+            rawt = self._stage[i][:n].to(self.device, non_blocking=True)
+            invt = self._inv_stage[i][:ni].to(self.device, non_blocking=True)
         vals = rawt[:, :256].view(torch.float8_e4m3fn).float()
         scales = torch.exp2(rawt[:, 256:].float() - 127.0)
         deq = (vals.unflatten(-1, (8, 32)) * scales.unsqueeze(-1)).flatten(-2)
-        out = deq[torch.from_numpy(inv).to(self.device)].view(shape[0], shape[1], 256)
+        out = deq[invt].view(shape[0], shape[1], 256)
+        if self.pinned:
+            self._ev[i].record()
         self.stats["seconds"] += time.perf_counter() - t0
         return out
 

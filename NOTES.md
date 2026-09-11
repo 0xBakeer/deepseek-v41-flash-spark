@@ -989,3 +989,124 @@ kv_all change is bit-identical.
 * The six compressor GEMMs (1.08 ms per step) stay on cuBLAS by measurement, not by omission.
 * `engine/model.py`'s prefill `hc_mixes` still goes through `R.mm`; at prefill M (up to 2048) cuBLAS
   is in its element and the skinny kernel would not help.
+
+### 2026-09-11 11:20-12:10 -- the non-GPU gap (it is not launches), and a CB3 kernel that is fast
+
+**Part A: the ~3.6 ms/step of non-GPU time is per-KERNEL, not per-graph-launch.**
+
+With the device slot LUT the routing is on-device, so the only host dependency inside a step is the
+Engram rows of layers 1 and 14. Two changes, both behind switches:
+
+* `DSV41_GRAPH_SEGMENTS=1` (default): in resident mode `capture()` now captures runs of layers
+  between the Engram boundaries as single graphs -- `[0]`, `[1..13]`, `[14..39 + final]` -- so a step
+  is 3 graph replays instead of 41. The overlap is unchanged: a segment is queued asynchronously, so
+  the host still blocks on the next boundary's NVMe reads while the GPU runs the segment before it.
+* `DSV41_ENGRAM_PINNED=1` (default **0**): `EngramTable.to_device` stages the raw rows and the
+  row-index vector in pinned buffers and copies them non-blocking, instead of a pageable
+  `.to(device)` that synchronises the stream.
+
+Neither is worth anything. `profile_fast.py` wall: 147.2 ms before, 146.8 with segments, 146.6 with
+both -- inside noise. The decode A/B, back to back, same binary, shipping config:
+
+| | decode_tok_s | accept | steps | decode_s |
+|---|---|---|---|---|
+| `DSV41_GRAPH_SEGMENTS=0` | 16.56 | 2.83 | 71 | 12.138 |
+| default (segments on) | 16.63 | 2.83 | 71 | 12.083 |
+
+Identical acceptance and step count, i.e. the change is bit-identical, and 0.5 % apart, i.e. nothing.
+The pinned staging is the more interesting negative: it *does* make `to_device` itself ~12x cheaper
+(0.27 s vs 3.21 s over a 200-token run, because the pageable copy synchronises the stream and
+absorbs the queued graph work), and the decode is not faster for it -- 12.04 s single-buffered,
+13.57 s double-buffered, against 12.08-12.14 s pageable. The host just blocks somewhere else.
+Defaulted off; the code stays behind the switch.
+
+The reason merging launches cannot help: Self CUDA time is 434.571 ms over 3 iterations = 144.9 ms
+per step against a 146.6 ms wall, and the top-28 profiler rows alone account for **5,318 kernels per
+step**. 1.7 ms spread over >5,300 kernels is ~0.3 us each -- inter-kernel latency inside a graph, not
+launch overhead. To close it one has to launch fewer *kernels*, not fewer graphs: the candidates are
+the 882 `_fp8_linear_kernel` and the ~1,800-2,700 one-microsecond elementwise kernels per step.
+
+**Part B: CB3 at 182 GB/s -- the target is met.**
+
+The three ideas in order, with what each was actually worth:
+
+*Idea 1, per-lane decode with the codebook in registers.* This is the shape of every variant here and
+was never the bottleneck. The per-row codebook lives in one loop-invariant register as eight packed
+nibbles, and the lookup is one variable shift (`(cw >> (idx*4)) & 15`) or, in the PTX version, one
+`prmt.b32`.
+
+*Idea 2, per-matrix instead of per-row codebook.* Not implemented, and not because of quality: it
+**cannot** reduce the instruction count. The per-row codebook word is already loop-invariant and
+already in a register, so nothing in the inner loop changes; a per-matrix codebook would only remove
+8 bytes per row (0.005 bit/weight) and would cost the per-row adaptivity that the 21 % weight error
+depends on. Measuring its quality would have been measuring a change with no upside.
+
+*Idea 3, layout change at pack time.* This is what made it work. `tools/cb3.py` gains a v2 layout
+with exactly the same bytes -- 2 bits in the lo plane, 1 in the hi plane, 8 codebook bytes and the
+UE8M0 scales per row -- that only changes **which weight sits in which bit**. A dot product is
+order-invariant along K and the scale is per 32 consecutive K, so any permutation inside a 32-group
+is free provided the activation is loaded to match; the permutation is chosen so that the existing
+`_chunk_dot` even/odd x-load pattern still matches. The result is that one `[BN, BW/4]` lo load and
+one `[BN, BW/8]` hi load, split in registers, give every scale group its even and its odd index tile
+with nothing but shifts and masks -- no gathers, no reshapes, no shared memory.
+`pack/unpack/dequant` stay bit-exact with v1 and with `engine/codebook_sim.py`.
+
+Then two more things had to be right, and the second one was the real answer:
+
+* **PTX with pack=4** (`_cb3_asm`): the same arithmetic four bytes per instruction, with the codebook
+  lookup as a single `prmt.b32` (it selects one of 8 source bytes per output byte from a nibble
+  selector, which is exactly a 3-bit codebook index) and a 4-op byte-lane -> nibble compaction to
+  build that selector. 20 instructions per 8 weights against ~10 register ops per weight in Triton.
+* **Row-tile width.** Cutting the PTX from 24 to 20 instructions with two `lop3` fusions changed
+  nothing (159.6 -> 158.4 GB/s), which said the kernel was not instruction-bound. Measured directly,
+  the achievable read bandwidth of a row-strided tile on GB10 is a cliff in its width:
+
+  | row-tile width | 16 B | 32 B | 64 B | 128 B | 256 B | plain copy |
+  |---|---|---|---|---|---|---|
+  | GB/s | 100.8 | 101.5 | 185.2 | 218.1 | 217.5 | 219.4 |
+
+  A 256-weight block gives a 64 B lo tile but only a **32 B hi tile**, and that one load capped the
+  whole kernel. 512-weight blocks give 128 B + 64 B. K = 5120 (w1/w3) takes ten of them; K = 2304
+  (w2) is 2^8 * 9 and admits only 4 x 512 + 1 x 256, so w2 is packed ragged and the kernel peels the
+  tail (`block_plan`).
+
+Measured on 21-24 real layer-0 experts, T=6 top-6 (`tools/test_cb3_moe.py`):
+
+| kernel | ms | GB/s of expert bytes |
+|---|---|---|
+| FP4 (18.80 MB/expert) | 2.14 | 184.1 |
+| CB3 v1 (gather variant, parked 2026-09-11 08:40) | 17.41 | 19.9 |
+| CB3 v2 (new layout, Triton byte ops) | 1.97 | 154.0 |
+| CB3 v3 (new layout + PTX + 128/64 B tiles) | **1.67** | **181.5** |
+
+Best single measurement 182.0 GB/s at 0.787x the FP4 kernel's time for 0.769x the bytes; the goal
+was ~180 GB/s and 0.77x. Correctness: the dequant is bit-identical to `codebook_sim`, and the kernel
+agrees with the FP4 kernel run on the same re-quantized weights to 8.6e-5 (its error against the
+dequantized reference is 4.4e-3, which is the FP4 kernel's own error on the same data). Size is
+unchanged at 3.26-3.28 bit/weight, 14.45 MB per expert.
+
+**Hazard worth remembering:** at BN=32, `num_warps=8` is not only slower but **wrong** -- rel err ~4
+instead of 4.3e-3. Something in Triton/ptxas miscompiles the inline asm at that warp count. The
+configs are pinned to `num_warps=4` and `CB3_UP_CFG`/`CB3_DOWN_CFG` carry the warning.
+
+**What a CB3 arena would buy (arithmetic, 90.5 GB, 15,360 routed experts).** FP4 is 18,800,640 bytes
+per expert, CB3 14,454,784 (0.769x).
+
+| arena content | experts that fit | % of all routed |
+|---|---|---|
+| all FP4 (shipped today) | 4,813 | 31.3 % |
+| coldest 60 % of the kept set in CB3 | 5,589 | 36.4 % |
+| all CB3 | 6,260 | **40.8 %** |
+
+So "keep 40 % with the coldest 60 % in CB3" does **not** fit 90.5 GB: 36.4 % does, and reaching 40 %
+needs 93.7 % of the kept set in CB3, i.e. essentially all of it. The quality of that target is
+already measured (NOTES 2026-09-11 08:40, held-out, teacher-forced): keep 40 % at simulated 3-bit is
+coding 1.539 / general 3.212, against the shipped keep-31 % FP4's 1.5729 / 3.3788 -- better on both.
+
+**Not done, and deliberately so.** The kernel is finished and tested but is NOT wired into the
+engine. A CB3 arena tier means a second arena in `engine/experts.py`, a tier bit in the device slot
+LUT, a two-tier MoE dispatch in `model.moe_fn` (two `build_routing` passes writing disjoint rows of
+the same `h`/`parts` buffers, which is clean but touches the graph capture), warm-start assignment of
+the coldest kept experts, and the `--cb3-cold-frac` CLI. That is a serving-path change of its own
+size and I stopped short of it rather than half-land it. The decode line at keep 40 % and its
+teacher-forced check belong with that wiring.
