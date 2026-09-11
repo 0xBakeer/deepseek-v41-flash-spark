@@ -350,9 +350,11 @@ class V41Engine:
             log("fast decode path enabled (CUDA graphs=%s, device slot LUT=%s)" % (self.fast.use_graphs, self.fast.lut is not None))
         # preallocated staging for the lean decode step (see LEAN_STEP): the verify block, the
         # [n_accepted, argmax x 6] readback and its pinned host landing buffer.
-        self._blk = torch.empty(6, dtype=torch.long, device=device)
-        self._vout = torch.empty(7, dtype=torch.long, device=device)
-        self._vhost = torch.empty(7, dtype=torch.long).pin_memory()
+        from engine.fastdecode import T_VERIFY as _TV
+        self._tv = _TV
+        self._blk = torch.empty(_TV, dtype=torch.long, device=device)
+        self._vout = torch.empty(_TV + 1, dtype=torch.long, device=device)
+        self._vhost = torch.empty(_TV + 1, dtype=torch.long).pin_memory()
         torch.cuda.synchronize()
         self.last_stats = {}
         log("ready")
@@ -525,7 +527,7 @@ class V41Engine:
                         ph.mark("step")
                 else:
                     drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
-                    block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # 6 tokens at pos..pos+5
+                    block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # T_VERIFY tokens at pos..
                     logits, mh = m.forward(block, pos, prefill=False)
                 # verify drafts[i] (position pos+1+i) against logits[i]
                 if lean:
@@ -535,7 +537,7 @@ class V41Engine:
                     # every a, including a = 5 -- exactly what the loop below computes. One 7-wide
                     # D2H is the only host sync of the whole step.
                     am = logits.argmax(-1)                                   # [6]
-                    acc = am[:5].eq(drafts).to(torch.int32).cumprod(0)       # 1 while still accepting
+                    acc = am[:self._tv - 1].eq(drafts).to(torch.int32).cumprod(0)  # 1 while still accepting
                     self._vout[0] = acc.sum()
                     self._vout[1:].copy_(am)
                     self._vhost.copy_(self._vout)
@@ -661,6 +663,7 @@ class V41Engine:
             "expert_mb": round(self.expert_bytes / 1e6, 2),
             "dense_fp4": ",".join(sorted(R.dense_fp4_groups())) or "off",
             "head_fmt": R.head_fmt(),
+            "routed_topk": self.args.n_activated_experts,
             "sim_cb2_frac": self.sim_cb2_frac,
             "act_quant": self.act_quant,
             "swa_replay": self.swa_replay,

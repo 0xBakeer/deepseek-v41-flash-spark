@@ -1853,3 +1853,174 @@ arithmetic that ignores quality only buys 3 ms of a 119 ms step. `EXPERT_FORMAT`
 values (`fp4`, `cb3`); nothing in the serving path changed. `CB2ArenaV2` and its kernels stay in
 `tools/cb3_moe.py` as measured, unused code, next to `moe_forward_v2`, and `--sim-cb2-frac` stays as
 the cheap way to re-ask the quality question if the keep fraction or the corpus ever changes.
+
+### 2026-09-11 18:20-19:30 -- thinking-on decode in the shipped configuration, the router's top-k, and the verify block size
+
+Three pieces of work. The first is a measurement of the running server, the other two are switches
+with the old path as the default.
+
+#### 1. Thinking on and thinking off in the shipped configuration
+
+The only thinking-on decode number on record was taken against the 09:50 engine (keep 31 %, FP4
+experts, bf16 head), which no longer exists. One request each through the gateway against the
+shipped configuration (keep 0.40, CB3 experts, `DSV41_DENSE_FP4=attn,wo_a`, fp8 head), temperature
+0, 400 output tokens, the same prompt both times -- a small algorithmic question ("longest strictly
+increasing subsequence: explain the O(n log n) algorithm and why the patience-sorting tails array is
+correct"), which the thinking arm spends all 400 tokens reasoning about and never finishes:
+
+| | thinking off | thinking on (`reasoning_effort=high`) |
+|---|---|---|
+| prompt tokens | 43 | 69 |
+| TTFT | 1.67 s | 2.19 s |
+| prefill | 1.669 s, 25.8 tok/s | 2.059 s, 33.5 tok/s |
+| decode | **25.86 tok/s** | **21.44 tok/s** |
+| steps for ~400 tokens | 114 | 138 |
+| DSpark acceptance | 3.51 | 2.90 |
+| wall per step | 135.7 ms | 135.2 ms |
+| expert hit rate | 1.0 | 1.0 |
+
+The per-step time is the same to 0.4 %, which is what one would expect: the step does not know what
+kind of text it is producing. The whole 4.4 tok/s is the acceptance -- the drafter predicts this
+model's reasoning text less well than its answer text on this prompt (3.51 against 2.90), and a
+step emits `acceptance + 1` tokens whatever it costs. The 09:50 number (21.4 tok/s at acceptance
+4.11) is the same tok/s reached a different way: a much slower step carrying a much higher
+acceptance, on a different prompt. Acceptance is a property of the prompt as much as of the engine,
+so a single prompt's tok/s is not a configuration's tok/s.
+
+#### 2. How many experts a decode step activates, and what fewer would cost
+
+The routed experts are 65.0 ms of a 114.9 ms verify step (`_cb3v3_up` 41.8 + `_cb3v3_down` 23.2)
+and are at the bandwidth floor, so after the 2-bit tier was ruled out on quality the only remaining
+lever is touching fewer of them. The checkpoint routes 6 of 384 per token plus the layer's shared
+expert; a verify block holds 6 tokens, so a layer sees 36 routed (token, expert) pairs per step --
+but an expert is read once however many of the block's tokens ask for it, so what sets the bytes is
+the number of DISTINCT experts, which nothing had measured.
+
+**The count.** `DSV41_ROUTE_STATS=1` (off by default) one-hots each layer's `k x 6` expert ids into
+a [384] table and adds the number of rows hit to a per-layer accumulator. Both ops have static
+shapes and no host round-trip, so they capture into the layer graphs and the measurement runs at
+full speed on the real decode path; `engine/diag_topk.py` drives it (a first generation captures the
+graphs, then the accumulator is reset and a 60-token generation is counted), with `TF=` to score the
+held-out corpus in the same process so the count and the loss of one setting come from one weight
+load. Measured over ~20 verify blocks of the standard code prompt, keep 0.40 pruned:
+
+| router top-k | routed pairs per layer | **distinct experts per layer** | of 36 pairs | expert bytes per step (14.45 MB each) |
+|---|---|---|---|---|
+| 6 (the checkpoint) | 36 | **20.96** | 0.58 | 12.12 GB |
+| 5 | 30 | **17.58** (0.839x) | 0.59 | 10.17 GB |
+| 4 | 24 | **15.30** (0.730x) | 0.64 | 8.85 GB |
+
+So the working assumption of ~30 distinct experts per layer was wrong by 30 %: the block's six
+tokens are consecutive text and their routing overlaps heavily -- 36 pairs collapse to 21 reads --
+and pruning to the top 154 experts of each layer concentrates it further. 12.12 GB over the 65.0 ms
+the two expert kernels take is 186 GB/s, which is the rate the CB3 kernel reaches in isolation
+(168.7 GB/s of its own bytes on a cycled buffer, 2026-09-11 17:00-19:00), so the floor is real and
+the only way down is fewer reads. Layer 0 is the outlier at 28.4 distinct experts; layers 24-28 are
+the most concentrated at 16.5-19.1.
+
+**The switch.** `DSV41_TOPK` = 1..6, unset (the default) = the checkpoint's `n_activated_experts`.
+It is applied in `v41_ref.Args.from_json`, so every consumer of the args follows: the graphed decode
+path, `Model.moe`, the reference `moe`, and the static `[6, k]` routing buffers of `FastDecoder`.
+The gate weights are renormalized over the surviving experts by the line that already normalizes the
+checkpoint's six (`w / w.sum() * route_scale`), so the routed contribution keeps its scale and only
+its composition changes. The DSpark drafter's own router -- top-3 of the 128 experts of each MTP
+block -- is a separate hard-coded k in both paths and is untouched by the switch; it was not
+measured here.
+
+**Held-out teacher-forced** (`corpus/heldout_corpus.jsonl`, 5,430 coding + 5,231 general scored
+positions), one run per setting, the shipped configuration, the k=6 row re-measured in this round
+rather than quoted:
+
+| `DSV41_TOPK` | coding NLL | delta | general NLL | delta | top-1 coding / general |
+|---|---|---|---|---|---|
+| 6 (shipped) | 1.5351 | -- | 3.1512 | -- | 0.6856 / 0.4582 |
+| 5 | 1.5396 | +0.0045 | 3.1762 | **+0.0250** | 0.6864 / 0.4542 |
+| 4 | 1.5890 | **+0.0539** | 3.2330 | **+0.0818** | 0.6810 / 0.4521 |
+
+The k=6 row reproduces the 17:00-19:00 section's fp8-head row exactly (1.5351 / 3.1512), so the
+comparison is like for like. k=5 passes the +0.015 budget on code and misses it on prose by 1.7x;
+k=4 misses it on both by 3.6x and 5.5x. The two corpora disagree in the same direction and for the
+same reason the 2-bit tier disagreed with itself: prose leans on the tail of the router's
+distribution and code does not, so the sixth expert is worth little on code and a lot on prose.
+The trend is monotone and steep between k=5 and k=4 on both corpora, which is what a real effect
+looks like rather than a corpus-sized wobble.
+
+**What it would have bought.** Measured anyway, one process per setting (the arena is 6,260 slots
+either way and no resident allocation changes size, so the cross-process caveat of 17:00-19:00 does
+not apply here). `engine/profile_fast.py`'s harness for the step, then two 200-token greedy decodes
+on the standard prompt of which the second is quoted:
+
+| | top-k 6 | top-k 5 |
+|---|---|---|
+| verify step | 114.9 ms | **106.6 ms** |
+| draft | 9.9 ms | 10.2 ms |
+| `_cb3v3_up` + `_cb3v3_down` per step | 65.02 ms | **57.44 ms** |
+| expert bytes per step | 12.12 GB | 10.17 GB |
+| effective expert bandwidth | 186.3 GB/s | 177.0 GB/s |
+| 200 greedy tokens | 23.45 tok/s, accept 3.14, 133.8 ms/step | 24.87 tok/s, accept 3.06, 123.1 ms/step |
+
+8.3 ms of a 114.9 ms step, 7.2 %. Note that it is less than proportional: 0.839x the bytes buys
+0.883x the kernel time, because 17.6 experts per layer gives the kernel fewer concurrent programs
+and it gives back 5 % of its per-byte rate. `engine/test_fastdecode.py` at `DSV41_TOPK=5` (the
+graphed decoder against `Model.forward` on identical state, both at k=5) reports argmax agreement
+**1.00 / 1.00** on both parities, logits rel err 0.0341 / 0.0627, step 105.8 / 103.9 ms and draft
+11.5 / 11.0 -- so the switch is the same computation on both paths and the graphs capture it
+correctly.
+
+**Decision: not shipped.** The gate for a change to the model's own computation is +0.015 nats on
+both corpora and k=5 costs +0.025 on prose for 7 % of a step. `DSV41_TOPK` stays in the tree,
+default unset; `.env` on the serving box does not set it. The one thing it does change permanently
+is the arithmetic everyone was using: the expert traffic of a step is 12.1 GB, not the 17.3 GB that
+30 distinct experts would imply, and a future format has to beat 186 GB/s on 12.1 GB.
+
+#### 3. The verify block size
+
+The block is 6 positions: one accepted token plus 5 DSpark drafts (`dspark_block_size` = 5). Expert
+bytes grow with the block because more tokens route to more distinct experts, while acceptance grows
+sublinearly, so 6 is a choice and not a constant of the problem.
+
+**The switch.** `DSV41_BLOCK` = the number of drafted positions, odd, 1..15, default 5. It has to be
+odd because the verify block (`block + 1`) has to be even: the ratio-2 key compressor groups the
+block's positions in pairs around a single pending slot, which is exactly what `capture(S_parity)`'s
+two parities encode, and an odd verify width would flip the parity every step. Making it variable
+was five constants, not a rewrite -- `T_VERIFY`/`T_DRAFT` in `engine/fastdecode.py` (every static
+buffer already derives from them), the `[:6]`/`[5]` of the ratio-2 grouping and of the unpaired
+pending token in `FastDecoder._compressed` and `FastDecoder.step`, the `[6]`/`[7]` staging buffers
+and `am[:5]` of the lean verification in `engine/v41_engine.py`, and the hard-coded `B = 5` in
+`Model.dspark_draft`, which now reads `T_DRAFT`. At the default every one of those is the value it
+was.
+
+One run per setting, same harness and same prompt as above, the second decode quoted:
+
+| verify block | drafts | verify step | draft | step + draft | acceptance | **ms per accepted token** | 200 greedy tokens | expert kernels per step |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 3 | 102.0 ms | 8.7 ms | 110.7 ms | 2.70 | **41.0 ms** | 23.72 tok/s, 114.0 ms/step | 54.3 ms |
+| **6 (shipped)** | 5 | 114.9 ms | 9.9 ms | 124.8 ms | 3.14 | **39.7 ms** | 23.45 tok/s, 133.8 ms/step | 65.0 ms |
+| 8 | 7 | 126.0 ms | 11.0 ms | 137.0 ms | 3.45 | **39.7 ms** | 23.00 tok/s, 149.9 ms/step | 74.8 ms |
+
+Both halves behave as predicted: the step grows nearly linearly in the block (110.7 / 124.8 / 137.0,
+i.e. 12-14 ms per two positions, and the expert kernels 54.3 / 65.0 / 74.8) and acceptance grows
+sublinearly (2.70 / 3.14 / 3.45 for 3 / 5 / 7 drafted positions). Their ratio -- the only number
+that matters -- is flat between 6 and 8 and worse at 4. Block 8 also drafts two positions beyond the
+horizon the DSpark head was trained for, and pays a longer tail latency per emitted burst for no
+throughput; block 4 gives up more acceptance than it saves in bytes. The acceptance figures are one
+prompt each and carry this box's usual +-5 %, so the 6-versus-8 tie is a tie and not a measurement
+that 8 is equal.
+
+**Decision: the block stays at 6.** `DSV41_BLOCK` stays in the tree at its default 5, `.env` does
+not set it.
+
+#### What these three pieces did not measure
+
+The thinking-on pair is one prompt; acceptance on reasoning text was not sampled across prompts, and
+thinking-on was not measured at long context. `DSV41_TOPK` was scored on the held-out corpus and on
+the standard code prompt only -- no sampled-quality A/B, and no per-sequence breakdown of the prose
+delta of k=5 (the monotone trend through k=4 is the evidence that it is real, not a per-sequence
+sign check of the kind 3.4 ran for the fp4 head). `engine/test_fastdecode.py` was run at k=5 and not
+at k=4. The distinct-expert counts were taken on one code prompt at keep 0.40; a prose prompt, a
+different keep fraction or a long context would each give a different number, and the count at the
+block sizes of section 3 was not taken separately -- the expert-kernel times there stand in for it.
+The DSpark drafter's own router (top-3 of 128 per MTP block) was left alone and not measured at any
+other k. `DSV41_BLOCK` was measured for throughput only: no held-out loss was scored at block 4 or
+8, and the reference (un-graphed) drafter was not compared against the graphed one at those widths,
+so only the default 5 has the `engine/test_fastdecode.py` parity evidence behind it.

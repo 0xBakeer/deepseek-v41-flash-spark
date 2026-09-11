@@ -66,8 +66,27 @@ def _fp32_lin(x, w):
         return skinny_linear(x, w)
     return F.linear(x.float(), w)
 
-T_VERIFY = 6   # tok + 5 drafts
-T_DRAFT = 5
+# The verify block: one accepted token plus DSV41_BLOCK drafted ones. The checkpoint's DSpark head
+# was trained at `dspark_block_size` = 5 (so 6 verify positions), which stays the default; a larger
+# block reads the same 40 layers of routed experts for more candidate tokens per step but drafts
+# further outside the head's trained horizon, and a smaller one does the reverse. Only even verify
+# widths are allowed: the ratio-2 key compressor groups the block's positions in pairs around a
+# single pending slot, which is what `capture(S_parity)`'s two parities encode.
+def _draft_block() -> int:
+    v = os.environ.get("DSV41_BLOCK", "").strip()
+    if v in ("", "off", "default"):
+        return 5
+    try:
+        b = int(v)
+    except ValueError:
+        raise ValueError(f"DSV41_BLOCK: {v!r}; use an odd integer 1..15, or leave it unset") from None
+    if not 1 <= b <= 15 or b % 2 == 0:
+        raise ValueError(f"DSV41_BLOCK: {b}; must be odd and 1..15 so the verify block (b + 1) is even")
+    return b
+
+
+T_DRAFT = _draft_block()
+T_VERIFY = T_DRAFT + 1   # tok + T_DRAFT drafts
 
 
 def _lin(x, w):  # bf16 tensor -> cuBLAS; FP8Weight/FP4Weight -> the Triton kernel for that stored format
@@ -139,6 +158,17 @@ class FastDecoder:
         self.sc_buf = {L: torch.zeros(T, a.head_dim, dtype=torch.float32, device=dev) for L in self.pend_buf}
         R.MM_TILE = 0  # plain GEMMs in this path (and from now on in prefill too); the 16-row tiling was a test aid
         self.stats = {"steps": 0, "graph_s": 0.0, "resolve_s": 0.0, "engram_s": 0.0, "draft_s": 0.0}
+        # DSV41_ROUTE_STATS=1 counts, per backbone layer, how many DISTINCT routed experts the
+        # T_VERIFY tokens of a verify block ask for -- the quantity that sets the expert bytes a step
+        # has to read, since one expert is read once however many of the block's tokens route to it.
+        # Both ops have static shapes and no host round-trip, so they capture into the layer graphs
+        # like everything else; with the flag off nothing is allocated and `_layer_a` runs one
+        # `if self.rs_hits is not None` per layer.
+        self.rs_hits = self.rs_uniq = None
+        if os.environ.get("DSV41_ROUTE_STATS", "0") == "1":
+            self.rs_hits = torch.zeros(a.n_routed_experts, dtype=torch.int32, device=dev)
+            self.rs_uniq = torch.zeros(self.m.args.n_layers, dtype=torch.float64, device=dev)
+            self.rs_steps = 0
 
     # ------------------------------------------------------------------ helpers
     def _n_cache(self, r):
@@ -208,11 +238,11 @@ class FastDecoder:
                 # static per-layer copies for Caches.rollback (host patches the tuple after the step)
                 self.kvl_buf[L].copy_(kvl); self.sc_buf[L].copy_(sc)
                 buf = self.pend_buf[L]  # [2, 512]: kv, score of the pending token (host-maintained)
-                if st["parity"] == 1:  # S odd: pending + t0, (t1,t2), (t3,t4); t5 -> new pending
+                if st["parity"] == 1:  # S odd: pending + t0, (t1,t2), ...; the last token -> new pending
                     kvl2 = torch.cat([buf[0][None], kvl]); sc2 = torch.cat([buf[1][None], sc])
-                    g_kv = kvl2[:6].unflatten(0, (-1, r)); g_sc = sc2[:6].unflatten(0, (-1, r))
-                    buf[0].copy_(kvl[5]); buf[1].copy_(sc[5])
-                else:  # S even: (t0,t1),(t2,t3),(t4,t5), no pending
+                    g_kv = kvl2[:T].unflatten(0, (-1, r)); g_sc = sc2[:T].unflatten(0, (-1, r))
+                    buf[0].copy_(kvl[T - 1]); buf[1].copy_(sc[T - 1])
+                else:  # S even: (t0,t1),(t2,t3),..., no pending
                     g_kv = kvl.unflatten(0, (-1, r)); g_sc = sc.unflatten(0, (-1, r))
                 latent = (g_kv * g_sc.softmax(dim=1)).sum(dim=1)
                 latent = R.rmsnorm(latent.to(torch.bfloat16), w.comp_norm, a.norm_eps)
@@ -293,6 +323,12 @@ class FastDecoder:
         wts = scores.gather(1, idx)
         wts = wts / (wts.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
         self.route_idx.copy_(idx); self.route_w.copy_(wts)
+        if self.rs_uniq is not None:
+            # one-hot the block's k*T expert ids into a [n_routed_experts] table and count the rows
+            # that were hit; `index_fill_` writes 1 however many tokens name the same expert.
+            self.rs_hits.zero_()
+            self.rs_hits.index_fill_(0, idx.reshape(-1), 1)
+            self.rs_uniq[L] += self.rs_hits.sum()
         self._tap('moe_in', L, y); self._tap('route_idx', L, idx); self._tap('topk', L, self.topk)
 
     def _layer_b(self, L):
@@ -343,7 +379,7 @@ class FastDecoder:
             pre_mix = ffn_pre
         w = self.W.mtp[2]
         x = R.rmsnorm(R.hc_pre(h, pre_mix), w.norm, a.norm_eps)
-        logits = _lin(x, self.head_bf16).float()  # [5, V]
+        logits = _lin(x, self.head_bf16).float()  # [T_DRAFT, V]
         prev = self.d_tok[0]
         temp = self.d_temp[0]
         for i in range(T_DRAFT):
@@ -372,6 +408,22 @@ class FastDecoder:
         self._layer_a(L, sh_state)
         self.slots.copy_(self.lut[L][self.route_idx])  # -1 never occurs while the LUT is valid
         self._layer_b(L)
+
+    # ------------------------------------------------------------------ route stats
+    def route_stats_reset(self):
+        """Zero the DSV41_ROUTE_STATS accumulator. Call it after the graphs are captured: capture's
+        own warm-up and capture runs execute `_layer_a` and would otherwise be counted."""
+        if self.rs_uniq is not None:
+            self.rs_uniq.zero_(); self.rs_steps = 0
+
+    def route_stats_report(self):
+        """Mean distinct routed experts per layer per verify block, over the steps since the last
+        reset: {'steps', 'per_layer' (n_layers floats), 'mean', 'total'}."""
+        if self.rs_uniq is None or not self.rs_steps:
+            return None
+        per = (self.rs_uniq / self.rs_steps).tolist()
+        return {"steps": self.rs_steps, "per_layer": [round(v, 4) for v in per],
+                "mean": sum(per) / len(per), "total": sum(per)}
 
     # ------------------------------------------------------------------ capture
     def capture(self, S_parity: int):
@@ -523,12 +575,15 @@ class FastDecoder:
             before = self.c.pending.get(L)
             self.c._chunk_inputs[L] = (S, self.kvl_buf[L], self.sc_buf[L], before)
             if parity == 1:
-                self.c.pending[L] = (self.kvl_buf[L][5].clone(), self.sc_buf[L][5].clone())  # t5 unpaired
+                self.c.pending[L] = (self.kvl_buf[L][T_VERIFY - 1].clone(),
+                                     self.sc_buf[L][T_VERIFY - 1].clone())  # the last token is unpaired
             else:
                 self.c.pending[L] = None
         self.c.len = S + T_VERIFY
         self.stats["steps"] += 1
         self.stats["graph_s"] += time.perf_counter() - t0
+        if self.rs_uniq is not None:
+            self.rs_steps += 1
         return self.logits, self.main_hidden
 
     def draft(self, tok: int, last_main_pos: int, temperature: float):

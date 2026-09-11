@@ -671,11 +671,10 @@ class Model:
 
     @torch.inference_mode()
     def dspark_draft(self, tok: int, last_main_pos: int, temperature: float):
-        """Draft block: returns (draft ids [5], draft probs [5, V] fp32 at the given temperature,
-        confidence [5]). Queries sit at positions last_main_pos+1 .. +5."""
+        """Draft block: returns (draft ids [B], draft probs [B, V] fp32 at the given temperature,
+        confidence [B]) for B = the DSpark block size. Queries sit at last_main_pos+1 .. +B."""
         a = self.args
-        B = a.dspark_block_size if hasattr(a, "dspark_block_size") else 5
-        B = 5
+        from engine.fastdecode import T_DRAFT as B   # DSV41_BLOCK, default the checkpoint's 5
         ids = torch.full((B,), 128799, dtype=torch.long, device=self.dev)
         ids[0] = tok
         h = self.W.embed[ids].unsqueeze(1).repeat(1, a.hc_mult, 1)
@@ -691,7 +690,7 @@ class Model:
         # to the LM head (inference/model.py::DSparkBlock.forward_head), so keep both.
         x_pre = x
         x = R.rmsnorm(x, w.norm, a.norm_eps)
-        logits = R.head_logits(x, self.W.head)  # [5, V] fp32
+        logits = R.head_logits(x, self.W.head)  # [B, V] fp32
         out = torch.empty(B + 1, dtype=torch.long, device=self.dev)
         out[0] = tok
         probs = []

@@ -73,6 +73,27 @@ _ALL_FP4_GROUPS = ("shared", "attn", "wo_a")
 _FP4_ALIASES = {"all": _ALL_FP4_GROUPS, "on": _ALL_FP4_GROUPS, "1": _ALL_FP4_GROUPS}
 
 
+# DSV41_TOPK overrides the number of routed experts the router activates per token. The checkpoint
+# stores 6 (`n_activated_experts` in inference/config.json) out of 384, and every token also passes
+# through the layer's shared expert, which this switch does not touch. A smaller k keeps the highest
+# gate logits and drops the rest; the gate weights are renormalized over the surviving experts by
+# the same line that already normalizes the checkpoint's six, so the routed sum stays at
+# `route_scale` and nothing downstream changes shape. Unset (or equal to the checkpoint's value)
+# restores the stored routing exactly. The DSpark drafter's own router (top-3 of its 128 experts per
+# MTP block) is a separate, hard-coded k and is not affected.
+def routed_topk(default: int = 6) -> int:
+    v = os.environ.get("DSV41_TOPK", "").strip()
+    if v in ("", "off", "default"):
+        return int(default)
+    try:
+        k = int(v)
+    except ValueError:
+        raise ValueError(f"DSV41_TOPK: {v!r}; use an integer 1..{default}, or leave it unset") from None
+    if not 1 <= k <= int(default):
+        raise ValueError(f"DSV41_TOPK: {k}; must be 1..{default} (the checkpoint's n_activated_experts)")
+    return k
+
+
 def dense_fp4_groups() -> frozenset:
     v = os.environ.get("DSV41_DENSE_FP4", "off").strip().lower()
     if v in ("", "off", "0", "none"):
@@ -260,7 +281,9 @@ class Args:
         for k in ("kv_source_layers", "index_source_layers", "compress_ratios", "engram_layer_ids", "dspark_target_layer_ids"):
             if k in keep:
                 keep[k] = tuple(keep[k])
-        return cls(**keep)
+        args = cls(**keep)
+        args.n_activated_experts = routed_topk(args.n_activated_experts)
+        return args
 
 
 # ----------------------------------------------------------------------------- weights
