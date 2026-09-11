@@ -120,7 +120,9 @@ class ExpertStore:
         self.transient_slots = transient_slots
         self.lru_slots = self.n_slots - transient_slots
         assert self.lru_slots > 0
-        assert transient_slots >= 384, 'the transient ring must hold a whole layer of experts (one prefill chunk may need all 384)'
+        # a prefill chunk can touch all 384 experts of a layer; a smaller ring is only safe when every routable
+        # expert is resident (pruned all-resident mode). resolve() asserts on slot collisions either way.
+        assert transient_slots >= 8, 'transient ring too small'
         self.shards: dict[str, ShardFile] = {}
         self.index = index["weight_map"]
         self.lru: OrderedDict[tuple, int] = OrderedDict()  # (layer, expert) -> slot

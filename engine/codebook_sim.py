@@ -39,6 +39,7 @@ class CodebookSim:
             j = d.argmin(dim=0)
             near[i] = members[j]
             cost[i] = (d.min(dim=0).values ** 2)
+        self.subsets = subsets
         self.near = near.to(device)
         self.cost = cost.to(device)
         self.device = device

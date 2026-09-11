@@ -543,6 +543,9 @@ if __name__ == "__main__":
                     help="with --teacher-forced: comma list of keep fractions (e.g. 0.25,0.4,1.0); per layer only the "
                          "top-N experts by trace frequency stay routable; writes --tf-out with one entry per fraction")
     ap.add_argument("--prune-profile", default="mixed", choices=["mixed", "coding", "general"])
+    ap.add_argument("--transient-slots", type=int, default=None,
+                    help="prefill-miss ring slots (default 400 = a whole layer; 16 is enough when every kept expert is resident)")
+    ap.add_argument("--keep-free-gb", type=float, default=None, help="host memory to leave free when auto-sizing the arena (default 20)")
     ap.add_argument("--sim-bits", type=int, default=None, help="simulate a 2/3-bit per-row codebook expert format (quality only)")
     ap.add_argument("--sim-cold-frac", type=float, default=1.0, help="fraction of the kept experts (coldest first) that get --sim-bits")
     ap.add_argument("--prune-keep", type=float, default=None,
@@ -560,7 +563,9 @@ if __name__ == "__main__":
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
                     swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep,
-                    sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac)
+                    sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac,
+                    **({"transient_slots": a.transient_slots} if a.transient_slots else {}),
+                    **({"keep_free_gb": a.keep_free_gb} if a.keep_free_gb else {}))
     if a.verify_replay:
         short = "def fib(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
         res = eng.verify_replay([short, open(os.path.join(HERE, "..", "corpus", "sources", "dsv41_readme.md")).read()[:1400]])

@@ -737,3 +737,19 @@ with the coldest 40% of those at 3 bpw (~77 GB). A per-row 8-of-16 codebook (sub
 grid, so it runs in the FP4 arena for measurement) has 21% relative weight error (2-bit: 37%) --
 near the scalar-quantizer floor, roughly double FP4's own error. Teacher-forced runs of the
 candidates are in `results/simq/`.
+
+### 2026-09-11 08:40 -- CB3 (3-bit codebook) format: quality yes, kernel not yet fast
+
+* Held-out, keep 40% of experts at simulated 3-bit: coding 1.539 / general 3.212 (+0.03 / +0.02 vs the
+  full FP4 model; the 3-bit step itself ~+0.01-0.03 on top of the pruning). Worth building.
+* `tools/cb3.py`: packed format (2-bit plane + 1-bit plane + 8-entry per-row codebook on the FP4 grid,
+  UE8M0 scales kept) = 14.45 MB per expert (3.07 bpw); pack/unpack bit-exact vs the simulation.
+* `tools/cb3_moe.py`: grouped MoE kernel on CB3 arenas -- CORRECT (rel err 4.4e-3, same as the FP4
+  kernel vs its reference) but SLOW: 39-54 GB/s of CB3 bytes with register reshapes (variant 1),
+  4-8 GB/s with gather loads (variant 2, current), vs ~190 GB/s for the FP4 kernel. The 3-bit ->
+  FP4-nibble rebuild needs cross-lane bit movement; the next attempt is an inline-PTX per-lane decoder
+  (one lo word = 16 codes, one hi half-word, the cbword) producing packed bytes with a permuted K
+  order matched by the x loads. Parked behind the cheaper win below.
+* Cheaper win with FP4 only: in pruned all-resident mode the 400-slot transient ring (7.5 GB) and the
+  20 GB host reserve are oversized; `--transient-slots 16 --keep-free-gb 14` should give ~5,000 slots
+  (~32% kept, all resident) -- quality between the measured 30% and 40% rows, speed of the resident path.
