@@ -162,6 +162,9 @@ def build_keep_masks(counts: dict, frac: float, select: str, device, min_per_lay
 
 
 class V41Engine:
+    #: this engine can constrain sampling with a decoding gate (``generate(grammar=...)``)
+    supports_grammar = True
+
     def __init__(self, model_dir: str, max_seq: int = 32768, arena_gb: float | None = None, device: str = "cuda",
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
@@ -372,18 +375,23 @@ class V41Engine:
         self.store.stats.update(EX.ZERO_STATS)
 
     def generate(self, prompt_ids, *, max_tokens=4096, temperature=1.0, top_p=0.95, stop_token_ids=None, seed=None,
-                 ignore_eos=False):
+                 ignore_eos=False, grammar=None):
         """Yield bursts of new token ids.
 
         ``ignore_eos``: keep decoding until ``max_tokens`` even if EOS/stop ids come up. The
         benchmark needs runs of a fixed output length -- otherwise a decode-rate comparison is
         really a comparison of how early each config decided to stop.
+
+        ``grammar``: optional decoding gate (see server/engine_api.py). It is shown every token
+        this loop settles on (``observe``) and is asked to mask the verify block's logit rows
+        (``mask_rows``) before the accept/reject decision. It masks nothing until the model starts
+        a tool-calls block, and with ``grammar=None`` not one instruction of this loop changes.
         """
         with self.lock:
             yield from self._generate(list(prompt_ids), max_tokens, temperature, top_p, set(stop_token_ids or ()),
-                                      seed, ignore_eos)
+                                      seed, ignore_eos, grammar)
 
-    def _generate(self, prompt, max_tokens, temperature, top_p, stop_ids, seed, ignore_eos=False):
+    def _generate(self, prompt, max_tokens, temperature, top_p, stop_ids, seed, ignore_eos=False, grammar=None):
         if seed is not None:
             torch.manual_seed(seed)
         stop_ids = set() if ignore_eos else (set(stop_ids) | {self.eos_token_id})
@@ -405,7 +413,7 @@ class V41Engine:
         t_decode0 = t_start
         try:
             yield from self._decode_loop(ids, P, max_tokens, temperature, top_p, stop_ids,
-                                         _st := {})
+                                         _st := {}, grammar)
         finally:
             n_out = _st.get("n_out", n_out)
             steps = _st.get("steps", steps)
@@ -446,7 +454,7 @@ class V41Engine:
                 "promoted": st["promoted"],
             }
 
-    def _decode_loop(self, ids, P, max_tokens, temperature, top_p, stop_ids, out_st):
+    def _decode_loop(self, ids, P, max_tokens, temperature, top_p, stop_ids, out_st, grammar=None):
         m = self.model
         t_start = time.perf_counter()
         out_st["t_decode0"] = t_start
@@ -484,6 +492,10 @@ class V41Engine:
             out_st["fd0"] = dict(self.fast.stats)
         out_st.update(n_out=1, steps=0, accepted=accepted_hist, t_decode0=time.perf_counter(), phases=ph)
         steps = 0
+        # The gate cannot be constraining anything yet (it engages on a marker that takes several
+        # tokens to write), but it has to see every settled token to stay in step with the stream.
+        if grammar is not None:
+            grammar.observe([tok])
         yield [tok]
         while n_out < max_tokens and tok not in stop_ids:
             if ph is not None:
@@ -529,6 +541,15 @@ class V41Engine:
                     drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
                     block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # T_VERIFY tokens at pos..
                     logits, mh = m.forward(block, pos, prefill=False)
+                # Constrained decoding, before anything reads the logits. Row i is the
+                # distribution after block[0..i], so its legal set depends on the drafts accepted
+                # ahead of it; the gate walks the block token by token and leaves its own state
+                # where it found it. Rows after the first illegal draft are left alone: that draft
+                # is masked out of its own row, so it is rejected there and nothing reads further.
+                if grammar is not None:
+                    grammar.mask_rows(logits, block)
+                    if ph is not None:
+                        ph.mark("grammar")
                 # verify drafts[i] (position pos+1+i) against logits[i]
                 if lean:
                     # Greedy verification, entirely on the GPU: argmax of the six logit rows, the
@@ -564,6 +585,8 @@ class V41Engine:
                         out += emitted
                         n_out += len(emitted)
                         out_st["n_out"] = n_out
+                        if grammar is not None:
+                            grammar.observe(emitted)
                         if ph is not None:
                             ph.mark("emit")
                         yield emitted
@@ -622,6 +645,8 @@ class V41Engine:
                     out += emitted
                     n_out += len(emitted)
                     out_st["n_out"] = n_out
+                    if grammar is not None:
+                        grammar.observe(emitted)
                     if ph is not None:
                         ph.mark("emit")
                     yield emitted
@@ -635,6 +660,8 @@ class V41Engine:
                     ph.steps = steps
             else:
                 logits, mh = m.forward(torch.tensor([tok], device=self.device), pos, prefill=False)
+                if grammar is not None:
+                    grammar.mask_rows(logits, None)
                 pt = sample_probs(logits[0], temperature, top_p)
                 tok = int(torch.multinomial(pt, 1)) if temperature > 0 else int(pt.argmax())
                 pos += 1
@@ -642,6 +669,8 @@ class V41Engine:
                 n_out += 1
                 steps += 1
                 out_st.update(n_out=n_out, steps=steps)
+                if grammar is not None:
+                    grammar.observe([tok])
                 yield [tok]
         out_st.update(n_out=n_out, steps=steps)
 

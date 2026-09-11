@@ -2154,3 +2154,148 @@ smaller source of the same problem and stays off until it is replaced by a vette
 What this says about the gates used all month: teacher-forced loss never ran the decode loop, and
 `engine/test_fastdecode.py` printed the per-layer table all along without anyone reading the
 `route eq` column. A number that is printed is not a gate.
+
+### 2026-09-11 21:30-23:30 -- tool calls constrained by a grammar built from the request's own schemas
+
+The tolerant parser added at 19:55 repairs a malformed tool call after the fact. It does not stop
+the model from writing one, and the repair was not the whole cost: a completion that drifts out of
+the format does not stop drifting. The case that prompted this was a chat carrying 20 tool schemas
+(three MCP tool servers attached at once) which produced `prompt=5899 completion=4096
+finish=tool_calls` -- four thousand tokens of near-identical calls until the output cap, 161
+seconds. The 20:55-21:25 entry above found one cause of that behaviour in the numerics (the graphed
+path routed tokens to different experts); the format itself is the other half, and nothing in the
+decode loop prevented the model from writing a block the checkpoint's own parser rejects.
+
+DSML is defined by the checkpoint twice over: in the system prompt it writes for a tool request
+(`TOOLS_TEMPLATE`) and in the parser it ships (`parse_tool_calls`). The block is
+
+```
+\n\n<｜DSML｜ calls>\n
+  <｜DSML｜ invoke name="TOOL">\n
+    <｜DSML｜ parameter name="P" string="true|false">VALUE</｜DSML｜ parameter>\n
+  </｜DSML｜ invoke>\n
+</｜DSML｜ calls>
+```
+
+and the parser is exact about every byte of it: the attribute reads `string="true"` or
+`string="false"` and nothing else, a parameter name may not repeat, and no text at all may follow
+the closing tag.
+
+`server/tool_grammar.py` builds an EBNF grammar for exactly the tools of one request -- the allowed
+tool names, each tool's parameter names in schema order with the required ones mandatory and the
+rest optional (which makes "every required parameter present" and "no duplicate parameter"
+structural rather than checked afterwards), `string="true"` for string-typed parameters,
+`string="false"` and a JSON value for the others, at most eight invokes, and the block closed --
+and xgrammar compiles it against the tokenizer. A gate object masks the sampling distribution while
+the model is inside the block and nowhere else: it watches the decoded output for the calls marker,
+creates a `GrammarMatcher` seeded with `accept_string` over the text from the marker onwards, masks
+every logit row from then on, and finishes when the block closes. A complete matcher allows exactly
+one token, the end of turn. That is the part that turns "keeps writing calls" into "stops".
+
+For a request whose first tool is a search taking a string, an integer and an array of strings, the
+generated rules for that tool read
+
+```
+root ::= "\n\n<｜DSML｜ calls>\n" call{1,8} "</｜DSML｜ calls>"
+call ::= t0 | t1 | ... | t19
+t0 ::= "<｜DSML｜ invoke name=\"web_search\">\n" t0p0 t0p1? t0p2? t0p3? "</｜DSML｜ invoke>\n"
+t0p0 ::= "<｜DSML｜ parameter name=\"query\" string=\"true\">" vany "</｜DSML｜ parameter>\n"
+t0p1 ::= "<｜DSML｜ parameter name=\"max_results\" string=\"false\">" jint "</｜DSML｜ parameter>\n"
+t0p2 ::= "<｜DSML｜ parameter name=\"sites\" string=\"false\">" ("[" jws (jstr jws ("," jws jstr jws)*)? "]") "</｜DSML｜ parameter>\n"
+t0p3 ::= "<｜DSML｜ parameter name=\"safe_search\" string=\"false\">" jbool "</｜DSML｜ parameter>\n"
+```
+
+Twenty tools of that shape come to 88 rules and 7.7 kB of EBNF. **Measured** on this box: building
+the `TokenizerInfo` and the compiler costs 1.52 s once at server start, compiling that grammar
+costs 28 ms and 13.1 MB of adaptive token-mask cache, and a repeat compile of the same tool list is
+a dictionary lookup (2 us), which is what a chat client's second turn does.
+
+#### Two things about xgrammar that are worth writing down
+
+**Negated character classes are ASCII-only.** The value rule has to be "any character except
+U+FF5C": every DSML token contains that character, so a value written that way can hold HTML, code,
+JSON and prose and still not be able to end itself, which makes the closing tag unambiguous.
+Written the obvious way, as a negated class over that one character, it compiles to a class that
+matches U+FF5C as well. The library says so on stderr -- `Warning: Negative Character class
+contains byte greater than 127, clamping to 127` -- and the consequence is severe: the value can
+run straight over its own closing tag and swallow the rest of the block, so the grammar constrains
+nothing after the first parameter opens. **Measured** with a two-rule grammar (`root ::= "<a>" v
+"</a>"` over that negated class): after feeding `<a>x</a>` the matcher reports completed and still
+allows 128,524 of 129,280 tokens, and `accept_string("｜")` mid-value returns true. The form that
+works is a union of positive ranges, a class of `\u0000-\uFF5B` and `\uFF5D-\U0010FFFF`, which
+excludes U+FF5C and keeps accented letters, CJK, halfwidth/fullwidth punctuation and the
+supplementary planes; the same treatment is needed for the parameter-name and JSON-string
+character classes, which also have to exclude that character. The guard against this quietly
+coming back is `test_value_cannot_contain_the_dsml_bar` in `server/test_tool_grammar.py`.
+
+**`traverse_draft_tree` fits the DSpark verify block exactly, once its convention is known.** The
+convention is not written down beyond the signature, so it was established by experiment: node 0 is
+the token the matcher has already accepted (its entry in `draft_tokens` is not re-accepted), row i
+of the bitmask is the mask for the token that follows node i along its path, the matcher's own
+state is restored before the call returns, a node whose token the grammar refuses gets an all-zero
+row while its descendants are left untouched (so the bitmask must be reset to all-ones first), and
+the three tensors must be int64 -- int32 raises. That is one call per decode step instead of up to
+twelve fill/accept/rollback calls, and it maps onto the block `[tok, draft0..draft4]` with a chain
+topology and no translation layer. The per-row walk is kept as a second implementation and
+`test_gate_mask_paths_agree` requires the two to produce identical masks.
+
+#### Where it sits in the decode loop
+
+The gate is handed to `V41Engine.generate(grammar=...)` and the loop owes it two calls: `observe`
+for every token it settles on, and `mask_rows(logits, block)` before anything reads the logits.
+Both the greedy and the temperature path are masked. The temperature path draws no additional
+random numbers -- masking changes the distribution it samples from, not the number of draws -- so
+its RNG stream is unchanged, and the rejection-sampling residual `(p - q).clamp_min(0)` is zero
+wherever the mask is, so an illegal token cannot come back through the residual either.
+
+Speculation needs no special handling beyond the block. Row i of the six is the distribution after
+`block[0..i]`, so its legal set depends on the drafts ahead of it; the gate walks the chain, and a
+drafted token the grammar refuses is masked out of the row it is verified against, which makes the
+verifier reject it there. Rows past that point are never read, because the accept count cannot
+exceed the index of the first rejection. Masking leaves the gate's own state where it found it, so
+a rollback of the cache needs no matching rollback of the grammar -- `observe` on the emitted
+tokens is the only thing that advances it.
+
+With `grammar=None` -- every request without tools, and every request at all when
+`DSV41_TOOL_GRAMMAR=0` or `"tool_grammar": false` -- the loop is the code that was there before,
+one `is not None` test per step, and the tolerant parser stays as the fallback for exactly those
+cases and for a schema the builder cannot express.
+
+#### Tests
+
+`server/test_tool_grammar.py` covers the builder without any dependency (types, required versus
+optional, escaping, names DSML cannot carry, the call bound) and the matcher against the
+checkpoint's own parser: a well-formed block is accepted and parses back to the expected calls;
+values holding HTML, quotes, braces and newlines survive a round trip; an unknown tool name, an
+unknown parameter, a duplicate parameter, a missing required parameter, `string="true"` on an
+integer, a quoted integer and a bare word inside an array are all refused; and the two shapes seen
+in real completions are unreachable -- after `string="` only `true` and `false` continue, and after
+the closing tag the mask contains exactly one token, the end of turn. `server/test_server.py` (the
+mock engine, 16 tests) still passes with the three-element `build_chat_prompt` return.
+
+#### Not done
+
+The end-to-end run against the served model is outstanding: a 20-schema request with and without
+the constraint, the completion-token counts and finish reasons, the no-tool control at temperature
+0, the per-step cost of an active grammar, and `engine/test_spec_lossless.py` re-run to confirm
+speculation is still lossless with no grammar in play. The machine stopped answering ssh a couple
+of minutes into the warm start that was to carry those runs, with port 22 accepting the connection
+and never sending a banner and port 8000 never opening, and it had not come back an hour and a half
+later. That start was issued a few minutes after the previous server had gone away, without running
+`./stop.sh` in between -- which is the sequence the comment at the top of `stop.sh` warns about: the
+resident arena is tens of GB of page-cache-backed memory that the kernel reclaims lazily, and
+starting the next warm start before that lands is how this box gets wedged.
+
+Both test files ran on this box and passed before it stopped answering; the last edits to them --
+the masked decode-loop test, the tightened mask-agreement assertions and the per-request off switch
+-- came after that, and have only been exercised where they do not need a compiled grammar. Run
+them first. The whole reproduction, once the box is back:
+
+```
+./stop.sh && ./start.sh                      # DSV41_STEP_TIMING=1 for the per-phase table
+python3 server/test_tool_grammar.py          # CPU, needs only the tokenizer
+python3 server/test_server.py                # CPU, mock engine
+# the same request twice, one with "tool_grammar": false, and compare
+# completion_tokens / finish_reason / x_engine_stats.tool_grammar
+./stop.sh && python3 engine/test_spec_lossless.py --max-tokens 120
+```

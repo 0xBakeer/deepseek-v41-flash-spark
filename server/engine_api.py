@@ -19,6 +19,29 @@ Contract (see ``Engine``):
   instead -- ``GeneratorExit`` is raised at the pending ``yield`` -- so
   cache/arena cleanup belongs in a ``try/finally`` around the decode loop and
   the engine must be ready for the next request afterwards.
+* Optional ``grammar`` keyword: a decoding gate, passed only to an engine whose
+  ``supports_grammar`` is true and only when the request carries tools. The
+  engine owes it two calls, and nothing else:
+
+      ``gate.observe(ids)``      every token the loop has settled on, in order,
+                                 once (a burst at a time is fine).
+      ``gate.mask_rows(logits, block_ids)``
+                                 mask ``logits`` in place before anything reads
+                                 it. ``logits`` is [R, V] (R = 1 for a plain
+                                 step, or the verify block's rows) and
+                                 ``block_ids`` the R token ids those rows follow
+                                 -- ``[tok, draft0, ...]`` -- so that row i can
+                                 be masked for the state after block[0..i]. Pass
+                                 ``block_ids=None`` when there is only one row.
+                                 The call leaves the gate's own state untouched,
+                                 so speculation that is rolled back needs no
+                                 undo; rows past the first illegal draft are
+                                 left alone, which is safe because that draft is
+                                 masked out of its own row and is therefore
+                                 rejected there.
+
+  The gate masks nothing until the model opens a tool-calls block, so an engine
+  may call both unconditionally. ``server/tool_grammar.py`` implements it.
 * Optional ``context_margin`` (int, default 8 as read by the server): tokens
   the engine needs beyond ``len(prompt_ids) + max_tokens`` (DSpark draft
   block); the server clamps ``max_tokens`` so that
@@ -46,6 +69,8 @@ class Engine(ABC):
     eos_token_id: int = 1
     #: maximum prompt + completion length the engine accepts.
     max_context: int = 32768
+    #: does ``generate`` honour a ``grammar`` gate? The server only builds one if it does.
+    supports_grammar: bool = False
 
     @abstractmethod
     def generate(

@@ -37,11 +37,11 @@ for _p in (HERE, REPO_ROOT):
         sys.path.insert(0, _p)
 
 from engine_api import Engine, MockEngine  # noqa: E402
+from tool_grammar import TOOL_CALLS_MARKER, make_factory  # noqa: E402
 
 log = logging.getLogger("dsv41.server")
 
 THINK_END = "</think>"
-TOOL_CALLS_MARKER = "\n\n<｜DSML｜ calls"
 EFFORT_ALIASES = {"low": 50, "medium": 60, "high": 75, "xhigh": 90, "max": 100}
 NO_THINKING_EFFORTS = {"none", "low"}
 DEFAULT_MAX_TOKENS = 4096
@@ -158,6 +158,11 @@ def parse_sampling(body: dict) -> dict:
     ignore_eos = body.get("ignore_eos", False)
     if not isinstance(ignore_eos, bool):
         raise APIError(400, "`ignore_eos` must be a boolean", param="ignore_eos")
+    # Off switch for the tool-call grammar, per request. It exists for the A/B (is a difference the
+    # constraint's doing?) and as an escape hatch for a tool schema the builder gets wrong.
+    tg = body.get("tool_grammar", True)
+    if not isinstance(tg, bool):
+        raise APIError(400, "`tool_grammar` must be a boolean", param="tool_grammar")
     return {
         "max_tokens": mt,
         "temperature": _num(body, "temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
@@ -165,6 +170,7 @@ def parse_sampling(body: dict) -> dict:
         "stop": stops,
         "seed": seed,
         "ignore_eos": ignore_eos,
+        "tool_grammar": tg,
     }
 
 
@@ -235,7 +241,10 @@ def _reject_images(messages: List[dict]) -> None:
                     raise APIError(400, "image inputs are not supported yet", param=f"messages[{i}].content")
 
 
-def build_chat_prompt(body: dict, enc, tok: Tok, thinking: bool, effort: int) -> Tuple[str, List[int]]:
+def build_chat_prompt(body: dict, enc, tok: Tok, thinking: bool,
+                      effort: int) -> Tuple[str, List[int], Optional[List[dict]]]:
+    """Render a chat request. The third element is the tool list as the *model* sees it
+    (namespaces folded into the names), which is what a tool grammar has to be built from."""
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise APIError(400, "`messages` must be a non-empty list", param="messages")
@@ -275,7 +284,13 @@ def build_chat_prompt(body: dict, enc, tok: Tok, thinking: bool, effort: int) ->
         raise APIError(400, f"cannot encode messages: {e}", param="messages")
     if media.get("images"):
         raise APIError(400, "image inputs are not supported yet", param="messages")
-    return prompt, tok.encode(prompt)
+    rendered = None
+    if tools:
+        try:
+            rendered = enc.tools_from_openai_format(copy.deepcopy(tools))
+        except Exception as e:  # noqa: BLE001 - the encoder already accepted these
+            log.warning("cannot normalise the tool list for the grammar: %s", e)
+    return prompt, tok.encode(prompt), rendered
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +449,14 @@ class State:
         self.started = int(time.time())
         if self.eos_id != engine.eos_token_id:
             log.warning("engine.eos_token_id=%s differs from tokenizer EOS id %s", engine.eos_token_id, self.eos_id)
+        # Constrained tool calls: only with an engine that can mask its own sampling, and only
+        # when xgrammar is installed. Without it everything below is a no-op and tool calls are
+        # parsed out of the text as before.
+        self.grammars = None
+        if getattr(engine, "supports_grammar", False):
+            self.grammars = make_factory(
+                tok, engine.eos_token_id if self.eos_id is None else self.eos_id,
+                enabled=os.environ.get("DSV41_TOOL_GRAMMAR", "0") == "1")  # off until the end-to-end gates on real weights have run; see NOTES 2026-09-11
 
     def stop_ids(self) -> Set[int]:
         ids = {self.engine.eos_token_id}
@@ -442,7 +465,8 @@ class State:
         return ids
 
     def generate(self, prompt_ids: List[int], sampling: dict, *, thinking: bool,
-                 detect_tool_calls: bool, result: GenerationResult) -> Iterator[Tuple[str, str]]:
+                 detect_tool_calls: bool, result: GenerationResult,
+                 tools: Optional[List[dict]] = None) -> Iterator[Tuple[str, str]]:
         """Drive the engine; yield (kind, text) events; fill ``result`` at the end.
 
         The caller must hold ``self.lock``.
@@ -467,6 +491,13 @@ class State:
 
         gen_kwargs = dict(max_tokens=max_tokens, temperature=sampling["temperature"],
                           top_p=sampling["top_p"], stop_token_ids=stop_ids, seed=sampling["seed"])
+        # The gate constrains nothing until the model opens a tool-calls block, so it costs a
+        # dictionary lookup per step on a request that never calls a tool.
+        gate = None
+        if tools and detect_tool_calls and self.grammars is not None and sampling["tool_grammar"]:
+            gate = self.grammars.for_tools(tools)
+        if gate is not None:
+            gen_kwargs["grammar"] = gate
         if ignore_eos:
             try:
                 gen = self.engine.generate(prompt_ids, ignore_eos=True, **gen_kwargs)
@@ -526,6 +557,11 @@ class State:
         except Exception as e:  # engine stats must never break a response
             log.warning("engine.stats() failed: %s", e)
             result.stats = {}
+        if gate is not None:
+            st = dict(gate.stats)
+            st["mask_ms_per_call"] = round(st["mask_s"] / st["mask_calls"] * 1e3, 3) if st["mask_calls"] else None
+            st["mask_s"] = round(st["mask_s"], 4)
+            result.stats["tool_grammar"] = st
         dt = time.perf_counter() - t0
         result.stats.setdefault("server_completion_tok_per_s", round(len(result.gen_ids) / dt, 1) if dt > 0 else None)
         log.info("generation done: prompt=%d completion=%d reasoning=%d finish=%s %.2fs",
@@ -534,12 +570,15 @@ class State:
     # A completion that calls tools is DSML, and the checkpoint's own parser
     # (corpus/sources/dsv41_encoding.py::parse_message_from_completion_text) is strict about it: a
     # parameter must read `name="x" string="true|false">value<`, and nothing may follow the calls
-    # block. Real completions deviate in two ways that are recoverable, and both were costing the
-    # whole tool call -- the client then saw only the sentence before it and a `stop` finish:
+    # block. Real completions deviated in two ways, and both were costing the whole tool call --
+    # the client then saw only the sentence before it and a `stop` finish:
     #   * the value is put in the `string` attribute (`name="query" string="a b c"`), with no
     #     separate value body;
     #   * ordinary prose follows the closing tag of the calls block.
-    # This tolerant pass runs only after the strict parser has raised, and only its result is used.
+    # Both are now unreachable when a tool grammar is in force (server/tool_grammar.py): the mask
+    # will not let the model write them. This tolerant pass is the fallback for the cases where
+    # there is no grammar -- xgrammar missing, DSV41_TOOL_GRAMMAR=0, a schema the builder could not
+    # express, an engine that cannot mask -- and it runs only after the strict parser has raised.
     _RE_INVOKE = re.compile(r'<｜DSML｜ invoke name="(?P<name>[^"]*)"\s*>?\n?(?P<body>.*?)(?=<｜DSML｜ invoke |</｜DSML｜ calls>|\Z)', re.DOTALL)
     _RE_PARAM_SPEC = re.compile(r'<｜DSML｜ parameter name="(?P<k>[^"]*)" string="(?P<s>true|false)"\s*>(?P<v>.*?)<', re.DOTALL)
     _RE_PARAM_ATTR = re.compile(r'<｜DSML｜ parameter name="(?P<k>[^"]*)" string="(?P<v>.*?)"\s*>', re.DOTALL)
@@ -762,15 +801,19 @@ class Handler(BaseHTTPRequestHandler):
     def _debug_prompt(self, body: dict) -> None:
         st = self.state
         thinking, effort = resolve_thinking(body, st.args.default_thinking, st.args.default_effort)
-        prompt, ids = build_chat_prompt(body, st.enc, st.tok, thinking, effort)
-        self._send_json(200, {"thinking": thinking, "reasoning_effort": effort, "prompt": prompt,
-                              "prompt_ids": ids, "prompt_tokens": len(ids)})
+        prompt, ids, tools = build_chat_prompt(body, st.enc, st.tok, thinking, effort)
+        body_out = {"thinking": thinking, "reasoning_effort": effort, "prompt": prompt,
+                    "prompt_ids": ids, "prompt_tokens": len(ids)}
+        if tools and st.grammars is not None:
+            from tool_grammar import build_tool_grammar  # noqa: PLC0415 - debug endpoint only
+            body_out["tool_grammar"] = build_tool_grammar(tools)
+        self._send_json(200, body_out)
 
     def _chat(self, body: dict) -> None:
         st = self.state
         sampling = parse_sampling(body)
         thinking, effort = resolve_thinking(body, st.args.default_thinking, st.args.default_effort)
-        _, prompt_ids = build_chat_prompt(body, st.enc, st.tok, thinking, effort)
+        _, prompt_ids, tools = build_chat_prompt(body, st.enc, st.tok, thinking, effort)
         stream = bool(body.get("stream", False))
         include_usage = bool((body.get("stream_options") or {}).get("include_usage", False))
         rid = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -786,7 +829,8 @@ class Handler(BaseHTTPRequestHandler):
 
         with st.lock:
             if not stream:
-                for _ in st.generate(prompt_ids, sampling, thinking=thinking, detect_tool_calls=True, result=result):
+                for _ in st.generate(prompt_ids, sampling, thinking=thinking, detect_tool_calls=True,
+                                     result=result, tools=tools):
                     pass
                 router = result.router
                 message: Dict[str, Any] = {"role": "assistant", "content": router.content}
@@ -809,7 +853,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._sse(chunk({"role": "assistant", "content": ""}))
                 for kind, text in st.generate(prompt_ids, sampling, thinking=thinking,
-                                              detect_tool_calls=True, result=result):
+                                              detect_tool_calls=True, result=result, tools=tools):
                     self._sse(chunk({"reasoning_content": text} if kind == "reasoning" else {"content": text}))
                 if result.tool_calls:
                     self._sse(chunk({"tool_calls": [dict(tc, index=i) for i, tc in enumerate(result.tool_calls)]}))

@@ -105,3 +105,14 @@ generation starts right after `<｜Assistant｜><think>` (thinking) or `<｜Assi
   `encoding.parse_message_from_completion_text`, whose DSML tool calls become OpenAI `tool_calls`
   (arguments as a JSON string; namespaced tools are returned as `namespace::name`). If that parse
   fails (malformed or truncated tool block) the raw tail is returned as `content` instead.
+* When a request carries `tools` and xgrammar is installed, that lead-in also turns on a
+  **grammar**: `server/tool_grammar.py` builds an EBNF for the DSML calls block of exactly those
+  tool schemas (allowed names, each tool's parameter names, `string="true"` for string parameters
+  and `string="false"` with a JSON value for the rest, required parameters present, no duplicates)
+  and the engine masks its sampling with it until the block closes -- after which the only legal
+  token is the end of turn. Prose before the block is never constrained, and a request without
+  tools never builds a grammar. `x_engine_stats.tool_grammar` reports whether it engaged and what
+  the masking cost. Set `DSV41_TOOL_GRAMMAR=0` (server-wide) or
+  `"tool_grammar": false` (one request) to sample freely instead -- the tolerant parser then
+  recovers what it can -- and `DSV41_LOG_TOOL_GRAMMAR=1` to log the grammar. `POST /v1/debug/prompt`
+  returns it as `tool_grammar` alongside the rendered prompt.
