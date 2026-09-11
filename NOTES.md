@@ -2106,3 +2106,51 @@ with the torch path to ~1e-4 on the attention output, and the fast path's logits
 `Model.forward` by several percent since it was written (0.15 before this kernel, 0.07 after), which
 was filed as bf16 noise and is too large for that. Both belong in a proper accuracy pass of the fast
 path rather than a speed round.
+
+### 2026-09-11 20:55-21:25 -- the real cause: the graphed path routed tokens to different experts
+
+Disabling the fused attention kernel stopped one repetition loop but not the class of failure: with
+it off, a chat carrying 20 tool schemas still produced 4,096 tokens of near-identical tool calls
+before hitting the output cap. So the fast path was compared against `Model.forward` layer by layer
+on the same block (`engine/test_fastdecode.py` with `DIAG=1`, shipped configuration):
+
+| layer | attn input rel err | routed experts equal |
+|---|---|---|
+| 0 | 0.0000 | **0.89** |
+| 6 | 0.1070 | 0.83 |
+| 12 | 0.1361 | 0.69 |
+| 18 | 0.1570 | 0.72 |
+| 36 | 0.0803 | 0.69 |
+
+Layer 0 is the finding: its inputs are bit-identical and the router still disagrees on 11 % of the
+picks; by the middle layers a third of the experts differ, and the activation error grows with depth
+because each layer runs a different FFN than the reference did.
+
+The cause is one line. `Model.moe` computes the gate as `mm(y.float(), gate_w)` -- fp32 activations
+against the fp32 gate weights, as the checkpoint stores them. The graphed path computed
+`F.linear(y, gate_w.bfloat16())`, a bf16 GEMM, added on 2026-09-11 morning together with two changes
+worth far more (torch routing instead of the per-slot Triton router, and the device slot LUT). The
+gate picks 6 of 384 and its scores are dense with near-ties, so three decimal digits are not enough
+to reproduce the selection. Both paths now use the fp32 GEMM; the DSpark drafter's gate too.
+
+After the fix, same comparison:
+
+| layer | attn input rel err | routed experts equal |
+|---|---|---|
+| 0 | 0.0000 | **1.00** |
+| 6 | 0.0073 | 1.00 |
+| 12 | 0.0087 | 1.00 |
+| 18 | 0.0110 | 0.94 |
+| 36 | 0.0131 | 0.94 |
+
+Logit error against the reference 0.049 -> 0.0121, argmax agreement 1.00 on both parities, and the
+HTML prompt produces a document that closes its tags and stops.
+
+With the fused attention kernel switched back on the deep layers degrade again (error 0.048-0.093,
+routed experts equal 0.72-0.92, argmax agreement 0.83 on one parity), so that kernel is a second,
+smaller source of the same problem and stays off until it is replaced by a vetted implementation
+(flashinfer 0.6.17 is installed on this box and has an attention-sink wrapper).
+
+What this says about the gates used all month: teacher-forced loss never ran the decode loop, and
+`engine/test_fastdecode.py` printed the per-layer table all along without anyone reading the
+`route eq` column. A number that is printed is not a gate.

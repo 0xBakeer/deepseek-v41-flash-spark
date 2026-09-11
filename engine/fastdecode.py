@@ -318,7 +318,11 @@ class FastDecoder:
         self.ffn_pre.copy_(ffn_pre); self.ffn_post.copy_(ffn_post); self.ffn_comb.copy_(ffn_comb)
         y = R.rmsnorm(R.hc_pre(h, attn_pre), w.ffn_norm, a.norm_eps)
         self.y.copy_(y)
-        scores = F.softplus(F.linear(y, self.gate_bf16[L]).float()).sqrt()  # bf16 weights (as stored) x bf16 act, fp32 accumulate
+        # fp32, exactly as Model.moe does it. The gate picks 6 of 384 experts and its scores are
+        # full of near-ties, so a bf16 GEMM here (which this path used until 2026-09-11) changes
+        # 11 % of the picks at layer 0 -- where the inputs are bit-identical -- and up to 31 %
+        # deeper in, which is what made the graphed path disagree with the reference at all.
+        scores = F.softplus(R.mm(y.float(), self.W.layers[L].gate_w)).sqrt()
         logits = scores + w.gate_bias
         pm = getattr(self.m, "prune_mask", None)
         if pm is not None and L in pm:
@@ -373,7 +377,7 @@ class FastDecoder:
             residual = h
             ffn_pre, ffn_post, ffn_comb = self._hc_mixes(h, w.hc_ffn_fn, w.hc_ffn_scale, w.hc_ffn_base)
             y = R.rmsnorm(R.hc_pre(h, attn_pre), w.ffn_norm, a.norm_eps)
-            scores = F.softplus(F.linear(y, self.mtp_gate_bf16[k]).float()).sqrt()
+            scores = F.softplus(R.mm(y.float(), self.W.mtp[k].gate_w)).sqrt()  # fp32, as Model.moe
             idx = (scores + w.gate_bias).topk(3, dim=-1)[1]
             wts = scores.gather(1, idx); wts = wts / (wts.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
             slots = (idx.to(torch.int32) + k * 128)
