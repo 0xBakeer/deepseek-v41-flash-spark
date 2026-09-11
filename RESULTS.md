@@ -1,5 +1,20 @@
 # RESULTS — DeepSeek-V4.1-Flash on one DGX Spark (GB10, 121 GiB)
 
+> **This file is append-only history.** Each tag has its own section with date, time and the exact
+> configuration. Superseded numbers stay in place and are annotated; nothing is deleted.
+> Sections: [v0.1.0-wip (2026-09-10)](#v010-wip--2026-09-10) · [v0.2.0-wip (2026-09-11)](#v020-wip--2026-09-11)
+
+---
+
+## v0.1.0-wip — 2026-09-10
+
+> **Superseded (annotated 2026-09-11 09:20):** every number in this section was measured with a
+> bug in the ported model math (`v41_ref.hc_post` mixed the Hyper-Connection residual with the
+> transposed matrix). The engine ran, the numbers are what it did that day, but the model quality
+> behind them was wrong (teacher-forced coding loss 2.16 nats instead of 1.37) and the DSpark
+> acceptance was depressed (~2.4-3.0 instead of 3.0-3.75). See v0.2.0-wip below for the corrected
+> state; NOTES.md ("2026-09-11 00:50") has the bug hunt.
+
 **Measured 2026-09-10 on the box described below. Every number here was produced by a run on this
 machine; nothing is extrapolated, scaled or quoted from elsewhere.** Where a planned measurement
 was not taken it says so instead of guessing. The running log with the bug hunt behind these
@@ -142,3 +157,83 @@ so only the time changed.
 For scale only — different hardware, all experts resident, no streaming: a public **4x** DGX Spark
 TP4 vLLM build reports 39-77 tok/s single stream, TTFT 0.27-0.58 s, DSpark acceptance 3.56
 (NOTES.md 0.5). That build needs four boxes and states "TP2 does not fit either way". This repo runs the same model, at FP4 expert quality, on **one** box, at 2.6-2.7 tok/s.
+
+
+---
+
+## v0.2.0-wip — 2026-09-11
+
+Measured 2026-09-11 00:50-09:15 on the same box (Qwen container stopped, pool ours alone), same
+checkpoint. Commits `bd24743` (hc_post fix) .. `22bd9a8`+ (FP8 dense, pruning, CB3). Python venv as
+in v0.1.0-wip. Every row below is one run of the stated command; no benchmark sweeps were run
+(owner's rule: a single decode number per configuration).
+
+### 2.1 The bug and what it changed (2026-09-11 00:50, commit bd24743)
+
+`tools/v41_ref.py::hc_post` summed the 4x4 Hyper-Connection `comb` matrix over the wrong index
+(comb @ residual instead of the reference's combᵀ @ residual). Found by proving decode == single-chunk
+prefill bit-for-bit at every layer (so caches were innocent) and re-reading the reference line by line.
+
+| teacher-forced, trace corpus (engine, one chunk per sequence) | before fix | after fix |
+|---|---|---|
+| coding NLL / top-1 (5,459 tokens) | 2.1599 / 63.9 % | **1.3708 / 74.4 %** |
+| general NLL / top-1 (5,251 tokens) | 3.4263 / 47.1 % | **2.8635 / 55.1 %** |
+
+Same code prompt, greedy: before the fix every path stuttered ("LRLR", "time-to-llive"); after it,
+clean production-quality code. DSpark acceptance length on that prompt 2.4 -> 3.75.
+
+### 2.2 Decode paths (2026-09-11 00:10-07:05)
+
+`engine/fastdecode.py`: CUDA graphs per layer (attention+HC+router graph, host slot resolve, MoE+residual
+graph), fused Sinkhorn Triton kernel, bf16 head, fixed-length masked indexer scoring.
+`tools/fp8_linear.py`: dense projections read in their stored FP8 form (Triton, 223 GB/s of FP8 at
+M=6, 1.9x the bf16 GEMM); the bf16 copies are gone, which grew the auto arena from 74 to 79 GB.
+
+| verify step (6 tokens), everything resident | wall |
+|---|---|
+| reference path (`Model.forward`), 2026-09-10 23:5x | 436 ms |
+| fast path, bf16 dense (00:10) | 183 ms + 16 ms draft |
+| fast path, FP8 dense (07:00) | **173 ms + 15 ms draft** |
+
+Greedy argmax agreement fast vs reference path: 100 % on the tested positions; hidden states differ
+2-5 % from bf16 GEMM noise amplified by near-tie router flips (documented in fastdecode.py).
+
+### 2.3 Speed ladder (greedy, temperature 0, same 40-token code prompt, 160-200 output tokens, DSpark on, fast path, FP8 dense)
+
+| configuration (all 2026-09-11) | resident experts | decode tok/s | accept len | hit rate | NVMe GB / request |
+|---|---|---|---|---|---|
+| unpruned, streaming, arena 79 GB (07:01) | 27 % | 3.5 | 3.24 | 0.826 | 208 |
+| keep 40 % (07:06) | 68 % of kept | 6.4 | 3.02 | 0.943 | 78 |
+| keep 30 % (07:04) | 91 % of kept | 9.5 | 2.76 | 0.986 | 23 |
+| **keep 31 %, arena 90.5 GB = 4,813 slots, transient ring 16 (08:12)** | **100 %** | **12.9** | 2.99 | 1.000 | 0.08 |
+| keep 25 %, arena 79 GB (07:00) | 100 % | 13.6 | 3.09 | 0.999 | 7 |
+
+Prefill (from the 2026-09-10 23:xx Opus-agent work, still valid): 1,860-token prompt TTFT
+118.5 s -> 33.7 s with 2048-token chunks + Decoder SWA Bounded Replay; short prompts 5-11 s.
+
+### 2.4 Quality ladder of pruning (teacher-forced, held-out corpus `corpus/heldout_corpus.jsonl`: code and prose the trace never saw; 5,444 + 5,270 tokens)
+
+Router restricted per layer to the top-N experts by trace frequency (mixed profile); loss in nats.
+
+| kept / layer | coding NLL (Δ) | general NLL (Δ) | time |
+|---|---|---|---|
+| 384 (100 %) | 1.5067 | 3.1884 | 02:45 |
+| 192 (50 %) | 1.5232 (+0.017) | 3.2528 (+0.064) | 02:45 |
+| 154 (40 %) | 1.5285 (+0.022) | 3.3017 (+0.113) | 02:45 |
+| 154 (40 %) + all kept experts at simulated 3-bit codebook | 1.5392 (+0.033) | 3.2122 (+0.024) | 07:50 |
+| 120 (31 %) — the resident configuration above | 1.5729 (+0.066) | 3.3788 (+0.190) | 09:13 |
+| 116 (30 %) | 1.5962 (+0.090) | 3.4241 (+0.236) | 02:45 |
+| 116 (30 %) + coldest 40 % at simulated 3-bit | 1.5817 (+0.075) | 3.4187 (+0.230) | 08:38 |
+| 96 (25 %) | 1.6687 (+0.162) | 3.5079 (+0.320) | 02:45 |
+
+In-sample (trace corpus) deltas are in NOTES.md and are slightly smaller. The simulated 3-bit rows
+use `engine/codebook_sim.py` (per-row 8-of-16 subset of the FP4 grid, 21 % relative weight error);
+the packed format `tools/cb3.py` is bit-exact with it, its kernel `tools/cb3_moe.py` is correct but
+not yet fast (54 GB/s vs 190 for FP4), so no CB3 speed row exists yet.
+
+### 2.5 NVMe (2026-09-10 16:5x, O_DIRECT, 18.8 MB objects; unchanged)
+1 in flight 4.1 GB/s · 8 in flight 5.4 GB/s · 32 in flight 5.6 GB/s.
+
+### What is not measured in this tag
+Thinking-on decode, long-context (>2k) serving, sampled (temperature 1.0) quality A/B, any bench
+sweep, the CB3 format at speed, the container image end to end.

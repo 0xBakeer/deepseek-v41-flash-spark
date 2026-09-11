@@ -121,6 +121,15 @@ FLAGS=(
 )
 [[ -n "$ARENA_GB" ]] && FLAGS+=(--arena-gb "$ARENA_GB")
 [[ "$SPEC" == "0" ]] && FLAGS+=(--no-spec)
+# Pruned all-resident mode (RESULTS.md v0.2.0-wip): PRUNE_KEEP=0.31 keeps the top 31 % experts per
+# layer routable and resident; pair it with ARENA_GB=90.5 TRANSIENT_SLOTS=16 KEEP_FREE_GB=10 on a
+# 128 GB box. Unset = the full model with expert streaming.
+EK="{"
+[[ -n "${PRUNE_KEEP:-}" ]] && EK="$EK\"prune_keep\": $PRUNE_KEEP,"
+[[ -n "${TRANSIENT_SLOTS:-}" ]] && EK="$EK\"transient_slots\": $TRANSIENT_SLOTS,"
+[[ -n "${KEEP_FREE_GB:-}" ]] && EK="$EK\"keep_free_gb\": $KEEP_FREE_GB,"
+EK="${EK%,}}"
+[[ "$EK" != "{}" ]] && FLAGS+=(--engine-kwargs "$EK")
 [[ -n "$TRACE_USED" ]] && FLAGS+=(--trace-stats "$TRACE_USED")
 # shellcheck disable=SC2206
 [[ -n "$EXTRA_FLAGS" ]] && FLAGS+=($EXTRA_FLAGS)

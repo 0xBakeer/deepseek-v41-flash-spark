@@ -34,7 +34,7 @@ done
 # Environment wins over .env, so `PORT=8001 ./start.sh` works.
 declare -A _CLI=()
 for v in MODEL_DIR PYTHON SERVED_MODEL_NAME HOST PORT MAX_SEQ ARENA_GB \
-         TRACE_STATS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS; do
+         TRACE_STATS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP TRANSIENT_SLOTS KEEP_FREE_GB; do
     [[ -n "${!v:-}" ]] && _CLI[$v]="${!v}"
 done
 # shellcheck disable=SC1091
@@ -134,6 +134,15 @@ FLAGS=(
 )
 [[ -n "$ARENA_GB" ]] && FLAGS+=(--arena-gb "$ARENA_GB")
 [[ "$SPEC" == "0" ]] && FLAGS+=(--no-spec)
+# Pruned all-resident mode (RESULTS.md v0.2.0-wip): PRUNE_KEEP=0.31 keeps the top 31 % experts per
+# layer routable and resident; pair it with ARENA_GB=90.5 TRANSIENT_SLOTS=16 KEEP_FREE_GB=10 on a
+# 128 GB box. Unset = the full model with expert streaming.
+EK="{"
+[[ -n "${PRUNE_KEEP:-}" ]] && EK="$EK\"prune_keep\": $PRUNE_KEEP,"
+[[ -n "${TRANSIENT_SLOTS:-}" ]] && EK="$EK\"transient_slots\": $TRANSIENT_SLOTS,"
+[[ -n "${KEEP_FREE_GB:-}" ]] && EK="$EK\"keep_free_gb\": $KEEP_FREE_GB,"
+EK="${EK%,}}"
+[[ "$EK" != "{}" ]] && FLAGS+=(--engine-kwargs "$EK")
 
 # Which coverage.json ranks the warm start. Without one the arena is filled in
 # (layer, expert) index order, which is a measurably worse hot set. Trace

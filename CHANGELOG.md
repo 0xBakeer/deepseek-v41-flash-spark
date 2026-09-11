@@ -101,3 +101,37 @@ one-shot generations and every thinking-on run were stopped before they produced
 so there is no measured long generation and no thinking-mode figure in this repo at all.
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
+
+## 0.2.0-wip — 2026-09-11
+
+**The model math fix and the resident pruned configuration.** Everything in 0.1.0-wip ran on a port
+with a transposed Hyper-Connection residual mix; this tag fixes it and rebuilds the decode path.
+
+### Fixed
+- `tools/v41_ref.py::hc_post`: sum over the first index of `comb` (combᵀ · residual), as in the
+  reference `Block.hc_post`. Teacher-forced coding loss 2.16 -> 1.37 nats; greedy output no longer
+  stutters; DSpark acceptance 2.4 -> 3.75 on code. (commit bd24743, 2026-09-11 00:50)
+- Transient prefill ring must hold a whole layer (>= 384) unless every routable expert is resident.
+
+### Added
+- `engine/fastdecode.py`: CUDA-graph decode path (per-layer graphs, host slot resolve between them),
+  fused HC Sinkhorn Triton kernel (`engine/hc_sinkhorn.py`), bf16 head, masked fixed-length indexer.
+  Verify step 436 -> 173 ms with everything resident.
+- `tools/fp8_linear.py`: dense projections in stored FP8 (Triton, 1.9x bf16 GEMM at decode size);
+  `v41_ref.dense()` dispatch; `DSV41_DENSE_FP8=0` restores bf16 copies.
+- Pruned all-resident serving: `--prune-keep F` (router restricted to the top-F experts per layer by
+  trace frequency, exactly those warm-started), `--prune-sweep` teacher-forced ladder,
+  `--transient-slots`, `--keep-free-gb`, `--arena-gb` pinned sizing.
+- `engine/codebook_sim.py`, `tools/cb3.py`, `tools/cb3_moe.py`: 3-bit per-row codebook expert format
+  (simulation, packer, and a correct-but-slow kernel).
+- `engine/diag_decode.py` (decode == prefill consistency, per layer), `engine/test_fastdecode.py`,
+  `engine/profile_decode.py`, `engine/profile_fast.py`.
+- Held-out corpus `corpus/heldout_corpus.jsonl` (sources in `corpus/heldout_sources/`).
+
+### Measured (RESULTS.md §v0.2.0-wip)
+keep 31 % resident: 12.9 tok/s at +0.07 / +0.19 nats; unpruned streaming 3.5 tok/s; full ladder there.
+
+### Process
+Owner's rules applied from this tag on: no benchmark sweeps without asking (single decode numbers
+only); docs append-only with dates and per-tag sections; engine work done in the main session, not
+delegated; credits limited to the model vendor, the owner's own recipes and the toolchain.

@@ -143,3 +143,19 @@ Known remaining inexactness:
 * The fixed-tile GEMMs cost throughput: a 512-token prefill chunk issues 32 GEMM launches per
   projection instead of 1, and the always-512-wide compressed KV block does more attention work
   than a short prompt needs. Measured cost on the 4-layer smoke test is roughly +10%.
+
+## v0.2.0-wip (2026-09-11) — what is still not done
+
+* **30 tok/s is not reached.** Best measured: 13.6 tok/s (keep 25 %, resident) / 12.9 tok/s (keep 31 %).
+  The graphed verify step is 173 ms + 15 ms draft with everything resident; the weight-streaming floor
+  is ~140 ms. Remaining levers: fewer host round-trips (device-side slot LUT, merged graphs), the
+  `_route_kernel` (6 % of the step), fp32 GEMMs of the HC/gate path, and higher acceptance (thinking
+  on, code prompts).
+* **The full model stays NVMe-bound at 3.5-4 tok/s.** Only pruning changes that on this box.
+* **CB3 (3-bit) kernel is 4x too slow** (54 GB/s vs 190 for FP4); the format and its quality are
+  proven, the kernel needs a per-lane PTX decoder. Until then the 3-bit rows are simulation only.
+* **Pruning keep-sets come from a 10k-token trace** (mixed coding/general). A different workload may
+  want a different hot set; `--hot-profile` exists but was not measured after the fix.
+* The routing trace and the warm-start ranking were recorded before the hc_post fix; they are
+  approximate (routing agreement between the two states is high but not measured).
+* Thinking-on decode, sampled-output quality, long prompts (>2k) and the container image remain unmeasured.
