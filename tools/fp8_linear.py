@@ -104,6 +104,46 @@ class FP8Weight:
         return (self.w.float() * s).to(torch.bfloat16)
 
 
+def quantize_to_fp8(ref: torch.Tensor, rows: int = 4096) -> FP8Weight:
+    """fp32/bf16 [N, K] -> FP8Weight in the checkpoint's own dense format: e4m3 codes plus one
+    UE8M0 power-of-two scale per 32x32 block.
+
+    The dense projections arrive in this format from disk; the LM head does not (it is stored bf16),
+    so this is the quantizer that puts it there. Per block: amax, scale = 2^ceil(log2(amax/448))
+    corrected upward if that would still clip, then the hardware's round-to-nearest-even e4m3
+    conversion. Nothing can overflow: a value <= 448 never rounds above 448, whose neighbour in the
+    grid is 512 with the tie at 480.
+
+    Unlike the FP4 quantizer this one does not need a finer scale table: e4m3 carries its own 4-bit
+    exponent, so the block scale only has to place the block inside the representable range, and the
+    3-bit mantissa fixes the relative error wherever it lands.
+    """
+    assert ref.dim() == 2
+    N, K = ref.shape
+    nb_k = (K + 31) // 32
+    rows = max(32, rows - rows % 32)
+    codes = torch.empty(N, K, dtype=torch.float8_e4m3fn, device=ref.device)
+    scales = torch.empty((N + 31) // 32, nb_k, dtype=torch.uint8, device=ref.device)
+    for r0 in range(0, N, rows):
+        r1 = min(r0 + rows, N)
+        x = ref[r0:r1].float()
+        n = r1 - r0
+        pn, pk = (-n) % 32, (-K) % 32
+        if pn or pk:
+            x = torch.nn.functional.pad(x, (0, pk, 0, pn))
+        xb = x.view((n + pn) // 32, 32, nb_k, 32)
+        amax = xb.abs().amax(dim=(1, 3)).clamp_min(448.0 * 2.0 ** -126)     # [nb, nb_k]
+        e = torch.ceil(torch.log2(amax / 448.0))
+        e = torch.where(amax > 448.0 * torch.exp2(e), e + 1, e)             # never clip
+        b = (e + 127.0).clamp(0, 255)
+        q = (xb / torch.exp2(b - 127.0)[:, None, :, None]).to(torch.float8_e4m3fn)
+        q = q.view((n + pn), K + pk)
+        codes[r0:r1] = q[:n, :K]
+        scales[r0 // 32:(r1 + 31) // 32] = b.to(torch.uint8)
+        del x, xb, amax, e, b, q
+    return FP8Weight(codes, scales)
+
+
 def fp8_linear(x: torch.Tensor, W: FP8Weight) -> torch.Tensor:
     """x bf16 [..., K] -> bf16 [..., N]."""
     shape = x.shape

@@ -97,8 +97,9 @@ class Weights:
         # ("so the logits come out in fp32 directly"); the fast decode path already ran a bf16 copy
         # (fp32 accumulate, logits rounded to bf16), so with a bf16 head here the two paths use the
         # same weights and the 2.65 GB fp32 copy disappears (= ~140 more expert slots).
-        self.head = get("head.weight").to(device)
-        self.head = self.head.float() if os.environ.get("DSV41_HEAD_FP32", "0") == "1" else self.head.to(torch.bfloat16)
+        # ... and, with DSV41_HEAD_FMT, in fp8 or fp4 instead: the head is read in full on every
+        # decode step, so its stored format is worth as much as a dense projection group's.
+        self.head = R.make_head(get("head.weight").to(device))
         self.norm = get("norm.weight").to(device).to(torch.bfloat16)
         self.layers = []
         self.indexers = {}

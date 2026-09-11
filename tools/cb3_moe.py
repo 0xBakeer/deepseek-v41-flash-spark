@@ -20,7 +20,7 @@ import triton.language as tl
 
 import fp4_moe as F4
 from fp4_moe import DIM, INTER, _chunk_dot, _split4, _ue8m0, build_routing, build_routing_small, _pick_bm  # noqa: F401
-from cb3 import dequant_cb3, fp4_to_cb3
+from cb3 import dequant_cb2, dequant_cb3, fp4_to_cb2, fp4_to_cb3
 
 SG1, SG2 = DIM // 32, INTER // 32
 # lo + hi + 8 codebook bytes per row, plus the unchanged UE8M0 scales: 14,454,784 B vs FP4's
@@ -409,15 +409,21 @@ class CB3ArenaV2(CB3Arena):
             self._scratch = sc = F4.ExpertArena(max(slots, UNPACK_BATCH), self.device)
         return sc
 
-    def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3, non_blocking: bool = False) -> None:
-        assert self.sim is not None, "CB3ArenaV2.sim must be a CodebookSim(3)"
+    def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3, non_blocking: bool = False, sim=None) -> None:
+        """`sim` overrides the arena's own CodebookSim for this slot only.
+
+        A CodebookSim with fewer than 3 bits produces a codebook the packer repeats up to 8 entries
+        (cb3._pad_codebook), so the slot keeps its size and its kernel and carries the arithmetic of
+        the narrower format. That is how a 2-bit tier is measured for quality before it is built."""
+        sim = sim or self.sim
+        assert sim is not None, "CB3ArenaV2.sim must be a CodebookSim(3)"
         dev = self.device
         for (w, s, lo_t, hi_t, cb_t, s_t) in ((w1, s1, self.w1_lo, self.w1_hi, self.w1_cb, self.s1),
                                               (w3, s3, self.w3_lo, self.w3_hi, self.w3_cb, self.s3),
                                               (w2, s2, self.w2_lo, self.w2_hi, self.w2_cb, self.s2)):
             wg = w.view(torch.uint8).to(dev, non_blocking=non_blocking)
             sg = s.view(torch.uint8).to(dev, non_blocking=non_blocking)
-            lo, hi, cb = fp4_to_cb3_v2(wg, sg, self.sim)
+            lo, hi, cb = fp4_to_cb3_v2(wg, sg, sim)
             lo_t[slot].copy_(lo); hi_t[slot].copy_(hi); cb_t[slot].copy_(cb); s_t[slot].copy_(sg)
 
     def dequant_slot(self, slot: int):
@@ -842,4 +848,383 @@ def moe_forward_prefill(x: torch.Tensor, slots: torch.Tensor, weights: torch.Ten
         F4._moe_down_kernel[(NB, DIM // bn2)](
             h, scratch.w2, scratch.s2, parts, block_slot, block_pair, h.stride(0), parts.stride(0),
             TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T, num_warps=nw2, num_stages=ns2)
+    return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)
+
+
+# ============================================================================= CB2: the 2-bit tier
+# CB2 is CB3 with the high-bit plane left out (tools/cb3.py): per row a codebook of four FP4 grid
+# codes and two bits per weight, in the same v2 bit positions, with the same UE8M0 scales.
+# 9.99 MB per expert against CB3's 14.45 (0.691x) and FP4's 18.80 (0.531x).
+#
+# Everything below is the v3 CB3 path with the `hi` loads and the high-bit arithmetic removed:
+#   * the PTX decoder loses three instructions per four weights (no high-bit shift, no lop3 fusion
+#     of it) and the codebook lookup needs only ONE prmt source register, because an index of 0..3
+#     never names a byte above lane 3;
+#   * `_pair_dot` no longer depends on the sub-tile's parity, which is what selected the hi bits;
+#   * the row tiles the kernel loads keep their widths -- 128 B per 512-weight block, 64 B per
+#     256-weight block -- so the tile-width cliff that made CB3 reach bandwidth still applies.
+
+CB2_BYTES_PER_SLOT = (2 * (INTER * (DIM // 4 + 4) + INTER * SG1)
+                      + DIM * (INTER // 4 + 4) + DIM * SG2)
+
+
+class CB2ArenaV2:
+    """Same shape as CB3ArenaV2 without the hi planes, and with a 4-entry codebook per row."""
+
+    def __init__(self, slots: int, device: torch.device | str = "cuda"):
+        self.slots = slots
+        self.device = torch.device(device)
+        u8 = dict(dtype=torch.uint8, device=self.device)
+        self.w1_lo = torch.empty((slots, INTER, DIM // 4), **u8)
+        self.w1_cb = torch.empty((slots, INTER, 4), **u8)
+        self.s1 = torch.empty((slots, INTER, SG1), **u8)
+        self.w3_lo = torch.empty((slots, INTER, DIM // 4), **u8)
+        self.w3_cb = torch.empty((slots, INTER, 4), **u8)
+        self.s3 = torch.empty((slots, INTER, SG1), **u8)
+        self.w2_lo = torch.empty((slots, DIM, INTER // 4), **u8)
+        self.w2_cb = torch.empty((slots, DIM, 4), **u8)
+        self.s2 = torch.empty((slots, DIM, SG2), **u8)
+        self.sim = None  # engine.codebook_sim.CodebookSim(2), set by the caller
+
+    @property
+    def bytes_per_slot(self) -> int:
+        return sum(t[0].numel() for t in (self.w1_lo, self.w1_cb, self.s1, self.w3_lo, self.w3_cb,
+                                          self.s3, self.w2_lo, self.w2_cb, self.s2))
+
+    def fp4_scratch(self, slots: int):
+        sc = getattr(self, "_scratch", None)
+        if sc is None or sc.slots < slots:
+            self._scratch = sc = F4.ExpertArena(max(slots, UNPACK_BATCH), self.device)
+        return sc
+
+    def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3, non_blocking: bool = False, sim=None) -> None:
+        sim = sim or self.sim
+        assert sim is not None and sim.bits == 2, "CB2ArenaV2.sim must be a CodebookSim(2)"
+        dev = self.device
+        for (w, s, lo_t, cb_t, s_t) in ((w1, s1, self.w1_lo, self.w1_cb, self.s1),
+                                        (w3, s3, self.w3_lo, self.w3_cb, self.s3),
+                                        (w2, s2, self.w2_lo, self.w2_cb, self.s2)):
+            wg = w.view(torch.uint8).to(dev, non_blocking=non_blocking)
+            sg = s.view(torch.uint8).to(dev, non_blocking=non_blocking)
+            lo, cb = fp4_to_cb2(wg, sg, sim)
+            lo_t[slot].copy_(lo); cb_t[slot].copy_(cb); s_t[slot].copy_(sg)
+
+    def dequant_slot(self, slot: int):
+        return (dequant_cb2(self.w1_lo[slot], self.w1_cb[slot], self.s1[slot]),
+                dequant_cb2(self.w2_lo[slot], self.w2_cb[slot], self.s2[slot]),
+                dequant_cb2(self.w3_lo[slot], self.w3_cb[slot], self.s3[slot]))
+
+
+def _cb2_asm(sh: int) -> str:
+    """7 instructions per half (four weights), 16 per invocation (eight weights), against CB3's 20.
+
+    The byte-lane -> nibble compaction is `_cb3_asm`'s, unchanged: `(a | (a >> 4)) & 0x00FF00FF`
+    then `r | (r >> 8)` leaves the four 2-bit indices as the four low nibbles, which is the selector
+    `prmt` wants. `prmt` takes the codebook register twice because an index of 0..3 only ever names
+    a byte of the first source."""
+    def half(shift, out):
+        return f"""
+shr.b32 a, $1, {shift};
+and.b32 a, a, 0x03030303;
+shr.b32 t, a, 4;
+lop3.b32 r, a, t, 0x00FF00FF, 0xA8;
+shr.b32 t, r, 8;
+or.b32  r, r, t;
+prmt.b32 {out}, $2, $2, r;"""
+    return "{\n.reg .b32 a, t, r, ne, no;" + half(sh, "ne") + half(sh + 2, "no") + """
+shl.b32 no, no, 4;
+or.b32  $0, ne, no;
+}
+"""
+
+
+_ASM2_0 = tl.constexpr(_cb2_asm(0))
+_ASM2_4 = tl.constexpr(_cb2_asm(4))
+
+
+@triton.jit
+def _grp_packed_ptx2(Lk, A, ASM: tl.constexpr):
+    return tl.inline_asm_elementwise(ASM, "=r,r,r", [Lk, A],
+                                     dtype=tl.uint8, is_pure=True, pack=4)
+
+
+@triton.jit
+def _cb2_a(cb_ptr, BN: tl.constexpr):
+    """The row's 4-entry codebook as one [BN, 16] uint8 tile whose every 4-element group is entries
+    0..3, so pack=4 hands `prmt` exactly the source register it needs."""
+    j = tl.arange(0, 16)[None, :]
+    return tl.load(cb_ptr + (j % 4))
+
+
+@triton.jit
+def _pair_dot2(x_base, xk, mask_m, Lk, A, sA, sB):
+    """The two scale groups that share one 16-byte lo sub-tile. Unlike CB3's `_pair_dot` there is no
+    parity argument: the parity only ever chose which half of the hi sub-tile's bits to read."""
+    p0 = _grp_packed_ptx2(Lk, A, _ASM2_0)
+    p1 = _grp_packed_ptx2(Lk, A, _ASM2_4)
+    acc = _chunk_dot(x_base, xk, mask_m, p0, sA)
+    acc += _chunk_dot(x_base + 32, xk, mask_m, p1, sB)
+    return acc
+
+
+@triton.jit
+def _cb2_block_dot(x_base, xk, mask_m, lo_ptr, s_ptr, A, BN: tl.constexpr, BW: tl.constexpr):
+    """One packing block: BW logical K from a [BN, BW/4] lo tile. BW=512 -> a 128 B row tile,
+    BW=256 -> 64 B; both are above the 64 B width at which this box's strided reads reach
+    bandwidth, which the CB3 round measured."""
+    if BW == 512:
+        L = tl.load(lo_ptr)   # [BN, 128]
+        La, Lb, Lc, Ld = _split4(L, BN, 32)
+        L0, L1 = _split2(La, BN, 16)
+        L2, L3 = _split2(Lb, BN, 16)
+        L4, L5 = _split2(Lc, BN, 16)
+        L6, L7 = _split2(Ld, BN, 16)
+        s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15 = _split16(tl.load(s_ptr), BN)
+        acc = _pair_dot2(x_base, xk, mask_m, L0, A, s0, s1)
+        acc += _pair_dot2(x_base + 64, xk, mask_m, L1, A, s2, s3)
+        acc += _pair_dot2(x_base + 128, xk, mask_m, L2, A, s4, s5)
+        acc += _pair_dot2(x_base + 192, xk, mask_m, L3, A, s6, s7)
+        acc += _pair_dot2(x_base + 256, xk, mask_m, L4, A, s8, s9)
+        acc += _pair_dot2(x_base + 320, xk, mask_m, L5, A, s10, s11)
+        acc += _pair_dot2(x_base + 384, xk, mask_m, L6, A, s12, s13)
+        acc += _pair_dot2(x_base + 448, xk, mask_m, L7, A, s14, s15)
+    else:
+        L = tl.load(lo_ptr)   # [BN, 64]
+        L0, L1, L2, L3 = _split4(L, BN, 16)
+        s0, s1, s2, s3, s4, s5, s6, s7 = _split8(tl.load(s_ptr), BN)
+        acc = _pair_dot2(x_base, xk, mask_m, L0, A, s0, s1)
+        acc += _pair_dot2(x_base + 64, xk, mask_m, L1, A, s2, s3)
+        acc += _pair_dot2(x_base + 128, xk, mask_m, L2, A, s4, s5)
+        acc += _pair_dot2(x_base + 192, xk, mask_m, L3, A, s6, s7)
+    return acc
+
+
+@triton.jit
+def _cb2_up_kernel(
+    x_ptr, lo1_ptr, cb1_ptr, s1_ptr, lo3_ptr, cb3_ptr, s3_ptr, h_ptr,
+    wgt_ptr, block_slot_ptr, block_pair_ptr,
+    stride_x, stride_h, limit,
+    TOPK: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr, NB512: tl.constexpr, NB256: tl.constexpr,
+):
+    KL: tl.constexpr = K // 4
+    SG: tl.constexpr = K // 32
+    mb = tl.program_id(0)
+    nb = tl.program_id(1)
+    slot = tl.load(block_slot_ptr + mb)
+    if slot < 0:
+        return
+    slot = slot.to(tl.int64)
+    offs_m = tl.load(block_pair_ptr + mb * BM + tl.arange(0, BM))
+    mask_m = offs_m >= 0
+    offs_m = tl.where(mask_m, offs_m, 0)
+    tok = (offs_m // TOPK).to(tl.int64)
+    offs_n = nb * BN + tl.arange(0, BN)
+    x_base = x_ptr + tok[:, None] * stride_x
+    xk = 2 * tl.arange(0, 16)[None, :]
+    lo1 = lo1_ptr + slot * (N * KL) + offs_n[:, None] * KL
+    lo3 = lo3_ptr + slot * (N * KL) + offs_n[:, None] * KL
+    s1t = s1_ptr + slot * (N * SG) + offs_n[:, None] * SG
+    s3t = s3_ptr + slot * (N * SG) + offs_n[:, None] * SG
+    A1 = _cb2_a(cb1_ptr + slot * (N * 4) + offs_n[:, None] * 4, BN)
+    A3 = _cb2_a(cb3_ptr + slot * (N * 4) + offs_n[:, None] * 4, BN)
+    acc_g = tl.zeros([BM, BN], dtype=tl.float32)
+    acc_u = tl.zeros([BM, BN], dtype=tl.float32)
+    l1a = lo1 + tl.arange(0, 128)[None, :]; s1a = s1t + tl.arange(0, 16)[None, :]
+    l3a = lo3 + tl.arange(0, 128)[None, :]; s3a = s3t + tl.arange(0, 16)[None, :]
+    for b in range(0, NB512):
+        acc_g += _cb2_block_dot(x_base + b * 512, xk, mask_m[:, None], l1a + b * 128, s1a + b * 16, A1, BN, 512)
+        acc_u += _cb2_block_dot(x_base + b * 512, xk, mask_m[:, None], l3a + b * 128, s3a + b * 16, A3, BN, 512)
+    if NB256 > 0:
+        o: tl.constexpr = NB512 * 512
+        l1b = lo1 + (NB512 * 128 + tl.arange(0, 64))[None, :]; s1b = s1t + (NB512 * 16 + tl.arange(0, 8))[None, :]
+        l3b = lo3 + (NB512 * 128 + tl.arange(0, 64))[None, :]; s3b = s3t + (NB512 * 16 + tl.arange(0, 8))[None, :]
+        for b in range(0, NB256):
+            acc_g += _cb2_block_dot(x_base + o + b * 256, xk, mask_m[:, None], l1b + b * 64, s1b + b * 8, A1, BN, 256)
+            acc_u += _cb2_block_dot(x_base + o + b * 256, xk, mask_m[:, None], l3b + b * 64, s3b + b * 8, A3, BN, 256)
+    gate = tl.minimum(acc_g, limit)
+    up = tl.minimum(tl.maximum(acc_u, -limit), limit)
+    wgt = tl.load(wgt_ptr + offs_m, mask=mask_m, other=0.0)
+    h = gate * tl.sigmoid(gate) * up * wgt[:, None]
+    tl.store(h_ptr + offs_m[:, None] * stride_h + offs_n[None, :], h.to(tl.bfloat16), mask=mask_m[:, None])
+
+
+@triton.jit
+def _cb2_down_kernel(
+    h_ptr, lo2_ptr, cb2_ptr, s2_ptr, y_ptr,
+    block_slot_ptr, block_pair_ptr,
+    stride_h, stride_y,
+    TOPK: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr, NTOK: tl.constexpr, NB512: tl.constexpr, NB256: tl.constexpr,
+):
+    KL: tl.constexpr = K // 4
+    SG: tl.constexpr = K // 32
+    mb = tl.program_id(0)
+    nb = tl.program_id(1)
+    slot = tl.load(block_slot_ptr + mb)
+    if slot < 0:
+        return
+    slot = slot.to(tl.int64)
+    offs_m = tl.load(block_pair_ptr + mb * BM + tl.arange(0, BM))
+    mask_m = offs_m >= 0
+    offs_m = tl.where(mask_m, offs_m, 0)
+    offs_n = nb * BN + tl.arange(0, BN)
+    h_base = h_ptr + offs_m[:, None].to(tl.int64) * stride_h
+    xk = 2 * tl.arange(0, 16)[None, :]
+    lo2 = lo2_ptr + slot * (N * KL) + offs_n[:, None] * KL
+    s2t = s2_ptr + slot * (N * SG) + offs_n[:, None] * SG
+    A2 = _cb2_a(cb2_ptr + slot * (N * 4) + offs_n[:, None] * 4, BN)
+    acc = tl.zeros([BM, BN], dtype=tl.float32)
+    l2a = lo2 + tl.arange(0, 128)[None, :]; s2a = s2t + tl.arange(0, 16)[None, :]
+    for b in range(0, NB512):
+        acc += _cb2_block_dot(h_base + b * 512, xk, mask_m[:, None], l2a + b * 128, s2a + b * 16, A2, BN, 512)
+    if NB256 > 0:
+        o: tl.constexpr = NB512 * 512
+        l2b = lo2 + (NB512 * 128 + tl.arange(0, 64))[None, :]; s2b = s2t + (NB512 * 16 + tl.arange(0, 8))[None, :]
+        for b in range(0, NB256):
+            acc += _cb2_block_dot(h_base + o + b * 256, xk, mask_m[:, None], l2b + b * 64, s2b + b * 8, A2, BN, 256)
+    row = ((offs_m % TOPK) * NTOK + offs_m // TOPK).to(tl.int64)
+    tl.store(y_ptr + row[:, None] * stride_y + offs_n[None, :], acc, mask=mask_m[:, None])
+
+
+CB2_UP_CFG = {16: (32, 4, 3), 32: (32, 4, 3), 64: (32, 4, 3)}
+CB2_DOWN_CFG = {16: (32, 4, 3), 32: (32, 4, 3), 64: (32, 4, 3)}
+
+
+def moe_forward_cb2(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, arena: CB2ArenaV2,
+                    swiglu_limit: float = 10.0, block_m: int | None = None,
+                    cfg_up=None, cfg_down=None) -> torch.Tensor:
+    """Decode-shaped MoE over a CB2 arena. Same contract as `moe_forward_v3`."""
+    assert x.dtype == torch.bfloat16 and x.shape[1] == DIM and x.is_contiguous()
+    T, K = slots.shape
+    P = T * K
+    if P >= PREFILL_MIN_P and PREFILL_MODE == "fp4" and block_m is None and cfg_up is None:
+        return moe_forward_cb2_prefill(x, slots, weights, arena, swiglu_limit)
+    dev = x.device
+    BM = block_m or _pick_bm(P)
+    bn1, nw1, ns1 = cfg_up or CB2_UP_CFG[BM]
+    bn2, nw2, ns2 = cfg_down or CB2_DOWN_CFG[BM]
+    if P <= 64:
+        block_slot, block_pair, NB = build_routing_small(slots, BM)
+    else:
+        block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
+    wgt = weights.reshape(-1)
+    if wgt.dtype != torch.float32 or not wgt.is_contiguous():
+        wgt = wgt.float().contiguous()
+    h = torch.empty((P, INTER), dtype=torch.bfloat16, device=dev)
+    parts = torch.empty((P, DIM), dtype=torch.float32, device=dev)
+    _cb2_up_kernel[(NB, INTER // bn1)](
+        x, arena.w1_lo, arena.w1_cb, arena.s1, arena.w3_lo, arena.w3_cb, arena.s3, h,
+        wgt, block_slot, block_pair, x.stride(0), h.stride(0), float(swiglu_limit),
+        TOPK=K, N=INTER, K=DIM, BM=BM, BN=bn1,
+        NB512=CB3.block_plan(DIM)[0], NB256=CB3.block_plan(DIM)[1],
+        num_warps=nw1, num_stages=ns1)
+    _cb2_down_kernel[(NB, DIM // bn2)](
+        h, arena.w2_lo, arena.w2_cb, arena.s2, parts, block_slot, block_pair,
+        h.stride(0), parts.stride(0), TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T,
+        NB512=CB3.block_plan(INTER)[0], NB256=CB3.block_plan(INTER)[1],
+        num_warps=nw2, num_stages=ns2)
+    return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)
+
+
+# ---------------------------------------------------------------------------- CB2 prefill unpack
+@triton.jit
+def _unpack_pair2(out_base, Lk, A, BN: tl.constexpr):
+    j = tl.arange(0, 16)[None, :]
+    tl.store(out_base + j, _grp_packed_ptx2(Lk, A, _ASM2_0))
+    tl.store(out_base + 16 + j, _grp_packed_ptx2(Lk, A, _ASM2_4))
+
+
+@triton.jit
+def _cb2_unpack_kernel(LO, CB, OUT, SRC, N,
+                       KL: tl.constexpr, KB: tl.constexpr,
+                       BN: tl.constexpr, NB512: tl.constexpr, NB256: tl.constexpr):
+    b = tl.program_id(0)
+    nb = tl.program_id(1)
+    src = tl.load(SRC + b).to(tl.int64)
+    offs_n = nb * BN + tl.arange(0, BN)
+    lo = LO + src * (N * KL) + offs_n[:, None] * KL
+    out = OUT + b.to(tl.int64) * (N * KB) + offs_n[:, None] * KB
+    A = _cb2_a(CB + src * (N * 4) + offs_n[:, None] * 4, BN)
+    for j in range(0, NB512):
+        L = tl.load(lo + (j * 128 + tl.arange(0, 128))[None, :])
+        La, Lb, Lc, Ld = _split4(L, BN, 32)
+        L0, L1 = _split2(La, BN, 16)
+        L2, L3 = _split2(Lb, BN, 16)
+        L4, L5 = _split2(Lc, BN, 16)
+        L6, L7 = _split2(Ld, BN, 16)
+        o = out + j * 256
+        _unpack_pair2(o, L0, A, BN)
+        _unpack_pair2(o + 32, L1, A, BN)
+        _unpack_pair2(o + 64, L2, A, BN)
+        _unpack_pair2(o + 96, L3, A, BN)
+        _unpack_pair2(o + 128, L4, A, BN)
+        _unpack_pair2(o + 160, L5, A, BN)
+        _unpack_pair2(o + 192, L6, A, BN)
+        _unpack_pair2(o + 224, L7, A, BN)
+    if NB256 > 0:
+        for j in range(0, NB256):
+            L = tl.load(lo + (NB512 * 128 + j * 64 + tl.arange(0, 64))[None, :])
+            L0, L1, L2, L3 = _split4(L, BN, 16)
+            o = out + NB512 * 256 + j * 128
+            _unpack_pair2(o, L0, A, BN)
+            _unpack_pair2(o + 32, L1, A, BN)
+            _unpack_pair2(o + 64, L2, A, BN)
+            _unpack_pair2(o + 96, L3, A, BN)
+
+
+def _unpack_into_cb2(arena, src_slots: torch.Tensor, scratch) -> None:
+    B = src_slots.numel()
+    BN = 64
+    for (lo, cb, N, K, out, s_src, s_dst) in (
+            (arena.w1_lo, arena.w1_cb, INTER, DIM, scratch.w1, arena.s1, scratch.s1),
+            (arena.w3_lo, arena.w3_cb, INTER, DIM, scratch.w3, arena.s3, scratch.s3),
+            (arena.w2_lo, arena.w2_cb, DIM, INTER, scratch.w2, arena.s2, scratch.s2)):
+        n512, n256 = CB3.block_plan(K)
+        _cb2_unpack_kernel[(B, triton.cdiv(N, BN))](
+            lo, cb, out, src_slots, N, KL=K // 4, KB=K // 2,
+            BN=BN, NB512=n512, NB256=n256, num_warps=4, num_stages=2)
+        s_dst[:B].copy_(s_src[src_slots.long()])
+
+
+def moe_forward_cb2_prefill(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor,
+                            arena: CB2ArenaV2, swiglu_limit: float = 10.0,
+                            batch: int | None = None) -> torch.Tensor:
+    """Prefill-sized call over a CB2 arena: unpack to packed FP4 in batches (bit-exact, the CB2
+    codes are a subset of the FP4 grid) and run the FP4 kernel, exactly as the CB3 path does."""
+    T, K = slots.shape
+    P = T * K
+    dev = x.device
+    batch = batch or UNPACK_BATCH
+    uniq = torch.unique(slots)
+    uniq = uniq[uniq >= 0].to(torch.int32)
+    n = int(uniq.numel())
+    batch = min(batch, n)
+    scratch = arena.fp4_scratch(batch)
+    inv = torch.full((arena.slots,), -1, dtype=torch.int32, device=dev)
+    ar = torch.arange(batch, dtype=torch.int32, device=dev)
+    BM = _pick_bm(P)
+    bn1, nw1, ns1 = F4._UP_CFG[BM]
+    bn2, nw2, ns2 = F4._DOWN_CFG[BM]
+    wgt = weights.reshape(-1)
+    if wgt.dtype != torch.float32 or not wgt.is_contiguous():
+        wgt = wgt.float().contiguous()
+    h = torch.empty((P, INTER), dtype=torch.bfloat16, device=dev)
+    parts = torch.empty((P, DIM), dtype=torch.float32, device=dev)
+    for i in range(0, n, batch):
+        sel = uniq[i:i + batch]
+        b = int(sel.numel())
+        _unpack_into_cb2(arena, sel, scratch)
+        inv.fill_(-1)
+        inv[sel.long()] = ar[:b]
+        s2 = torch.where(slots >= 0, inv[slots.long().clamp_min(0)], slots.to(torch.int32))
+        block_slot, block_pair, NB = build_routing(s2, b, BM)
+        F4._moe_up_kernel[(NB, INTER // bn1)](
+            x, scratch.w1, scratch.s1, scratch.w3, scratch.s3, h, wgt, block_slot, block_pair,
+            x.stride(0), h.stride(0), float(swiglu_limit),
+            TOPK=K, N=INTER, K=DIM, BM=BM, BN=bn1, num_warps=nw1, num_stages=ns1)
+        F4._moe_down_kernel[(NB, DIM // bn2)](
+            h, scratch.w2, scratch.s2, parts, block_slot, block_pair,
+            h.stride(0), parts.stride(0), TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T,
+            num_warps=nw2, num_stages=ns2)
     return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)

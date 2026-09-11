@@ -41,9 +41,9 @@ import torch
 import torch.nn.functional as F
 
 try:
-    from fp8_linear import FP8Weight, fp8_linear  # tools/fp8_linear.py (Triton); dense weights stay fp8 in memory
+    from fp8_linear import FP8Weight, fp8_linear, quantize_to_fp8  # tools/fp8_linear.py (Triton); dense weights stay fp8 in memory
 except Exception:  # noqa: BLE001
-    FP8Weight, fp8_linear = None, None
+    FP8Weight, fp8_linear, quantize_to_fp8 = None, None, None
 
 try:
     from fp8_linear import FP8GroupedWeight, fp8_grouped_linear  # wo_a stays fp8 too (grouped GEMM)
@@ -52,9 +52,9 @@ except Exception:  # noqa: BLE001
 
 try:  # dense projections re-quantized from fp8 to fp4 at load time (opt-in, see dense_fp4_groups)
     from fp4_linear import (FP4GroupedWeight, FP4Weight, fp4_grouped_linear, fp4_linear,
-                            quantize_fp8_grouped_to_fp4, quantize_fp8_to_fp4)
+                            quantize_fp8_grouped_to_fp4, quantize_fp8_to_fp4, quantize_to_fp4)
 except Exception:  # noqa: BLE001
-    FP4Weight, fp4_linear, quantize_fp8_to_fp4 = None, None, None
+    FP4Weight, fp4_linear, quantize_fp8_to_fp4, quantize_to_fp4 = None, None, None, None
     FP4GroupedWeight, fp4_grouped_linear, quantize_fp8_grouped_to_fp4 = None, None, None
 
 
@@ -370,9 +370,85 @@ class EngramWeights:
 MM_TILE = 0  # 0 = plain GEMMs. >0 = run every activation GEMM in fixed-size row tiles; see mm().
 
 
-def head_logits(x: torch.Tensor, head: torch.Tensor) -> torch.Tensor:
+# --------------------------------------------------------------------------- the LM head's format
+# DSV41_HEAD_FMT picks the stored format of `head.weight` ([129280, 5120], the one weight that is
+# read in full on every decode step):
+#   bf16  (default) -- the checkpoint's own dtype, 1.324 GB per read, a cuBLAS GEMM
+#   fp8             -- e4m3 codes + one UE8M0 scale per 32x32 block, 0.663 GB, `_fp8_linear_kernel`
+#   fp4             -- E2M1 codes + one UE8M0 scale per 32 K weights of a row, 0.351 GB,
+#                      `_fp4_linear_kernel`
+# The quantization happens once, on the GPU, as the weight is loaded. DSV41_HEAD_FP32=1 (the
+# reference's fp32 head) stays available and is checked first; the two cannot be combined.
+_HEAD_FMTS = ("bf16", "fp8", "fp4")
+
+
+def head_fmt() -> str:
+    v = os.environ.get("DSV41_HEAD_FMT", "bf16").strip().lower() or "bf16"
+    if v not in _HEAD_FMTS:
+        raise ValueError(f"DSV41_HEAD_FMT: {v!r}; use {' / '.join(_HEAD_FMTS)}")
+    return v
+
+
+def make_head(t: torch.Tensor):
+    """`head.weight` in the format DSV41_HEAD_FMT asks for: a bf16 (or fp32) tensor, an FP8Weight
+    or an FP4Weight. Every consumer goes through `head_logits` or `dense`, both of which dispatch
+    on the object, so nothing else has to know which one it got."""
+    if os.environ.get("DSV41_HEAD_FP32", "0") == "1":
+        assert head_fmt() == "bf16", "DSV41_HEAD_FP32=1 and DSV41_HEAD_FMT are mutually exclusive"
+        return t.float()
+    fmt = head_fmt()
+    if fmt == "bf16":
+        return t.to(torch.bfloat16)
+    if fmt == "fp8":
+        if quantize_to_fp8 is None:
+            raise RuntimeError("DSV41_HEAD_FMT=fp8 but tools/fp8_linear.py could not be imported")
+        return quantize_to_fp8(t.to(torch.bfloat16))
+    if quantize_to_fp4 is None:
+        raise RuntimeError("DSV41_HEAD_FMT=fp4 but tools/fp4_linear.py could not be imported")
+    return quantize_to_fp4(t.to(torch.bfloat16))
+
+
+def _head_blocked(x: torch.Tensor, head, rows: int = 16384) -> torch.Tensor:
+    """Prefill path for a quantized head: dequantize `rows` vocabulary rows at a time and hand each
+    block to cuBLAS.
+
+    Both kernels are bandwidth-shaped -- one fp32 accumulator per output, a 128-wide N tile and a
+    64-row M tile at prefill M -- which is what a 6-row call wants and not what a 512-row one wants:
+    measured on this weight at M = 512 they run at 24-27 TFLOPs against cuBLAS's 80. Dequantizing the whole head
+    to bf16 first would fix that and cost a 1.324 GB transient -- 70 expert slots' worth of arena --
+    so it is done a block at a time instead, 166 MB at 16,384 rows, and the extra DRAM traffic is
+    one read plus one write of the head per call."""
+    N = head.shape[0]
+    out = torch.empty(x.size(0), N, dtype=torch.float32, device=x.device)
+    xb = x.to(torch.bfloat16)
+    for r0 in range(0, N, rows):
+        r1 = min(r0 + rows, N)
+        if FP4Weight is not None and isinstance(head, FP4Weight):
+            blk = dequant_fp4_packed(head.w[r0:r1], head.s[r0:r1])
+        else:
+            sc = torch.exp2(head.s[r0 // 32:(r1 + 31) // 32].float() - 127.0)
+            sc = sc.repeat_interleave(32, 0)[: r1 - r0].repeat_interleave(32, 1)[:, : head.K]
+            blk = (head.w[r0:r1].float() * sc).to(torch.bfloat16)
+            del sc
+        out[:, r0:r1] = F.linear(xb, blk).float()
+        del blk
+    return out
+
+
+def head_logits(x: torch.Tensor, head) -> torch.Tensor:
     """LM-head logits in fp32. A bf16 head runs a bf16 GEMM (fp32 accumulate, bf16 logits) and is
-    what the fast decode path always did; an fp32 head (DSV41_HEAD_FP32=1) is the reference's math."""
+    what the fast decode path always did; an fp32 head (DSV41_HEAD_FP32=1) is the reference's math.
+
+    A quantized head (DSV41_HEAD_FMT) runs its own Triton kernel at decode-sized M and the blocked
+    dequant + cuBLAS above it; DSV41_HEAD_PREFILL=kernel runs the kernel at every M instead."""
+    quant = ((FP8Weight is not None and isinstance(head, FP8Weight))
+             or (FP4Weight is not None and isinstance(head, FP4Weight)))
+    if quant:
+        M = x.numel() // x.shape[-1]
+        if M > 16 and os.environ.get("DSV41_HEAD_PREFILL", "blocked") != "kernel":
+            return _head_blocked(x.reshape(-1, x.shape[-1]), head).view(*x.shape[:-1], head.shape[0])
+        fn = fp8_linear if isinstance(head, FP8Weight) else fp4_linear
+        return fn(x.to(torch.bfloat16), head).float()
     if head.dtype == torch.float32:
         return mm(x.float(), head)
     return mm(x.to(torch.bfloat16), head).float()

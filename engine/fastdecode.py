@@ -115,7 +115,9 @@ class FastDecoder:
         self.d_out = torch.zeros(T_DRAFT, dtype=torch.long, device=dev)
         self.d_probs = torch.zeros(T_DRAFT, a.vocab_size, dtype=torch.float32, device=dev)
         # weights in decode-friendly dtypes (views/copies; small)
-        self.head_bf16 = self.W.head.to(torch.bfloat16)
+        # bf16 tensor, or the FP8Weight / FP4Weight `make_head` produced; `_lin` (= R.dense)
+        # dispatches on the object, so the graphs capture the matching kernel either way.
+        self.head_bf16 = self.W.head.to(torch.bfloat16) if torch.is_tensor(self.W.head) else self.W.head
         self.gate_bf16 = [w.gate_w.to(torch.bfloat16) for w in self.W.layers]
         self.mtp_gate_bf16 = [w.gate_w.to(torch.bfloat16) for w in self.W.mtp]
         self.markov_embed_bf16 = self.W.mtp[2].markov_embed.to(torch.bfloat16)

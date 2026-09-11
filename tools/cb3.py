@@ -59,6 +59,18 @@ def dequant_cb3(lo, hi, cb, scale_e8m0: torch.Tensor) -> torch.Tensor:
     return (vals * s).to(torch.bfloat16)
 
 
+def _pad_codebook(cb: torch.Tensor) -> torch.Tensor:
+    """A CodebookSim with fewer than 3 bits has a codebook of 2^bits < 8 entries; a CB3 slot holds 8.
+
+    Repeating the short codebook until it is 8 long leaves the slot's bytes and its kernel untouched
+    and makes the entries above 2^bits unreachable, because every index the packer writes comes from
+    `sim.pos`, which only ever names a position inside the real subset. The dequantized matrix is
+    then exactly the one a true 2-bit format would carry -- which is what makes a CB3 arena able to
+    SIMULATE the quality of a narrower format at unchanged size."""
+    k = cb.size(1)
+    return cb if k >= 8 else cb.repeat(1, 8 // k)
+
+
 def fp4_to_cb3(w_packed: torch.Tensor, scale: torch.Tensor, sim) -> tuple:
     """Convert one packed-FP4 matrix (uint8 [N, K/2] + scale [N, K/32]) to CB3 using a
     engine.codebook_sim.CodebookSim(3) instance for the per-row codebook choice."""
@@ -69,7 +81,7 @@ def fp4_to_cb3(w_packed: torch.Tensor, scale: torch.Tensor, sim) -> tuple:
     hist = torch.zeros(N, 16, device=x.device, dtype=torch.float32).scatter_add_(1, codes, scale2)
     best = (hist @ sim.cost.T).argmin(dim=1)
     new_codes = sim.near[best][torch.arange(N, device=x.device)[:, None], codes]
-    codebook = torch.tensor(sim.subsets, device=x.device)[best]  # [N, 8]
+    codebook = _pad_codebook(torch.tensor(sim.subsets, device=x.device)[best])  # [N, 8]
     return pack_cb3(new_codes, codebook)
 
 
@@ -123,29 +135,38 @@ def _v2_fields(block_w: int = BLOCK_W):
     return out
 
 
-def pack_idx_v2(idx: torch.Tensor, codebook: torch.Tensor, block_w: int | None = None):
+def pack_idx_v2(idx: torch.Tensor, codebook: torch.Tensor, block_w: int | None = None,
+                hi_plane: bool = True):
     """Pack codebook INDICES (uint8/int16 [N, K], values 0..7) into the v2 planes. This is the hot
     path of the arena packer: `pack_cb3_v2` has to find each code's position in its row codebook with
     an [N, K, 8] comparison (94 MB of temporaries per matrix), which `CodebookSim.pos` makes
-    unnecessary."""
+    unnecessary.
+
+    `hi_plane=False` returns `hi = None` and skips its third of the work. Only a 2-bit codebook may
+    ask for that: its indices are 0..3, so the high-bit plane it would produce is all zeros, and the
+    lo plane it returns is bit-identical to the one the 3-bit path would write for the same
+    indices -- which is what makes CB2 exactly CB3 with the hi plane left out."""
     N, K = idx.shape
     if block_w is None:
         n512, n256 = block_plan(K)
         if n512 and n256:
             cut = n512 * 512
-            a = pack_idx_v2(idx[:, :cut], codebook, 512)
-            b = pack_idx_v2(idx[:, cut:], codebook, 256)
-            return (torch.cat([a[0], b[0]], 1), torch.cat([a[1], b[1]], 1), a[2])
+            a = pack_idx_v2(idx[:, :cut], codebook, 512, hi_plane)
+            b = pack_idx_v2(idx[:, cut:], codebook, 256, hi_plane)
+            return (torch.cat([a[0], b[0]], 1),
+                    torch.cat([a[1], b[1]], 1) if hi_plane else None, a[2])
         block_w = 512 if n512 else 256
     NB, G = K // block_w, block_w // 32
     v5 = idx.view(N, NB, G, 16, 2).to(torch.int16)
     lo = torch.zeros(N, NB, G // 2, 16, dtype=torch.int16, device=idx.device)
-    hi = torch.zeros(N, NB, G // 4, 16, dtype=torch.int16, device=idx.device)
+    hi = torch.zeros(N, NB, G // 4, 16, dtype=torch.int16, device=idx.device) if hi_plane else None
     for g, r, k, sh, m, hb in _v2_fields(block_w):
         v = v5[:, :, g, :, r]
         lo[:, :, k, :] |= (v & 3) << sh
-        hi[:, :, m, :] |= ((v >> 2) & 1) << hb
-    return (lo.reshape(N, K // 4).to(torch.uint8), hi.reshape(N, K // 8).to(torch.uint8),
+        if hi_plane:
+            hi[:, :, m, :] |= ((v >> 2) & 1) << hb
+    return (lo.reshape(N, K // 4).to(torch.uint8),
+            hi.reshape(N, K // 8).to(torch.uint8) if hi_plane else None,
             codebook.to(torch.uint8))
 
 
@@ -223,9 +244,50 @@ def fp4_to_cb3_v2(w_packed: torch.Tensor, scale: torch.Tensor, sim) -> tuple:
     hist = torch.zeros(N, 16, device=x.device, dtype=torch.float32).scatter_add_(1, codes.long(), scale2)
     best = (hist @ sim.cost.T).argmin(dim=1)  # [N]
     rows = torch.arange(N, device=x.device)[:, None]
-    idx = sim.pos[best][rows, codes.long()]           # [N, K] uint8, 0..7
-    codebook = sim.subsets_t[best].long()             # [N, 8]
+    idx = sim.pos[best][rows, codes.long()]                        # [N, K] uint8, 0..2^bits-1
+    codebook = _pad_codebook(sim.subsets_t[best].long())           # [N, 8]
     return pack_idx_v2(idx, codebook)
+
+
+# --------------------------------------------------------------------------- CB2 (2-bit tier)
+# CB2 is CB3 with the high-bit plane left out: per row a codebook of FOUR FP4 grid codes and two
+# bits per weight, in the SAME v2 bit positions the lo plane already uses, with the same UE8M0
+# scales. Bytes per row of K weights: K/4 (codes) + 4 (codebook) + K/32 (scales) -> 2.0 + 0.25
+# bit/weight plus the codebook, against CB3's 3.0 + 0.25. An expert is 9.99 MB instead of 14.45.
+#
+# Because the lo plane is untouched, every tile the kernel loads keeps the width that made CB3 fast
+# (128 B per 512-weight block for K = 5120, 64 B per 256-weight block for the K = 2304 tail) and the
+# activation load pattern of `_chunk_dot` still matches.
+
+
+def fp4_to_cb2(w_packed: torch.Tensor, scale: torch.Tensor, sim) -> tuple:
+    """One packed-FP4 matrix -> (lo uint8 [N, K/4], cb uint8 [N, 4]) via a CodebookSim(2)."""
+    assert sim.bits == 2, f"fp4_to_cb2 needs a CodebookSim(2), got {sim.bits}"
+    N, K2 = w_packed.shape
+    x = w_packed.view(torch.uint8)
+    codes = torch.stack([x & 0x0F, (x >> 4) & 0x0F], dim=-1).reshape(N, K2 * 2)
+    scale2 = torch.exp2(2.0 * (scale.view(torch.uint8).float() - 127.0)).repeat_interleave(32, dim=1)
+    hist = torch.zeros(N, 16, device=x.device, dtype=torch.float32).scatter_add_(1, codes.long(), scale2)
+    best = (hist @ sim.cost.T).argmin(dim=1)
+    rows = torch.arange(N, device=x.device)[:, None]
+    idx = sim.pos[best][rows, codes.long()]           # [N, K] uint8, 0..3
+    codebook = sim.subsets_t[best].long()             # [N, 4]
+    lo, _, cb = pack_idx_v2(idx, codebook, hi_plane=False)
+    return lo, cb
+
+
+def unpack_cb2(lo: torch.Tensor, cb: torch.Tensor, block_w: int | None = None) -> torch.Tensor:
+    """-> long [N, K] FP4 codes in natural K order. The 4-entry codebook is padded to 8 so the
+    shared v2 unpacker can be reused; the high bit it reads is zero by construction."""
+    zeros = torch.zeros(lo.size(0), lo.size(1) // 2, dtype=torch.uint8, device=lo.device)
+    return unpack_cb3_v2(lo, zeros, _pad_codebook(cb), block_w)
+
+
+def dequant_cb2(lo, cb, scale_e8m0: torch.Tensor, block_w: int | None = None) -> torch.Tensor:
+    codes = unpack_cb2(lo, cb, block_w)
+    vals = FP4_TABLE.to(codes.device)[codes]
+    s = torch.exp2(scale_e8m0.view(torch.uint8).float() - 127.0).repeat_interleave(32, 1)
+    return (vals * s).to(torch.bfloat16)
 
 
 if __name__ == "__main__":

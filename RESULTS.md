@@ -408,3 +408,49 @@ the graph harness and a fresh 200-token run is not removable Python. It is one u
 call on the first step, the Engram host-to-device copy absorbing queued graph work by design, and a
 cold Engram row cache — a second decode in the same process costs ~140 ms/step and a third ~133 ms,
 tracking the Engram read time and nothing else.
+
+### 3.4 Addendum 2026-09-11 19:00 — the LM head in FP8, and a 2-bit expert tier that was not built
+
+**The head.** `head.weight` is [129280, 5120] bf16 = 1.324 GB and is read in full twice per decode
+step (the verify step and the DSpark draft); in 3.3's profile it is 5.79 ms of cutlass at 232 GB/s.
+`DSV41_HEAD_FMT` = `bf16` (default) | `fp8` | `fp4` stores it in the dense projections' format
+(e4m3 + one UE8M0 scale per 32x32 block, 0.663 GB, `tools/fp8_linear.py::quantize_to_fp8`) or the
+routed experts' (E2M1 + one scale per 32 K weights of a row, 0.352 GB), quantized on the GPU at
+load; above decode-sized M a quantized head dequantizes 16,384 vocabulary rows at a time into
+cuBLAS. Held-out teacher-forced against the 3.3 baseline (1.5346 / 3.1498), one run each:
+
+| head | coding | general | weight rel err | head GEMM at M=6 | decision |
+|---|---|---|---|---|---|
+| bf16 | 1.5346 | 3.1498 | — | 5.68 ms, 233 GB/s | — |
+| **fp8** | **1.5351 (+0.0004)** | **3.1512 (+0.0014)** | 0.027 | **2.96 ms, 224 GB/s** | **default from this addendum** |
+| fp4 | 1.5502 (+0.0156) | 3.1572 (+0.0074) | 0.118 | 2.38 ms, 148 GB/s | rejected on coding |
+
+With the fp8 head the 200-token greedy output is byte-identical to the bf16 one at matched positions
+(the second decode of each process; in every arm, bf16 included, a process's first decode differs
+from its own second at token 9, because the first step drafts eagerly before any graph exists).
+`engine/test_fastdecode.py` argmax agreement 1.00 / 1.00 on both parities, step 116.5 / 117.8 →
+113.2 / 113.9 ms and draft 14.3 / 13.5 → 11.6 / 10.6. Decode line: 143.0 → 137.2 ms per step,
+21.62 → 22.88 tok/s. In one process with the head swapped under a fixed arena, the verify step is
+118.9 → 114.6 ms and the draft 13.4 → 10.7, with the two CB3 expert kernels unchanged — the
+separate-process form of that A/B measures the arena's page placement instead and reports the
+opposite sign (NOTES 2026-09-11).
+
+**The 2-bit tier: measured, not built.** A CB3 slot filled with a four-entry row codebook repeated
+to its eight entries carries exactly a 2-bit format's arithmetic at unchanged size, so the quality
+question was answered inside the shipped configuration (`--sim-cb2-frac`). Held-out teacher-forced,
+keep 0.40, against the same 1.5346 / 3.1498:
+
+| coldest fraction of the kept set at 2 bits | coding | general |
+|---|---|---|
+| none (shipped) | 1.5346 | 3.1498 |
+| 0.30 (1,840 of 6,160 experts) | 1.5471 (+0.0125) | 3.1966 (**+0.0468**) |
+| 0.50 (3,080 of 6,160 experts) | 1.5563 (+0.0217) | 3.1940 (**+0.0442**) |
+
+The whole prose penalty is paid by the coldest 30 % and does not grow after it, at 1.6x the budget a
+tier would have to fit in. The packed CB2 format and its kernel were built and measured anyway
+(`tools/cb3_moe.py::CB2ArenaV2`, 9.99 MB per expert = 0.691x CB3, bit-exact against the FP4 kernel
+on the same weights): 143.8 GB/s of its own bytes against CB3's 168.7 in the same run, i.e. 0.81x in
+wall time for the cold experts, which carry 22 % of the routed pairs at a 0.50 cold fraction — about
+3 ms of a 119 ms step even before the loss is counted. `EXPERT_FORMAT` keeps its two values; nothing
+in the serving path changed.
+

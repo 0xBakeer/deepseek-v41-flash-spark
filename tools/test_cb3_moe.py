@@ -59,6 +59,22 @@ for name in ("layers.0.ffn.experts.3.w1", "layers.0.ffn.experts.3.w2"):
     bits = (lo2.numel() + hi2.numel() + cb2.numel() + sc.numel()) * 8 / w.numel() / 2
     print(f"       {name}: {bits:.3f} bit/weight, rel err vs FP4 {float((d2.float()-ref.float()).norm()/ref.float().norm()):.4f}")
 
+print("== a narrower codebook inside the same slot (the 2-bit tier's quality simulation) ==")
+sim2 = CodebookSim(2, "cuda")
+for name in ("layers.0.ffn.experts.3.w1", "layers.0.ffn.experts.3.w2"):
+    w = f.get_tensor(name + ".weight").cuda().view(torch.uint8)
+    sc = f.get_tensor(name + ".scale").cuda().view(torch.uint8)
+    lo, hi, cb = CB3.fp4_to_cb3_v2(w, sc, sim2)
+    d = CB3.dequant_cb3_v2(lo, hi, cb, sc)
+    ref_sim2 = R.dequant_fp4_packed(sim2.requant_packed(w, sc), sc)
+    ref = R.dequant_fp4_packed(w, sc)
+    idx_used = CB3.unpack_cb3_v2(lo, hi, torch.arange(8, device=cb.device, dtype=torch.uint8).expand(cb.shape).contiguous())
+    ok(bool((d == ref_sim2).all()), f"{name}: 2-bit codebook in a CB3 slot == codebook_sim(2)")
+    ok(int(idx_used.max()) <= 3, f"{name}: only the first 4 codebook entries are ever indexed")
+    ok(bool((cb[:, :4] == cb[:, 4:]).all()), f"{name}: the 8-entry codebook is the 4-entry one repeated")
+    print(f"       {name}: rel err vs FP4 {float((d.float()-ref.float()).norm()/ref.float().norm()):.4f} "
+          f"(3-bit was printed above); bytes unchanged")
+
 print("== kernels ==")
 a3 = C3.CB3ArenaV2(S, "cuda"); a3.sim = sim
 fp4q = F4.ExpertArena(S, "cuda")
@@ -98,6 +114,62 @@ for T in (1, 6, 64):
             torch.cuda.synchronize()
             dt = (time.perf_counter() - t0) / 20
             print(f"       T=6 top-6, {n_exp} experts: {lbl:26s} {dt*1e3:5.2f} ms  {n_exp*bps/dt/1e9:6.1f} GB/s of expert bytes")
+
+print("== CB2 (2-bit tier): format, kernel, bandwidth ==")
+a2 = C3.CB2ArenaV2(S, "cuda"); a2.sim = sim2
+fp4q2 = F4.ExpertArena(S, "cuda")
+t0 = time.time()
+for s_ in range(S):
+    p = f"layers.0.ffn.experts.{s_}."
+    g = [f.get_tensor(p + n) for n in ("w1.weight", "w1.scale", "w2.weight", "w2.scale", "w3.weight", "w3.scale")]
+    a2.load_slot(s_, *g)
+    fp4q2.load_slot(s_, *g)
+    for wn, sn in (("w1", "s1"), ("w2", "s2"), ("w3", "s3")):
+        wt = getattr(fp4q2, wn)[s_]; st = getattr(fp4q2, sn)[s_]
+        wt.copy_(sim2.requant_packed(wt, st))   # the SAME 4-level weights, in the FP4 arena
+torch.cuda.synchronize()
+print(f"   {S} experts packed in {time.time()-t0:.0f}s: CB2 {a2.bytes_per_slot/1e6:.2f} MB vs CB3 "
+      f"{a3.bytes_per_slot/1e6:.2f} MB ({a2.bytes_per_slot/a3.bytes_per_slot:.3f}x) vs FP4 "
+      f"{fp4q2.bytes_per_slot/1e6:.2f} MB ({a2.bytes_per_slot/fp4q2.bytes_per_slot:.3f}x); "
+      f"{a2.bytes_per_slot*8/(3*F4.INTER*F4.DIM):.3f} bit/weight")
+for name, which in (("layers.0.ffn.experts.3.w1", "w1"), ("layers.0.ffn.experts.3.w2", "w2")):
+    w = f.get_tensor(name + ".weight").cuda().view(torch.uint8)
+    sc = f.get_tensor(name + ".scale").cuda().view(torch.uint8)
+    lo, cb = CB3.fp4_to_cb2(w, sc, sim2)
+    lo3, hi3, cb3_ = CB3.fp4_to_cb3_v2(w, sc, sim2)
+    ok(bool((lo == lo3).all()) and int(hi3.max()) == 0,
+       f"{name}: the CB2 lo plane is the CB3 lo plane and the CB3 hi plane is all zeros")
+    d = CB3.dequant_cb2(lo, cb, sc)
+    ok(bool((d == R.dequant_fp4_packed(sim2.requant_packed(w, sc), sc)).all()),
+       f"{name}: CB2 dequant bit-identical to codebook_sim(2)")
+torch.manual_seed(0)
+for T in (1, 6, 64):
+    x = (torch.randn(T, F4.DIM, device="cuda") * 0.5).to(torch.bfloat16)
+    slots = torch.stack([torch.randperm(S, device="cuda")[:6] for _ in range(T)]).to(torch.int32)
+    wgt = torch.rand(T, 6, device="cuda")
+    fp4_out = F4.moe_forward(x, slots, wgt, fp4q2)
+    y = C3.moe_forward_cb2(x, slots, wgt, a2)
+    r_fp4 = float((y.float() - fp4_out.float()).norm() / fp4_out.float().norm())
+    ok(r_fp4 <= 5e-3, f"T={T}: CB2 kernel vs FP4 kernel on the same 4-level weights rel {r_fp4:.2e}")
+    if T == 6:
+        n_exp = len(torch.unique(slots))
+        for lbl, fn, bps in (("FP4 (4-level weights)", lambda: F4.moe_forward(x, slots, wgt, fp4q2), fp4q2.bytes_per_slot),
+                             ("CB3 v3", lambda: C3.moe_forward_v3(x, slots, wgt, a3), a3.bytes_per_slot),
+                             ("CB2", lambda: C3.moe_forward_cb2(x, slots, wgt, a2), a2.bytes_per_slot)):
+            fn(); torch.cuda.synchronize(); t0 = time.perf_counter()
+            for _ in range(20):
+                fn()
+            torch.cuda.synchronize()
+            dt = (time.perf_counter() - t0) / 20
+            print(f"       T=6 top-6, {n_exp} experts: {lbl:26s} {dt*1e3:5.2f} ms  {n_exp*bps/dt/1e9:6.1f} GB/s of expert bytes")
+# prefill path: the unpack fallback must be bit-exact against the FP4 kernel on the same weights
+xp = (torch.randn(128, F4.DIM, device="cuda") * 0.5).to(torch.bfloat16)
+sp = torch.stack([torch.randperm(S, device="cuda")[:6] for _ in range(128)]).to(torch.int32)
+wp = torch.rand(128, 6, device="cuda")
+yp = C3.moe_forward_cb2(xp, sp, wp, a2)
+rp = F4.moe_forward(xp, sp, wp, fp4q2)
+ok(float((yp.float() - rp.float()).abs().max()) == 0.0,
+   f"T=128 (prefill): CB2 unpack fallback bit-exact vs the FP4 kernel (max |delta| {float((yp.float()-rp.float()).abs().max()):.1e})")
 
 print()
 print("FAILURES:", fails if fails else "none")

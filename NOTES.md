@@ -1623,3 +1623,233 @@ modules.
 * The `to_device` H2D of the Engram rows remains the place where a third of the step's GPU time is
   absorbed. `DSV41_ENGRAM_PINNED=1` moves that wait elsewhere without removing it (measured
   2026-09-11 09:36, unchanged here).
+
+### 2026-09-11 17:00-19:00 -- the LM head in fp8, and a 2-bit expert tier that is not worth building
+
+Two independent pieces of work, each behind its own switch.
+
+#### 1. The LM head's stored format
+
+`head.weight` is [129280, 5120] bf16 = 1.324 GB, and it is the one weight read in full on every
+decode step -- twice, because the DSpark drafter runs the same head over its five positions. In the
+profile of the shipped configuration it is the fifth-largest kernel of the verify step (5.79 ms, a
+cutlass bf16 GEMM at 232 GB/s). Every other weight of that size already has a narrower stored
+format; this is the same move applied to the head.
+
+**The formats.** `DSV41_HEAD_FMT` = `bf16` (default, the checkpoint's dtype) | `fp8` | `fp4`.
+`fp8` is the dense projections' own stored format -- e4m3 codes with one UE8M0 power-of-two scale
+per 32x32 block -- 0.663 GB, 0.5005x. `fp4` is the routed experts' format -- E2M1 codes two per byte
+along K with one UE8M0 scale per 32 consecutive K weights of a row -- 0.352 GB, 0.2656x. The dense
+weights arrive in the fp8 format from disk and the head does not, so `tools/fp8_linear.py` gained
+`quantize_to_fp8` (per 32x32 block: amax, scale = 2^ceil(log2(amax/448)) corrected upward if that
+would still clip, then the hardware's round-to-nearest-even e4m3 conversion; nothing can overflow,
+because a value <= 448 never rounds above 448, whose neighbour in the grid is 512 with the tie at
+480). The fp4 direction reuses `tools/fp4_linear.py::quantize_to_fp4` unchanged. Both run on the GPU
+as the weight is loaded (0.2 s and 0.4 s) inside `v41_ref.make_head`, and every consumer reaches the
+result through `head_logits` or `dense`, which dispatch on the object, so the graphed decode path,
+the un-graphed `Model.forward` and the drafter all follow. `DSV41_HEAD_FP32=1` still selects the
+reference's fp32 head and refuses to combine with the switch.
+
+**Prefill.** Both kernels are shaped for bandwidth, not for arithmetic -- one fp32 accumulator per
+output -- and on this weight at M = 512 they run at 26 and 12 GB/s against
+cuBLAS's 155 (25.31 and 28.23 ms against 8.54). So above M = 16 a quantized head dequantizes 16,384
+vocabulary rows at a time and hands each block to cuBLAS (`v41_ref._head_blocked`): a transient of
+166 MB instead of the 1.324 GB a whole-weight dequant would need, and the extra DRAM traffic is one
+read plus one write of the head per call. `DSV41_HEAD_PREFILL=kernel` runs the decode kernel at
+every M instead.
+
+**The weight and the head's own GEMM**, measured on the real weight with the call cycled over copies
+so nothing is L2-resident (`bf16` is `F.linear`, i.e. the cutlass kernel the profile names):
+
+| format | bytes | weight rel err | M = 6 | M = 512 |
+|---|---|---|---|---|
+| bf16 | 1.324 GB | -- | 5.68 ms, 233 GB/s | 8.54 ms |
+| fp8 | 0.663 GB (0.5005x) | 0.0266 | 2.96 ms, 224 GB/s | 25.31 ms (kernel) |
+| fp4 | 0.352 GB (0.2656x) | 0.1180 | 2.38 ms, 148 GB/s | 28.23 ms (kernel) |
+
+fp8 reads half the bytes at 96 % of bf16's bandwidth and is 1.92x in wall time. fp4 reads 0.266x at
+64 % and is only 0.58 ms better than fp8, for 4.4x the weight error.
+
+**Held-out teacher-forced** (`corpus/heldout_corpus.jsonl`, 5,430 coding + 5,231 general scored
+positions), one run per format, the shipped configuration (keep 0.40, CB3,
+`DSV41_DENSE_FP4=attn,wo_a`):
+
+| `DSV41_HEAD_FMT` | coding NLL | delta | general NLL | delta | top-1 coding / general |
+|---|---|---|---|---|---|
+| bf16 | 1.5346 | -- | 3.1498 | -- | 0.6862 / 0.4580 |
+| **fp8** | **1.5351** | **+0.0004** | **3.1512** | **+0.0014** | 0.6856 / 0.4582 |
+| fp4 | 1.5502 | +0.0156 | 3.1572 | +0.0074 | 0.6867 / 0.4584 |
+
+The bf16 row reproduces the 16:05-17:05 section's numbers exactly. fp8's two deltas are far below
+what a 53-sequence corpus can resolve. fp4's coding delta is not, and it is consistent sequence by
+sequence -- on the four coding sequences checked individually it is +0.013 to +0.018 nats, never the
+mixed signs a noise-sized difference gives -- so fp4 fails the loss gate on coding while passing it
+on prose.
+
+**The generated text.** Two 200-token greedy runs per format in one process, the standard prompt.
+The first decode of a process is not the second: in every arm, bf16 included, the first run's token
+list leaves the second run's at index 9, because the first step runs an un-graphed drafter call and
+the graph capture before any graph exists, so its drafts -- and therefore which tokens share a
+verify block -- differ, and a bf16 GEMM is not row-count-invariant across blocks. Compared at
+matched positions, the second decode of the fp8 process is **byte-identical to the second decode of
+the bf16 process**, 205 tokens, no divergence at all. fp4's text is not compared; it fails the loss
+gate first.
+
+| head | 2nd decode tok/s | accept | steps | ms per step | 1st decode tok/s |
+|---|---|---|---|---|---|
+| bf16 | 21.62 | 3.09 | 66 | 143.0 | 19.32 |
+| **fp8** | **22.88** | 3.14 | 65 | **137.2** | 18.75 |
+| fp4 | 23.35 | 3.12 | 64 | 133.8 | 20.62 |
+
+5.8 ms per step, which is the head's two calls (5.68 + 5.68 -> 2.96 + 2.96 in isolation = 5.4 ms)
+and not an acceptance coin flip: the accepted length is 3.09 against 3.14 and the text is the same
+text.
+
+**`engine/test_fastdecode.py`** (the graphed `FastDecoder` against `Model.forward` on identical
+state), shipped config, `DSV41_HEAD_FMT=fp8`:
+
+| parity | drafts equal | logits rel err | argmax agreement | main_hidden rel | step / draft |
+|---|---|---|---|---|---|
+| 0 | no | 0.0746 | **1.00** | 0.0863 | 113.2 / 11.6 ms |
+| 1 | yes | 0.0158 | **1.00** | 0.0211 | 113.9 / 10.6 ms |
+
+The three rel-err figures are identical to the bf16 row of the 16:05-17:05 section, as they must be:
+both sides of that comparison use whichever head is loaded, so the format cancels. What moves is the
+time -- 116.7 / 117.9 ms of step and 14.4 / 13.5 of draft in bf16 against 113.2 / 113.9 and
+11.6 / 10.6 here.
+
+**Memory.** The head's resident bytes go from 1.324 to 0.663 GB. At the pinned 90.5 GB arena that is
+headroom, not slots. Prefill on the standard prompt is unchanged (1.278 -> 1.266 s) and the
+53-sequence teacher-forced pass costs 3.6 s more (134.6 -> 138.2 s) for the blocked dequant.
+
+**Shipped.** `.env` on the serving box carries `DSV41_HEAD_FMT=fp8`; the code default stays `bf16`.
+It is worth 4.3 ms of a 118.9 ms verify step and 2.7 ms of a 13.4 ms draft, at +0.0004 / +0.0014
+nats and the same generated text.
+
+**`engine/profile_fast.py`, and why it had to be run inside one process.** Run as two separate
+processes the harness says the opposite of everything above: 118.5 ms of step with the bf16 head
+against 123.2-123.8 with fp8, reproducibly (two runs each; the bf16 runs also reproduce the
+16:05-17:05 section's 118.9 to 0.3 %). The head's own line moves exactly as predicted in those runs
+-- 5.79 ms of cutlass becomes +2.95 ms inside `_fp8_linear_kernel` -- and what actually moves is the
+two CB3 expert kernels, which get 12 % slower for no reason the head can supply.
+
+They do not, in one process. Loading the engine once with the bf16 head, timing the step, then
+swapping `FastDecoder.head_bf16` to a `quantize_to_fp8` of the same weight, clearing the captured
+graphs and timing again -- same arena, same pages, nothing else touched:
+
+| | wall step | draft | `_cb3v3_up` | `_cb3v3_down` | `_fp4_linear` | `_fp8_linear` | head (cutlass) | self CUDA |
+|---|---|---|---|---|---|---|---|---|
+| bf16 head | 118.9 | 13.4 | 40.95 | 22.58 | 16.27 | 9.72 | 5.80 | 116.81 |
+| fp8 head | **114.6** | **10.7** | 40.84 | 22.35 | 16.08 | 12.64 | -- | **113.26** |
+
+The expert kernels do not move at all (0.3 % and 1.0 %, both inside this box's run-to-run spread),
+the head's 5.80 ms of cutlass turns into 2.92 ms inside `_fp8_linear_kernel`, and the step and the
+draft fall by 4.3 and 2.7 ms -- 7.0 ms per step + draft, which is what the isolated GEMM timings
+predict. The bf16 column reproduces the 16:05-17:05 profile table row for row.
+
+So the cross-process figure is an artifact of the process, not of the head: `head.weight` is 0.66 GB
+smaller in fp8, so every later allocation -- including the 89 GB expert arena -- lands at a different
+offset, and on this box a purely streaming kernel over 89 GB is sensitive to where its pages sit.
+**Any A/B on this engine that changes a resident allocation's size has to be run inside one process,
+or the arena's placement will be measured instead of the change.**
+
+**Caveats.**
+* The blocked prefill path allocates the fp32 logits for the whole call up front, as the bf16 path
+  always did; at 2,048 rows that is 1.06 GB either way.
+* fp4 is implemented and measured, not used. Its weight error (0.118) is the same 12 % the dense fp4
+  groups carry, and unlike `wq_b` or `wo_a` -- whose outputs are sums over 1,280 to 8,192 terms --
+  the head's output is a sum over 5,120 terms that is then taken an argmax over across 129,280
+  competing rows, which is where the error shows.
+
+#### 2. A 2-bit tier for the coldest resident experts: measured, not built
+
+The routed experts are 63.5 ms of a 118.9 ms verify step (`_cb3v3_up` 41.0 + `_cb3v3_down` 22.5) and
+they are at the bandwidth floor, so the only way down is fewer bytes per expert. CB3 is 3.0 + 0.25
+bit/weight; a per-row codebook of FOUR FP4 grid codes instead of eight would be 2.0 + 0.25, i.e.
+9.99 MB per expert against 14.45 (0.691x). The cold half of a layer's kept set is the natural place
+to spend that, because those experts are rarely routed. The question asked here is what it costs in
+loss and what it would buy, in that order.
+
+**The quality question, answered without building anything.** A CB3 slot holds eight codebook
+entries per row and three bits per weight. Fill it with a FOUR-entry codebook repeated to eight and
+the packer's indices -- which come from `CodebookSim.pos` and never exceed 2^bits - 1 -- only ever
+name the first four: the slot's bytes and the CB3 kernel are untouched and the arithmetic is exactly
+a 2-bit format's. So the shipped configuration itself can be measured with a 2-bit tier inside it,
+all resident, no streaming, the same 90.5 GB arena and the same keep fraction. That is
+`--sim-cb2-frac` / `SIM_CB2_FRAC`: it gives the coldest fraction of every layer's kept set a
+`CodebookSim(2)` at load time (`cb3._pad_codebook`, `CB3ArenaV2.load_slot(..., sim=)`, and a
+per-expert `cb_bits` / `cb_sims` policy on the store). `tools/test_cb3_moe.py` checks that such a
+slot dequantizes bit-identically to `codebook_sim(2)`, that no index above 3 is ever written, and
+that the 8-entry codebook is the 4-entry one repeated.
+
+**Held-out teacher-forced**, one run per arm, keep 0.40, CB3, `DSV41_DENSE_FP4=attn,wo_a`, bf16 head
+-- i.e. the same configuration as the all-3-bit baseline, so the comparison is like for like:
+
+| coldest fraction at 2 bits | experts | coding NLL | delta | general NLL | delta |
+|---|---|---|---|---|---|
+| none (all 3-bit, the shipped row) | 0 of 6,160 | 1.5346 | -- | 3.1498 | -- |
+| 0.30 | 1,840 | 1.5471 | +0.0125 | 3.1966 | **+0.0468** |
+| 0.50 | 3,080 | 1.5563 | +0.0217 | 3.1940 | **+0.0442** |
+
+Coding behaves as one would expect -- +0.013 at 30 % of the set, +0.022 at 50 %, roughly with the
+routing mass the cold part carries. Prose does not: it is already +0.047 at 30 % and does not get
+worse at 50 % (the 0.003 between the two arms is inside this corpus's resolution). The whole prose
+penalty is paid by the coldest 30 % of the kept set, and it is 1.6x the budget on its own. Halving
+the cold fraction again would halve the byte saving, which at 30 % is only 3.5 % of the expert bytes
+per step, so there is no fraction at which this trade is worth a new format.
+
+The weight error is the reason: on a real layer-0 expert the per-row 8-of-16 codebook is 0.21
+relative and the 4-of-16 one is 0.37 -- three times FP4's own 0.12. A cold expert is routed rarely,
+but when it is routed it is routed because the router wanted it, and on prose the model leans on the
+tail of the distribution far more than it does on code.
+
+**The format and the kernel exist, and were measured before the quality answer came back.** CB2 is
+CB3 with the high-bit plane left out: the same v2 bit positions in the lo plane, the same UE8M0
+scales, a four-entry codebook per row (`cb3.fp4_to_cb2` / `dequant_cb2`, `cb3_moe.CB2ArenaV2`,
+`_cb2_up_kernel` / `_cb2_down_kernel`, and the same unpack-to-FP4 fallback for prefill-sized calls).
+The lo plane it writes is bit-identical to the lo plane the CB3 packer writes for the same indices,
+and the hi plane CB3 would write is all zeros, which the unit test asserts. The PTX decoder loses
+three instructions per four weights (no high-bit shift, no lop3 fusion of it) and the codebook
+lookup needs only one `prmt` source register, because an index of 0..3 never names a byte above lane
+3. Tile widths are unchanged -- 128 B per 512-weight block, 64 B per 256-weight block -- so the
+width cliff that made CB3 reach bandwidth still applies.
+
+Correctness and speed, 24 real layer-0 experts, T = 6 top-6 (`tools/test_cb3_moe.py`, one run):
+
+| | bytes/expert | bit/weight | ms | GB/s of its own bytes |
+|---|---|---|---|---|
+| FP4 (on the same 4-level weights) | 18.80 MB | 4.25 | 2.16 | 182.5 |
+| CB3 v3 | 14.45 MB (0.769x) | 3.25 | 1.80 | 168.7 |
+| CB2 | 9.99 MB (0.531x of FP4, 0.691x of CB3) | 2.26 | 1.46 | 143.8 |
+
+CB2 is bit-exact against the FP4 kernel run on the same re-quantized weights at T = 1 and T = 64
+(rel 0.0) and at bf16 rounding at T = 6 (4.7e-5), and its prefill unpack is bit-exact at T = 128
+(max |delta| 0.0). It reads 0.691x of CB3's bytes at 0.85x of CB3's per-byte rate, so it is 0.81x in
+wall time -- real, but 15 % of the saving is given back to the decoder being more instruction-bound
+per byte than CB3's.
+
+**What a two-tier arena would have bought** (per-layer keep sets from the same trace histogram the
+router uses; the eight transient slots ride in the cold tier; arena 90.5 GB):
+
+| keep | cold fraction | CB3 slots | CB2 slots | GB | routing coverage | cold share of routed pairs | expert bytes per step |
+|---|---|---|---|---|---|---|---|
+| 0.40 | 0.00 (shipped) | 6,160 | 0 | 89.1 | 86.30 % | 0 % | 1.000x |
+| 0.40 | 0.30 | 4,320 | 1,840 | 80.9 | 86.30 % | 11.3 % | 0.965x |
+| 0.40 | 0.50 | 3,080 | 3,080 | 75.4 | 86.30 % | 21.9 % | 0.932x |
+| 0.40 | 0.70 | 1,840 | 4,320 | 69.8 | 86.30 % | 36.5 % | 0.887x |
+| 0.45 | 0.50 | 3,480 | 3,440 | 84.8 | 89.27 % | 20.9 % | 0.936x |
+| 0.50 | 0.70 | 2,320 | 5,360 | 87.2 | 91.74 % | 34.3 % | 0.894x |
+| 0.55 | 0.70 | 2,560 | 5,920 | 96.2 | 93.88 % | -- (does not fit) |
+
+The last column assumes CB2 reaches CB3's GB/s, which it does not: at 0.85x of it the 0.932x row
+becomes 0.951x, i.e. 3.1 ms of a 119 ms step. The capacity side is the better half of the trade --
+keep 0.50 at cold 0.70 fits in the same 90.5 GB and is 5.4 points of routing coverage -- but it
+needs the cold fraction the loss numbers rule out twice over.
+
+**Conclusion: the 2-bit tier is not worth building.** The cheapest arm that would pay for itself
+costs 1.6x the loss budget, and the format that would carry it -- which now exists, is unit-tested
+and is bit-exact against the FP4 kernel -- reaches 0.85x of CB3's per-byte rate, so even the
+arithmetic that ignores quality only buys 3 ms of a 119 ms step. `EXPERT_FORMAT` keeps its two
+values (`fp4`, `cb3`); nothing in the serving path changed. `CB2ArenaV2` and its kernels stay in
+`tools/cb3_moe.py` as measured, unused code, next to `moe_forward_v2`, and `--sim-cb2-frac` stays as
+the cheap way to re-ask the quality question if the keep fraction or the corpus ever changes.

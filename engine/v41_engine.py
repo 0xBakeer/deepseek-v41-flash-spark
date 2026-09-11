@@ -167,7 +167,7 @@ class V41Engine:
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
                  hot_profile: str | None = None, prune_keep: float | None = None,
                  sim_bits: int | None = None, sim_cold_frac: float = 1.0, prune_select: str = "uniform",
-                 expert_format: str = "fp4"):
+                 expert_format: str = "fp4", sim_cb2_frac: float = 0.0):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
@@ -185,6 +185,8 @@ class V41Engine:
         self.trace_stats = trace_stats
         self.expert_format = (expert_format or "fp4").lower()
         assert self.expert_format in ("fp4", "cb3"), self.expert_format
+        self.sim_cb2_frac = float(sim_cb2_frac or 0.0)
+        assert 0.0 <= self.sim_cb2_frac <= 1.0, self.sim_cb2_frac
         try:
             import fp4_moe as K
             fp4_moe_fn, fp4_arena_cls = K.moe_forward, K.ExpertArena
@@ -309,6 +311,23 @@ class V41Engine:
                 self.store.requant = pol
                 log(f"simulated {sim_bits}-bit codebook format on {len(pol)} of {len(ranked)} kept experts "
                     f"(coldest {sim_cold_frac:.0%} per layer)")
+            if self.sim_cb2_frac > 0:
+                # Quality-only simulation of a 2-bit tier INSIDE the CB3 arena: the coldest
+                # `sim_cb2_frac` of every layer's kept set get a 4-of-16 row codebook repeated up to
+                # the slot's 8 entries, so the slot's bytes and the CB3 kernel are untouched and the
+                # arithmetic is a real 2-bit format's. Nothing is saved -- what it answers is whether
+                # saving it would be worth building.
+                assert self.expert_format == "cb3", "--sim-cb2-frac needs --expert-format cb3"
+                from engine.codebook_sim import CodebookSim
+                self.store.cb_sims = {2: CodebookSim(2, device)}
+                pol2 = {}
+                for L, ks in keep.items():
+                    n_cold = int(round(self.sim_cb2_frac * len(ks)))
+                    for e in ks[len(ks) - n_cold:]:
+                        pol2[(L, int(e))] = 2
+                self.store.cb_bits = pol2
+                log(f"simulated 2-bit codebook on {len(pol2)} of {len(ranked)} kept experts "
+                    f"(coldest {self.sim_cb2_frac:.0%} per layer); slot size unchanged")
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
             log(f"pruned mode ({prune_select}): keep {prune_keep:.2f}, {len(ranked)} experts total "
@@ -641,6 +660,8 @@ class V41Engine:
             "expert_format": self.expert_format,
             "expert_mb": round(self.expert_bytes / 1e6, 2),
             "dense_fp4": ",".join(sorted(R.dense_fp4_groups())) or "off",
+            "head_fmt": R.head_fmt(),
+            "sim_cb2_frac": self.sim_cb2_frac,
             "act_quant": self.act_quant,
             "swa_replay": self.swa_replay,
             "prune_keep": self.prune_keep,
@@ -804,6 +825,10 @@ if __name__ == "__main__":
                          "start, which fits ~40.8%% of all routed experts in 90.5 GB instead of 31.3%%")
     ap.add_argument("--sim-bits", type=int, default=None, help="simulate a 2/3-bit per-row codebook expert format (quality only)")
     ap.add_argument("--sim-cold-frac", type=float, default=1.0, help="fraction of the kept experts (coldest first) that get --sim-bits")
+    ap.add_argument("--sim-cb2-frac", type=float, default=float(os.environ.get("SIM_CB2_FRAC") or 0.0),
+                    help="with --expert-format cb3: give the coldest fraction of the kept experts a 2-bit "
+                         "row codebook inside their (unchanged) CB3 slot. Quality only -- no bytes are "
+                         "saved; it measures what a real 2-bit tier would cost")
     ap.add_argument("--prune-keep", type=float, default=None,
                     help="serve a REAP-style pruned model: only the top-F experts per layer are routable and all of "
                          "them are resident (F <= ~0.25 fits the arena on a 128 GB box)")
@@ -822,6 +847,7 @@ if __name__ == "__main__":
                     spec=not a.no_spec, act_quant=a.act_quant,
                     swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep, prune_select=a.prune_select,
                     sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac, expert_format=a.expert_format,
+                    sim_cb2_frac=a.sim_cb2_frac,
                     **({"transient_slots": a.transient_slots} if a.transient_slots else {}),
                     **({"keep_free_gb": a.keep_free_gb} if a.keep_free_gb else {}))
     if a.verify_replay:
