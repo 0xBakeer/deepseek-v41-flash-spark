@@ -178,3 +178,15 @@ Known remaining inexactness:
   projections), fewer of the ~5,300 small kernels per step, or higher acceptance, not from faster
   kernels for the same bytes.
 * **Thinking-on, 8k+ prompts and sampled A/B are not measured in the CB3 configuration.**
+
+## 2026-09-11 20:45 — the fast decode path's precision
+
+* **`DSV41_FUSED_ATTN` defaults to 0.** With the dense projections in fp4 and the fp8 head, greedy
+  decoding through the fused attention kernel diverges from the same decode without it and can enter
+  a repetition loop (NOTES 2026-09-11 20:00-20:45). Each piece is clean on its own.
+* **The graphed decode path is not numerically equal to `Model.forward`**: its logits differ by a
+  few percent relative, which is far more than bf16 rounding and is not yet explained. It has been
+  so since the path was written; only the combination above made it visible.
+* **Teacher-forced loss cannot gate the decode path.** It never runs the loop, so a verification,
+  cache or drafter fault is invisible to it. Use `engine/test_spec_lossless.py`, which requires
+  greedy decoding with and without speculation to produce identical tokens.

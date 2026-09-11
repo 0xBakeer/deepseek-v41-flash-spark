@@ -44,7 +44,11 @@ except Exception:  # noqa: BLE001
 
 # One fused Triton kernel for the sinked softmax attention instead of two fp32 SIMT batched GEMMs
 # and the elementwise passes around them. DSV41_FUSED_ATTN=0 restores the torch path.
-FUSED_ATTN = os.environ.get("DSV41_FUSED_ATTN", "1") == "1" and decode_attention is not None
+# Default OFF since 2026-09-11: with the dense projections in fp4 and the fp8 head, greedy
+# decoding through this kernel diverges from the same decode without it and can fall into a
+# repetition loop (NOTES 2026-09-11 20:30, engine/test_spec_lossless.py). Each piece is fine
+# alone; together they cross the precision the verify step needs. DSV41_FUSED_ATTN=1 re-enables.
+FUSED_ATTN = os.environ.get("DSV41_FUSED_ATTN", "0") == "1" and decode_attention is not None
 # Split-K Triton kernel for the skinny fp32 projections (the HC mix GEMM: M=6, N=24, K=20480, where
 # cuBLAS is latency-bound at ~30 GB/s). DSV41_HC_KERNEL=0 restores F.linear everywhere.
 HC_KERNEL = os.environ.get("DSV41_HC_KERNEL", "1") == "1" and skinny_linear is not None

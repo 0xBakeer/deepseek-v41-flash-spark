@@ -2060,3 +2060,49 @@ with `finish_reason: tool_calls` and two well-formed calls. Not diagnosed: why t
 attribute form at all. It is a formatting deviation of the model, more likely under long
 tool-definition prompts, and this configuration is pruned and re-quantized, so the deviation rate
 may differ from the full checkpoint's.
+
+### 2026-09-11 20:00-20:45 -- greedy decoding fell into a repetition loop; the fused attention kernel is off by default
+
+Reported from two clients at once: asked for a single-file HTML game, the engine wrote
+
+```
+<!DOCTYPE HTML>
+<html<!DOCTYPE HTML>
+<html<!DOCTYPE HTML>
+```
+
+for as many tokens as it was allowed, at a DSpark acceptance of 4.76 against the 3.0-3.2 every other
+run showed. The high acceptance is the tell: the drafter was predicting perfectly because the target
+was producing the same few tokens every step.
+
+Isolation, same prompt, greedy, 200 tokens, one run each (`results/htmlbug/`):
+
+| fused attention kernel | dense fp4 | LM head | output | acceptance | tok/s |
+|---|---|---|---|---|---|
+| on (graphed fast path) | attn,wo_a | fp8 | **the loop** | 4.76 | 35.5 |
+| not used (`DSV41_FAST=0`, un-graphed block) | attn,wo_a | fp8 | clean HTML | 4.10 | 12.0 |
+| **off** (`DSV41_FUSED_ATTN=0`) | attn,wo_a | fp8 | **clean HTML** | 3.10 | 18.0 |
+| on | off | bf16 | clean HTML | 3.85 | 23.9 |
+| speculation off entirely | attn,wo_a | fp8 | clean HTML | -- | 3.8 |
+
+So no single piece is broken: the kernel is clean with bf16 dense projections and a bf16 head, and
+the quantized projections are clean with the torch attention. Together they cross the precision the
+verify step needs, one near-tie flips (`<html` followed by `>` or by another `<!DOCTYPE`), and
+greedy decoding has no way out of the loop it lands in. Speculative decoding is supposed to be
+lossless -- the target verifies every drafted token -- so any divergence between decoding with and
+without it is a defect by definition, whatever its size.
+
+`DSV41_FUSED_ATTN` now defaults to 0. It was worth ~2 ms of a 119 ms step, so the shipped
+configuration keeps the dense fp4 projections and the fp8 head, which are worth ~15 ms together.
+
+What let this through: every gate used this month was teacher-forced loss, which scores text the
+model is shown and never runs the decode loop, so it cannot see a verification fault. The loss of
+the broken configuration is the best in the repo. `engine/test_spec_lossless.py` is the missing
+gate -- it generates the same prompts greedily with and without speculation and requires the token
+sequences to be identical -- and it belongs in front of any future change to the decode path.
+
+Not fixed, only disabled: why the kernel's error is large enough to matter. Its unit test agrees
+with the torch path to ~1e-4 on the attention output, and the fast path's logits have differed from
+`Model.forward` by several percent since it was written (0.15 before this kernel, 0.07 after), which
+was filed as bf16 noise and is too large for that. Both belong in a proper accuracy pass of the fast
+path rather than a speed round.
