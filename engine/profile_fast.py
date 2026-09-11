@@ -3,7 +3,12 @@ import os, sys, time, torch
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, ".."))
 from engine.v41_engine import V41Engine, log
 md = os.path.expanduser("~/models/DeepSeek-V4.1-Flash")
-eng = V41Engine(md, max_seq=8192, trace_stats="results/trace-full-20260910/stats/coverage.json", spec=True, prune_keep=float(os.environ.get("PK", "0.31")), arena_gb=float(os.environ.get("AG", "90.5")), transient_slots=8, keep_free_gb=10)
+eng = V41Engine(md, max_seq=8192, trace_stats="results/trace-full-20260910/stats/coverage.json", spec=True,
+                prune_keep=float(os.environ.get("PK", "0.31")), arena_gb=float(os.environ.get("AG", "90.5")),
+                transient_slots=int(os.environ.get("TRANSIENT_SLOTS", "8")),
+                keep_free_gb=float(os.environ.get("KEEP_FREE_GB", "10")),
+                expert_format=os.environ.get("EXPERT_FORMAT", "fp4"))
+print("config:", {k: eng.config()[k] for k in ("expert_format", "prune_keep", "arena_slots", "dense_fp4")})
 sys.path.insert(0, os.path.join(md, "encoding")); from encoding import encode_messages
 pr = encode_messages([{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number, with tests."}], thinking_mode="chat")
 ids = eng.tokenizer.encode(pr if isinstance(pr, str) else pr[0], add_special_tokens=False)

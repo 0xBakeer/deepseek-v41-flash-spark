@@ -356,3 +356,24 @@ cold in CB3) is not built; at 40.8 % all-CB3 there is no headroom in 90.5 GB for
 ### What is not measured in this tag
 Thinking-on decode in this configuration, sampled quality A/B, long-context (8k+) serving in this
 configuration, the container image end to end.
+
+### 3.2 Addendum 2026-09-11 16:00 — attention projections in FP4 (served config, `DSV41_DENSE_FP4=attn`)
+
+Dense bytes per verify step (from the safetensors headers): attention projections 3,734 MB,
+shared experts 1,417 MB, `wo_a` 1,344 MB, other 436 MB. A dense FP4 kernel (`tools/fp4_linear.py`,
+E2M1 codes + one UE8M0 scale per 32 weights along K, quantized at load from the stored FP8; unit
+test `tools/test_fp4_linear.py`) reads 0.53x the bytes and wins on the wide matrices (`wq_b`,
+`wo_b`: 199 GB/s of FP4 vs 221 of FP8) but not on the narrow ones. Held-out teacher-forced, one run
+per setting, against the keep-40 % CB3 baseline 1.5384 / 3.2087:
+
+| group in FP4 | coding | general | decision |
+|---|---|---|---|
+| shared experts | 1.5531 (+0.015) | 3.2740 (+0.065) | kept in FP8 |
+| attention projections | **1.5403 (+0.002)** | **3.1738 (−0.035)** | **default from this addendum** |
+| both | 1.5527 (+0.014) | 3.2323 (+0.024) | kept in FP8 |
+
+The −0.035 on general is within what a 53-sequence corpus can resolve, not a gain. Decode line
+back to back: 19.11 tok/s (acceptance 3.03) → **20.85 tok/s** (acceptance 3.23); prefill 4.12 →
+3.28 s on the same prompt; verify step on `engine/profile_fast.py` 134.4 → 125.6 ms; 1.75 GiB of
+resident weights freed. The shared experts are the one dense FFN every token passes through and
+the FP4 weight error (12 % relative) shows there; `wo_a` stays FP8 through the grouped kernel.

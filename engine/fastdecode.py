@@ -64,7 +64,7 @@ T_VERIFY = 6   # tok + 5 drafts
 T_DRAFT = 5
 
 
-def _lin(x, w):  # bf16 tensor -> cuBLAS; FP8Weight -> Triton fp8 kernel (stored format, half the bytes)
+def _lin(x, w):  # bf16 tensor -> cuBLAS; FP8Weight/FP4Weight -> the Triton kernel for that stored format
     return R.dense(x, w)
 
 

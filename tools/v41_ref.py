@@ -50,6 +50,57 @@ try:
 except Exception:  # noqa: BLE001
     FP8GroupedWeight, fp8_grouped_linear = None, None
 
+try:  # dense projections re-quantized from fp8 to fp4 at load time (opt-in, see dense_fp4_groups)
+    from fp4_linear import FP4Weight, fp4_linear, quantize_fp8_to_fp4
+except Exception:  # noqa: BLE001
+    FP4Weight, fp4_linear, quantize_fp8_to_fp4 = None, None, None
+
+
+# --------------------------------------------------------------------------- dense FP4 opt-in
+# DSV41_DENSE_FP4 selects which groups of dense projections are re-quantized from their stored fp8
+# (e4m3 + UE8M0 32x32 block scales) to fp4 (E2M1 + one UE8M0 scale per 32 K weights of a row) when
+# the weights are loaded:
+#   off              (default) -- everything stays fp8, the old path
+#   shared           -- ffn.shared_experts.w1/w2/w3 of every backbone layer and DSpark block
+#   attn             -- attn.wq_a, attn.wq_b, attn.wkv, attn.wo_b (the `_fp8_linear_kernel` group)
+#   shared,attn      -- both;  "all" is the same thing
+# attn.wo_a (the grouped kernel), the indexer wq_b, the engram wkv and mtp.0.main_proj always stay
+# fp8 -- they are not covered by this switch.
+_FP4_ALIASES = {"all": ("shared", "attn"), "on": ("shared", "attn"), "1": ("shared", "attn")}
+
+
+def dense_fp4_groups() -> frozenset:
+    v = os.environ.get("DSV41_DENSE_FP4", "off").strip().lower()
+    if v in ("", "off", "0", "none"):
+        return frozenset()
+    out = set()
+    for part in v.replace(" ", "").split(","):
+        if not part:
+            continue
+        out.update(_FP4_ALIASES.get(part, (part,)))
+    unknown = out - {"shared", "attn"}
+    if unknown:
+        raise ValueError(f"DSV41_DENSE_FP4: unknown group(s) {sorted(unknown)}; use shared / attn / all / off")
+    if out and FP4Weight is None:
+        raise RuntimeError("DSV41_DENSE_FP4 is set but tools/fp4_linear.py could not be imported")
+    return frozenset(out)
+
+
+_FP4_GROUP_OF = {
+    "attn.wq_a": "attn", "attn.wq_b": "attn", "attn.wkv": "attn", "attn.wo_b": "attn",
+    "ffn.shared_experts.w1": "shared", "ffn.shared_experts.w2": "shared", "ffn.shared_experts.w3": "shared",
+}
+
+
+def maybe_fp4(w, name: str, groups):
+    """Re-quantize an FP8Weight to FP4 if `name`'s group is enabled. `name` is the suffix inside the
+    layer / DSpark block, e.g. "attn.wq_b" or "ffn.shared_experts.w1"."""
+    if not groups or not isinstance(w, FP8Weight) or _FP4_GROUP_OF.get(name) not in groups:
+        return w
+    out = quantize_fp8_to_fp4(w)
+    del w
+    return out
+
 FP4_TABLE = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
@@ -223,10 +274,13 @@ class LayerWeights:
         def f32(name):
             return get(p + name).to(dev).to(torch.float32)
 
+        fp4_groups = dense_fp4_groups()
+
         def fp8lin(name):
             w, sc = get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev)
             if FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1":
-                return FP8Weight(w, sc)  # kept in the stored format: half the bytes of bf16
+                # kept in the stored format: half the bytes of bf16, and fp4 again if enabled
+                return maybe_fp4(FP8Weight(w, sc), name, fp4_groups)
             return dequant_fp8_block(w, sc)
 
         self.attn_norm = bf("attn_norm.weight")
@@ -315,8 +369,8 @@ def mm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     the result identical for any chunk length. Set MM_TILE from engine/model.py; 0 keeps the
     plain behaviour for tools/expert_trace.py and the stored reference trace.
     """
-    if FP8Weight is not None and isinstance(w, FP8Weight):
-        return dense(x, w)  # fp8 kernel (decode) / transient dequant (prefill); not row-tiled
+    if (FP8Weight is not None and isinstance(w, FP8Weight)) or (FP4Weight is not None and isinstance(w, FP4Weight)):
+        return dense(x, w)  # quantized-weight kernel; row-invariant by construction, not row-tiled
     B = MM_TILE
     if B <= 0 or x.ndim != 2 or x.size(0) == B:
         return F.linear(x, w)
@@ -364,8 +418,15 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 def dense(x: torch.Tensor, w) -> torch.Tensor:
-    """x @ w^T where w is a bf16 tensor or an FP8Weight (stored-format fp8 + ue8m0 block scales).
-    FP8Weight: the Triton kernel for decode-sized M, otherwise a transient bf16 dequant + cuBLAS."""
+    """x @ w^T where w is a bf16 tensor, an FP8Weight (stored-format fp8 + ue8m0 block scales) or an
+    FP4Weight (E2M1 codes + one ue8m0 scale per 32 K weights).
+    FP8Weight: the Triton kernel for decode-sized M, otherwise a transient bf16 dequant + cuBLAS.
+    FP4Weight: the Triton kernel at every M (BLOCK_M 16 / 64); DSV41_FP4_DENSE_PREFILL=dequant
+    restores the transient-dequant + cuBLAS shape of the fp8 path for M > 16."""
+    if FP4Weight is not None and isinstance(w, FP4Weight):
+        if x.numel() // x.shape[-1] <= 16 or os.environ.get("DSV41_FP4_DENSE_PREFILL", "kernel") == "kernel":
+            return fp4_linear(x, w)
+        return F.linear(x.to(torch.bfloat16), w.dequant())
     if FP8Weight is not None and isinstance(w, FP8Weight):
         if x.numel() // x.shape[-1] <= 16:
             return fp8_linear(x, w)

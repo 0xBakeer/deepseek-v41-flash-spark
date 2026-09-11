@@ -145,10 +145,12 @@ class MTPWeights:
         def f32(name):
             return get(p + name).to(dev).to(torch.float32)
 
+        fp4_groups = R.dense_fp4_groups()
+
         def fp8lin(name):
             w, sc = get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev)
             if R.FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1":
-                return R.FP8Weight(w, sc)
+                return R.maybe_fp4(R.FP8Weight(w, sc), name, fp4_groups)
             return R.dequant_fp8_block(w, sc)
 
         self.attn_norm = bf("attn_norm.weight"); self.ffn_norm = bf("ffn_norm.weight")

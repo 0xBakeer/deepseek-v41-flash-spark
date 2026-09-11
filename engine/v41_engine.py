@@ -176,6 +176,12 @@ class V41Engine:
                              else __import__("cb3_moe").CB3_BYTES_PER_SLOT)
 
         self.W = Weights(model_dir, index, self.args, device, log=log, act_quant=act_quant)
+        if R.dense_fp4_groups():
+            # the load-time fp8 -> fp4 re-quantization leaves ~2.4 GB of fp32 scratch blocks in the
+            # caching allocator; hand them back before the expert arena asks for its 90 GB.
+            torch.cuda.empty_cache()
+            log(f"dense fp4 groups: {','.join(sorted(R.dense_fp4_groups()))}; "
+                f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated after weights")
         self.caches = Caches(self.args, max_seq, device)
         # DSpark experts: all resident
         self.W.dspark_arena = arena_cls(384, device)
@@ -479,6 +485,7 @@ class V41Engine:
             "kernel": self.kernel,
             "expert_format": self.expert_format,
             "expert_mb": round(self.expert_bytes / 1e6, 2),
+            "dense_fp4": ",".join(sorted(R.dense_fp4_groups())) or "off",
             "act_quant": self.act_quant,
             "swa_replay": self.swa_replay,
             "prune_keep": self.prune_keep,

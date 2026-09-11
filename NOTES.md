@@ -1198,3 +1198,180 @@ Faster and better on every axis except warm start, so the box's `.env` moves to
   config, and the prefill path avoids the CB3 kernel entirely, so it cannot be hit there either.
 * The mixed hot-FP4 / cold-CB3 arena is still not built. At 40.8 % all-CB3 there is no headroom left
   in 90.5 GB anyway; it would be a quality refinement (hot experts back at FP4), not a capacity one.
+
+### 2026-09-11 14:30-16:00 -- the dense projections in FP4: attention yes, shared experts no
+
+The routed experts have been 4-bit since the start (the checkpoint stores them that way) and are now
+3-bit (CB3). Everything else -- the dense projections -- is still the checkpoint's fp8: e4m3 weights
+with one UE8M0 power-of-two scale per 32x32 block, read by `_fp8_linear_kernel`
+(tools/fp8_linear.py). In the profile of one graphed verify step that kernel is 294 calls and
+29.4 ms, the second-largest GPU item after the two CB3 kernels.
+
+**What those 294 calls are, and what they weigh.** `tools/dense_inventory.py` reads the safetensors
+headers and the config and prints the inventory; it needs no GPU and loads no tensor. The verify
+step runs, once: the four `_fp8_linear_kernel` projections of each of the 40 backbone layers
+(`attn.wq_a`, `attn.wq_b`, `attn.wkv`, `attn.wo_b`), their shared-expert FFN (`w1`, `w2`, `w3`),
+`attn.wo_a` on the grouped kernel, one indexer `wq_b` on each of the 8 index-source layers, one
+engram `wkv` on each of the 2 engram layers, and in `_final` `mtp.0.main_proj` plus the three DSpark
+blocks' `attn.wkv`. 163 + 120 + 11 = 294, which is exactly the count in the profile.
+
+| group | calls per step | MB per step | the same in fp4 | saved |
+|---|---|---|---|---|
+| attention (wq_a, wq_b, wkv, wo_b) | 163 | 3734.0 | 1981.7 | 1752.2 |
+| shared experts (w1, w2, w3) | 120 | 1417.0 | 752.0 | 664.9 |
+| wo_a (grouped kernel, untouched) | 40 | 1343.5 | 713.0 | 630.5 |
+| other (indexer wq_b, engram wkv, main_proj) | 11 | 435.6 | 231.2 | 204.4 |
+| **total** | **334** | **6930.0** | **3678.0** | **3252.0** |
+
+Per weight: `wq_b` [32768, 1280] and `wo_b` [5120, 8192] are 41.98 MB each and are 90 % of the
+attention row; `wq_a` is 6.56 and `wkv` 2.62; the three shared-expert matrices are 11.81 MB each.
+The single largest dense read of the step is the engram `wkv` [25600, 6144] at 157.44 MB, twice.
+
+**The format.** Same as the routed experts: E2M1 codes packed two per byte along K (low nibble =
+even element) plus one UE8M0 scale per 32 consecutive K weights of a row. That scale table is 32x
+finer than the fp8 one (per row per 32 K, not per 32x32 block), so the ratio is not 1/2 but
+(1/2 + 1/32) / (1 + 1/1024) = **0.5307**. `tools/fp4_linear.py::quantize_fp8_to_fp4` does the
+conversion once at load time, a row block at a time: dequantize to fp32 with the stored block
+scales, per-32-group amax, scale = 2^ceil(log2(amax/6)) corrected upward if that would still clip,
+then round to nearest on the E2M1 grid with ties to even. Ties are not measure-zero here -- the
+input is an e4m3 value divided by a power of two, so it lands exactly on 0.25 / 0.75 / 1.25 / 1.75 /
+2.5 / 3.5 / 5.0 often -- so the rounding is done with two `torch.bucketize` calls whose results
+differ only at a tie, and the even code is taken there.
+
+**The kernel** (`_fp4_linear_kernel`) is `_fp8_linear_kernel`'s structure with fp4_moe's decoder:
+the 64-byte-wide packed row tile, `_split4`, the hardware `cvt.rn.f16x2.e2m1x2` instruction, the
+K-permutation trick (even and odd nibbles are two independent dot products against an activation
+loaded with stride 2), fp32 accumulation, the group scale applied to the fp32 partial of each
+32-wide K step. Two tile shapes, and the N tile is the part that had to be measured:
+
+* At M = 6 the grid is one M-block wide, so a 128-wide N tile leaves 4 (wkv) to 40 (wo_b) programs
+  for 48 SMs and the DRAM latency is never hidden. BLOCK_N = 32 is 5-25 % faster on every shape
+  measured -- including the ones that were already wide enough -- at `num_warps=4, num_stages=3`.
+  `num_warps=8` was bit-identical but 2-2.5x slower on two of the four shapes, and is avoided
+  anyway (the inline-asm miscompile of 2026-09-11 11:20).
+* At M = 2048 the M axis fills the machine by itself and BLOCK_N = 128 wins by 1.6-1.7x.
+
+Prefill therefore runs the kernel too, unlike the fp8 path, which dequantizes the weight to bf16 on
+every prefill call and hands it to cuBLAS. That dequant is the dominant cost there: for `wq_b` at
+M = 2048 it is 5.14 ms of the fp8 path's 7.14 ms, against 4.33 ms for the fp4 kernel.
+`DSV41_FP4_DENSE_PREFILL=dequant` restores the fp8 path's shape for comparison.
+
+**Correctness** (`tools/test_fp4_linear.py`, nine real checkpoint weights). Against an fp32 matmul
+on the same fp4 weights the kernel is 1.61e-3 to 1.73e-3 relative at M = 1, 6, 16, 64, 2048 -- which
+is the bf16 rounding of the output, and is exactly what cuBLAS-bf16 scores on the same inputs (the
+two differ from each other by 0 to 5e-5, and where they differ it is cuBLAS that has moved: at
+M = 64 cuBLAS is 3.5e-3 from the fp32 reference while the kernel stays at 1.66e-3). Rows [0:6],
+[7:13], [1000:1006], [0:1] and [0:16] of a 2048-row call come out bit-identical to the short calls,
+so the kernel needs no `MM_TILE` row tiling, like the fp8 one.
+
+The weight error itself is the whole story of this round: **0.121 to 0.124 relative** on every
+weight (per-32-group mean 0.119-0.122, p99 0.163-0.167, worst group 0.20-0.25). That is what four
+bits with eight magnitude levels costs, and it is 60x the fp8 weight error.
+
+Effective bandwidth at M = 6, steady state (the call cycled over ~300 MB of copies of the weight, so
+nothing is L2-resident and -- unlike an explicit L2 flush -- no flush write competes for DRAM):
+
+| weight | fp4 | fp8 |
+|---|---|---|
+| `wq_b` [32768, 1280] | 111.9 us, 199.1 GB/s | 190.1 us, 220.9 GB/s |
+| `wo_b` [5120, 8192] | 180.3 us, 123.6 GB/s | 194.0 us, 216.4 GB/s |
+| `wq_a` [1280, 5120] | 53.4 us, 65.2 GB/s | 46.4 us, 141.3 GB/s |
+| `wkv` [512, 5120] | 49.3 us, 28.2 GB/s | 39.2 us, 67.0 GB/s |
+| shared `w1` [2304, 5120] | 66.2 us, 94.6 GB/s | 61.0 us, 193.6 GB/s |
+| shared `w2` [5120, 2304] | 41.2 us, 152.0 GB/s | 54.3 us, 217.5 GB/s |
+| shared `w3` [2304, 5120] | 57.4 us, 109.2 GB/s | 69.5 us, 169.9 GB/s |
+
+Read that in wall time, not in GB/s: fp4 reads 0.53x the bytes, so it is ahead wherever its GB/s is
+above 0.53x the fp8 figure. It wins on the two big attention matrices (1.70x and 1.08x) and loses on
+the two small ones, whose grids are too narrow to reach bandwidth in either format.
+
+**The switch.** `DSV41_DENSE_FP4` = `off` (default) | `shared` | `attn` | `shared,attn` (= `all`),
+read by `v41_ref.dense_fp4_groups()` and applied in `LayerWeights` and `MTPWeights` as the weights
+are loaded; `attn.wo_a`, the indexer `wq_b`, the engram `wkv` and `mtp.0.main_proj` always stay fp8.
+`R.dense` and `R.mm` dispatch on the weight object, so the graphed decode path, the un-graphed
+`Model.forward` and the prefill all follow automatically. The re-quantization adds ~20 s to the
+weight load (57 s -> 78 s for `shared,attn`) and leaves ~0.7 GB of fp32 scratch in the caching
+allocator, which the engine hands back with one `empty_cache()` before the arena is built.
+
+**Measurements**, one run each, the served config (`--prune-keep 0.40 --expert-format cb3
+--arena-gb 90.5 --transient-slots 8 --keep-free-gb 10`), same box, nothing else running.
+
+Held-out teacher-forced, `corpus/heldout_corpus.jsonl`:
+
+| `DSV41_DENSE_FP4` | coding NLL | delta | general NLL | delta |
+|---|---|---|---|---|
+| off | 1.5384 | -- | 3.2087 | -- |
+| shared | 1.5531 | +0.0147 | 3.2740 | +0.0653 |
+| attn | **1.5403** | **+0.0019** | **3.1738** | **-0.0349** |
+| shared,attn | 1.5527 | +0.0143 | 3.2323 | +0.0236 |
+
+The `off` row reproduces the CB3 keep-40 % numbers of the 12:15-14:10 section exactly. The shared
+experts are the sensitive group: they are the one dense FFN every token goes through, with no
+redundancy, and 4 bits costs 0.065 nats of general loss there. The attention projections carry the
+same 0.12 weight error and it does not show -- `wq_b` and `wo_b` are wide maps whose output is a sum
+over 1280 and 8192 terms, and the error averages out. The two are not additive either: `shared,attn`
+is 0.042 nats better on general than `shared` alone, i.e. the two errors partly cancel on this
+corpus. One corpus of 53 sequences cannot resolve differences of this size; the `attn` row's -0.035
+is a gain only in the sense that it is indistinguishable from zero.
+
+`engine/test_fastdecode.py` (the graphed `FastDecoder` against `Model.forward` on identical state):
+
+| | drafts equal | logits rel err 0/1 | argmax agreement 0/1 |
+|---|---|---|---|
+| off | yes | 0.1175 / 0.0344 | 1.00 / 1.00 |
+| attn | yes | 0.0613 / 0.0249 | **1.00 / 1.00** |
+| shared,attn | no (parity 0) | 0.1021 / 0.0371 | 0.83 / 1.00 |
+
+With `attn` the two paths agree better than they did in fp8, on both parities. With the shared
+experts in fp4 as well the parity-0 draft diverges by one token, which makes the verify block
+different and drops the block's argmax agreement to 5 of 6; the parity-1 numbers are unaffected.
+
+`engine/profile_fast.py`, wall ms of one graphed verify step, and the dense kernels' GPU time per
+step from the same profile:
+
+| | step | draft | dense GPU ms per step |
+|---|---|---|---|
+| off | 134.4 | 13.4 | 29.41 (294 fp8 calls) |
+| attn | **125.6** | 13.1 | **25.41** (163 fp4 + 131 fp8) |
+| shared,attn | 128.9 | 13.1 | 26.20 (283 fp4 + 11 fp8) |
+
+Putting the shared experts in fp4 as well makes the dense group slower, not faster, for the reason
+in the bandwidth table: `w1` and `w3` are among the shapes where fp4 does not pay.
+
+200 greedy tokens, the standard decode line, back to back:
+
+| | decode_tok_s | accept_len_mean | steps | decode_s | prefill_s | ms per step+draft |
+|---|---|---|---|---|---|---|
+| off | 19.11 | 3.03 | 66 | 10.467 | 4.123 | 158.6 |
+| attn | **20.85** | 3.23 | 62 | 9.592 | **3.275** | **154.7** |
+
+(and, from the earlier pair in the same hour, off 19.03 / 3.03 / 66 and `shared,attn` 18.63 / 2.90 /
+69 -- the shared-expert arm is slower end to end as well.) As in the 11:00-11:20 round, part of the
+19.11 -> 20.85 is the accepted length moving from 3.03 to 3.23, which moves by itself run to run on
+a single prompt; the prompt-independent numbers -- the profile wall, the dense GPU time, the
+`test_fastdecode` step (120.5/124.8 -> 120.1/117.2 ms) and the 154.7 vs 158.6 ms per step+draft --
+all move the same way. Prefill is 21 % faster because the fp8 path's per-call bf16 dequant is gone.
+
+**Memory.** `attn` frees 1.751 GiB of resident weights (measured `CUDA free` before the arena is
+allocated: 97.5 -> 99.6 GB); `shared` frees 0.666 GiB; both together 2.417 GiB (97.2 -> 99.8 GB).
+At the current 90.5 GB arena that is headroom, not extra experts: 6,260 CB3 slots either way.
+1.751 GiB would be 124 more CB3 slots if the arena were resized to take it.
+
+**Verdict.** The attention group passes on every axis and the shared experts fail the loss gate by
+6.5x, so the switch stays per-group and `off` remains the default in code; `DSV41_DENSE_FP4=attn` is
+the setting worth having (.env is exported by start.sh, so one line there is enough).
+
+**Caveats.**
+* The held-out corpus is 53 sequences, 10,661 scored positions. Deltas of 0.002-0.035 nats are
+  inside its resolution; only the shared experts' 0.065 is clearly outside it.
+* The four small-N decode shapes (`wkv`, `wq_a`, shared `w1`/`w3`) are latency-bound in both
+  formats -- 16 to 72 programs for 48 SMs at BLOCK_N = 32 -- and a split-K variant with a fixed-order
+  reduction would fix that. Not built; `wkv` and `wq_a` together are only 9.2 MB of the attention
+  group's 93.1 MB per layer.
+* `attn.wo_a` (1343.5 MB per step, 630.5 MB of it saveable) is still fp8: it needs the grouped
+  kernel, which would need the same treatment. Untouched, unmeasured.
+* The quantizer's rounding is ties-to-even on the E2M1 grid, which is what the hardware `cvt.rn`
+  does but not what `v41_ref.fp4_qdq` does (it rounds ties down). The two differ only on exact ties.
+* `DSV41_FP4_DENSE_F16=0` feeds the tensor cores bf16 activations and bf16 (exact) decoded weights
+  instead of fp16. Implemented and compiled, not measured: the fp16 path is what the routed-expert
+  kernel already does with the same activations.
