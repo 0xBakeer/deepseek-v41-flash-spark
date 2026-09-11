@@ -765,3 +765,11 @@ candidates are in `results/simq/`.
   (48 ms waits). Now: ids to host before any replay, threads do only preads (32/table), dequant on
   the main thread at the consuming layer. Reads (~6 ms both tables) are hidden behind layers 0..13.
 * e2e: 15.2-15.7 tok/s at keep 31 %; 168 ms step + 15 ms draft => ~16.5 tok/s at acceptance 3.
+
+### 2026-09-11 10:20 -- long-prompt check of the served config (measured)
+
+8,192-token prompt via the gateway (thinking off, greedy): TTFT 39.6 s = 207 tok/s prefill, decode
+16.9 tok/s at acceptance 3.28, coherent summary. Recorded as RESULTS 2.8. Decode does not degrade
+with the 8k KV (CSA2 index_topk 512 bounds the attended set). Next: better keep-set for the same
+4,800-expert budget (global ranking instead of uniform 120 per layer), measured on the held-out
+corpus, teacher-forced.

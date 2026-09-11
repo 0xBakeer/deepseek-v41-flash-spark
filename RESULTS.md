@@ -256,3 +256,11 @@ is ±5 % (greedy acceptance varies with bf16 nondeterminism: 2.97-3.12 on the sa
 One request through the gateway, `chat_template_kwargs.thinking=true`, `reasoning_effort=high`,
 temperature 0, 400 tokens (all reasoning): **TTFT 3.9 s, decode 21.4 tok/s, DSpark acceptance 4.11**,
 hit rate 1.0. Same prompt with thinking off (2.6 addendum): 15.2-15.7 tok/s at acceptance ~3.
+
+### 2.8 Addendum 2026-09-11 10:20 — long prompt through the served resident config (keep 31 %, arena 90.5 GB, transient 8, LUT)
+
+One request through the gateway with an 8,192-token prompt (the server's context clamp), greedy,
+thinking off, 200 output tokens: **TTFT 39.6 s (207 prompt tok/s), decode 16.9 tok/s, acceptance
+3.28**, output a coherent summary of the prompt. The 8k prefill runs through the chunked encoder +
+decoder-replay path (2048-token chunks); decode at an 8k KV is not slower than at 100 tokens
+because the CSA2 index keeps the attended set at 512 tokens.
