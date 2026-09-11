@@ -773,3 +773,28 @@ candidates are in `results/simq/`.
 with the 8k KV (CSA2 index_topk 512 bounds the attended set). Next: better keep-set for the same
 4,800-expert budget (global ranking instead of uniform 120 per layer), measured on the held-out
 corpus, teacher-forced.
+
+### 2026-09-11 10:00-10:17 -- keep-set selection: global ranking loses to uniform (measured, held-out)
+
+Hypothesis: under the same 4,800-expert budget, one cross-layer ranking (per-layer-normalized
+routing frequency, at least 24 experts per layer; `--prune-select global`, `build_keep_masks` in
+engine/v41_engine.py) should beat "top-120 of every layer", because it keeps the most routing
+mass: flat-routing layers get up to 166 experts, skewed ones as few as 83. Teacher-forced NLL on
+`corpus/heldout_corpus.jsonl` says no:
+
+| budget | select | coding NLL | general NLL |
+|---|---|---|---|
+| 31 % (4,800) | uniform (v0.2.0-wip) | 1.5729 | 3.3788 |
+| 31 % (4,800) | global | 1.5983 (+0.025) | 3.4193 (+0.041) |
+| 40 % (6,160) | uniform | 1.5285 | 3.3017 |
+| 40 % (6,160) | global | 1.5433 (+0.015) | 3.3004 (-0.001) |
+
+Routing mass kept is not the quality objective: a skewed layer's cold experts cost more when they
+are dropped than a flat layer's cold experts gain when kept. The option stays in the CLI/launcher
+(`PRUNE_SELECT`, default `uniform`) as a documented negative result; the served config is unchanged.
+
+Same window: the LM head and the DSpark Markov head are now loaded bf16 (their stored dtype)
+instead of an fp32 copy; `DSV41_HEAD_FP32=1` restores the fp32 reference math. The fast decode path
+always ran a bf16 head copy, so served numerics are unchanged, and the 2.65 GB fp32 copy is gone
+(~140 expert slots). Teacher-forced check (uniform 31 %, same corpus) with the bf16 head: coding
+1.5716 / general 3.3769 vs 1.5729 / 3.3788 with fp32 -- inside run-to-run noise.

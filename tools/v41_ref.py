@@ -269,6 +269,14 @@ class EngramWeights:
 MM_TILE = 0  # 0 = plain GEMMs. >0 = run every activation GEMM in fixed-size row tiles; see mm().
 
 
+def head_logits(x: torch.Tensor, head: torch.Tensor) -> torch.Tensor:
+    """LM-head logits in fp32. A bf16 head runs a bf16 GEMM (fp32 accumulate, bf16 logits) and is
+    what the fast decode path always did; an fp32 head (DSV41_HEAD_FP32=1) is the reference's math."""
+    if head.dtype == torch.float32:
+        return mm(x.float(), head)
+    return mm(x.to(torch.bfloat16), head).float()
+
+
 def mm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """F.linear(x, w), but with a result that does not depend on how many rows are in the call.
 

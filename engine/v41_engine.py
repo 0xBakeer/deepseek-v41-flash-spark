@@ -69,12 +69,51 @@ def sample_probs(logits: torch.Tensor, temperature: float, top_p: float) -> torc
     return p
 
 
+def build_keep_masks(counts: dict, frac: float, select: str, device, min_per_layer: int = 24):
+    """Which experts stay routable under a budget of ceil(frac*384) per layer ON AVERAGE.
+
+    select="uniform": the top ceil(frac*384) experts of every layer (the v0.2.0-wip scheme).
+    select="global": one ranking of all (layer, expert) pairs by per-layer-normalized routing
+    frequency, cut at the same total count; layers whose routing is flat get more experts and
+    layers whose routing is skewed get fewer, with at least `min_per_layer` in every layer. Under
+    a total budget this greedy choice maximizes the routing mass that stays routable.
+    Returns (masks {L: bool[384] on device}, keep {L: np.ndarray of expert ids, hottest first}).
+    """
+    import math as _m
+    n_keep = max(6, _m.ceil(frac * 384))
+    total = n_keep * len(counts)
+    keep = {}
+    if select == "uniform":
+        for L, c in counts.items():
+            keep[int(L)] = np.argsort(np.asarray(c))[::-1][:n_keep]
+    elif select == "global":
+        keys = []
+        for L, c in counts.items():
+            c = np.asarray(c, dtype=np.float64); c = c / c.sum()
+            order = np.argsort(c)[::-1]
+            keep[int(L)] = [int(e) for e in order[:min_per_layer]]
+            keys += [(float(c[e]), int(L), int(e)) for e in order[min_per_layer:]]
+        keys.sort(reverse=True)
+        remaining = total - sum(len(v) for v in keep.values())
+        for _, L, e in keys[:remaining]:
+            keep[L].append(e)
+        keep = {L: np.array(v) for L, v in keep.items()}
+    else:
+        raise ValueError(f"unknown prune_select {select!r}")
+    masks = {}
+    for L, k in keep.items():
+        m = torch.zeros(384, dtype=torch.bool, device=device)
+        m[torch.as_tensor(np.array(k), device=device)] = True
+        masks[L] = m
+    return masks, keep
+
+
 class V41Engine:
     def __init__(self, model_dir: str, max_seq: int = 32768, arena_gb: float | None = None, device: str = "cuda",
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
                  hot_profile: str | None = None, prune_keep: float | None = None,
-                 sim_bits: int | None = None, sim_cold_frac: float = 1.0):
+                 sim_bits: int | None = None, sim_cold_frac: float = 1.0, prune_select: str = "uniform"):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
@@ -152,38 +191,33 @@ class V41Engine:
         if prune_keep and prune_keep < 1.0:
             # pruned, all-resident mode: per layer only the top-N experts (by trace frequency) stay
             # routable, and exactly those are warm-started, so decode never touches NVMe
-            import math as _m
             cc, cg = EX.category_counts(trace_stats, "coding"), EX.category_counts(trace_stats, "general")
             assert len(cc) == 40 and len(cg) == 40, "pruned mode needs the per-layer trace npz files next to trace_stats"
-            n_keep = max(6, _m.ceil(prune_keep * 384))
-            masks, ranked = {}, []
-            for L in range(40):
-                c = cc[L] / cc[L].sum() + cg[L] / cg[L].sum()
-                keep = np.argsort(c)[::-1][:n_keep]
-                m = torch.zeros(384, dtype=torch.bool, device=device); m[torch.as_tensor(keep.copy(), device=device)] = True
-                masks[L] = m
-                ranked += [(float(c[e]), L, int(e)) for e in keep]
+            counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in range(40)}
+            self.prune_select = prune_select
+            masks, keep = build_keep_masks(counts, prune_keep, prune_select, device)
+            n_keep = max(len(v) for v in keep.values())
+            ranked = [(float(counts[L][e]), L, int(e)) for L, ks in keep.items() for e in ks]
             ranked.sort(reverse=True)
             ranked = [(L, e) for _, L, e in ranked]
             self.model_prune_mask = masks
+            per_layer = [len(keep[L]) for L in range(40)]
             if sim_bits:
                 # simulated low-bit format on the coldest `sim_cold_frac` of the KEPT experts of every layer
                 from engine.codebook_sim import CodebookSim
                 self.store.requant_sims = {sim_bits: CodebookSim(sim_bits, device)}
                 pol = {}
-                for L in range(40):
-                    c = cc[L] / cc[L].sum() + cg[L] / cg[L].sum()
-                    keep = np.argsort(c)[::-1][:n_keep]
-                    n_cold = int(round(sim_cold_frac * n_keep))
-                    for e in keep[n_keep - n_cold:]:
+                for L, ks in keep.items():
+                    n_cold = int(round(sim_cold_frac * len(ks)))
+                    for e in ks[len(ks) - n_cold:]:
                         pol[(L, int(e))] = sim_bits
                 self.store.requant = pol
-                log(f"simulated {sim_bits}-bit codebook format on {len(pol)} of {n_keep * 40} kept experts "
+                log(f"simulated {sim_bits}-bit codebook format on {len(pol)} of {len(ranked)} kept experts "
                     f"(coldest {sim_cold_frac:.0%} per layer)")
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
-            log(f"pruned mode: keep {prune_keep:.2f} = {n_keep}/384 experts per layer, {len(ranked)} total, "
-                f"{len(ranked) * EX.EXPERT_BYTES / 1e9:.1f} GB")
+            log(f"pruned mode ({prune_select}): keep {prune_keep:.2f}, {len(ranked)} experts total "
+                f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * EX.EXPERT_BYTES / 1e9:.1f} GB")
         else:
             self.model_prune_mask = None
             ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
@@ -195,7 +229,7 @@ class V41Engine:
             from engine.fastdecode import FastDecoder
             self.fast = FastDecoder(self.model, self, use_graphs=os.environ.get("DSV41_GRAPHS", "1") == "1")
             resident = (self.prune_keep and self.prune_keep < 1.0 and
-                        len(self.store.lru) >= 40 * max(6, int(np.ceil(self.prune_keep * 384))) - 0 and
+                        len(self.store.lru) >= 40 * max(6, int(np.ceil(self.prune_keep * 384))) and
                         os.environ.get("DSV41_LUT", "1") == "1")
             if resident:
                 self.fast.build_lut()
@@ -409,6 +443,8 @@ class V41Engine:
             "kernel": self.kernel,
             "act_quant": self.act_quant,
             "swa_replay": self.swa_replay,
+            "prune_keep": self.prune_keep,
+            "prune_select": getattr(self, "prune_select", None),
             "hot_profile": self.hot_profile,
             "prefill_chunk": MAX_CHUNK,
             "io_threads": self.store.io_threads,
@@ -556,6 +592,8 @@ if __name__ == "__main__":
                     help="with --teacher-forced: comma list of keep fractions (e.g. 0.25,0.4,1.0); per layer only the "
                          "top-N experts by trace frequency stay routable; writes --tf-out with one entry per fraction")
     ap.add_argument("--prune-profile", default="mixed", choices=["mixed", "coding", "general"])
+    ap.add_argument("--prune-select", default="uniform", choices=["uniform", "global"],
+                    help="uniform: top-N per layer; global: one cross-layer ranking under the same total budget")
     ap.add_argument("--transient-slots", type=int, default=None,
                     help="prefill-miss ring slots (default 400 = a whole layer; 16 is enough when every kept expert is resident)")
     ap.add_argument("--keep-free-gb", type=float, default=None, help="host memory to leave free when auto-sizing the arena (default 20)")
@@ -575,7 +613,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
-                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep,
+                    swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep, prune_select=a.prune_select,
                     sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac,
                     **({"transient_slots": a.transient_slots} if a.transient_slots else {}),
                     **({"keep_free_gb": a.keep_free_gb} if a.keep_free_gb else {}))
@@ -595,18 +633,15 @@ if __name__ == "__main__":
         out = {}
         for frac in [float(x) for x in a.prune_sweep.split(",")]:
             n_keep = max(6, _m.ceil(frac * 384))
-            masks = {}
-            for L, c in counts.items():
-                keep = np.argsort(np.asarray(c))[::-1][:n_keep]
-                m = torch.zeros(384, dtype=torch.bool, device=eng.device); m[torch.as_tensor(keep.copy(), device=eng.device)] = True
-                masks[int(L)] = m
+            masks, keep = build_keep_masks(counts, frac, a.prune_select, eng.device)
             eng.model.prune_mask = masks if frac < 1.0 else None
             t0 = time.time()
             res = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq))
             res["keep_frac"] = frac; res["experts_per_layer"] = n_keep; res["resident_gb_fp4"] = round(n_keep * 40 * EX.EXPERT_BYTES / 1e9, 1)
+            res["select"] = a.prune_select; res["per_layer_counts"] = [int(len(keep[L])) for L in range(40)]
             res["seconds"] = round(time.time() - t0, 1)
             out[str(frac)] = res
-            log(f"prune keep={frac} ({n_keep}/384 per layer, {res['resident_gb_fp4']} GB): {json.dumps({k: v for k, v in res.items() if k in ('coding', 'general')})}")
+            log(f"prune keep={frac} {a.prune_select} ({n_keep}/384 per layer avg, {res['resident_gb_fp4']} GB): {json.dumps({k: v for k, v in res.items() if k in ('coding', 'general')})}")
             if a.tf_out:
                 json.dump(out, open(a.tf_out, "w"), indent=1)
         raise SystemExit(0)

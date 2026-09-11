@@ -34,7 +34,7 @@ done
 # Environment wins over .env, so `PORT=8001 ./start.sh` works.
 declare -A _CLI=()
 for v in MODEL_DIR PYTHON SERVED_MODEL_NAME HOST PORT MAX_SEQ ARENA_GB \
-         TRACE_STATS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP TRANSIENT_SLOTS KEEP_FREE_GB; do
+         TRACE_STATS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP PRUNE_SELECT TRANSIENT_SLOTS KEEP_FREE_GB; do
     [[ -n "${!v:-}" ]] && _CLI[$v]="${!v}"
 done
 # shellcheck disable=SC1091
@@ -139,6 +139,7 @@ FLAGS=(
 # 128 GB box. Unset = the full model with expert streaming.
 EK="{"
 [[ -n "${PRUNE_KEEP:-}" ]] && EK="$EK\"prune_keep\": $PRUNE_KEEP,"
+[[ -n "${PRUNE_SELECT:-}" ]] && EK="$EK\"prune_select\": \"$PRUNE_SELECT\","
 [[ -n "${TRANSIENT_SLOTS:-}" ]] && EK="$EK\"transient_slots\": $TRANSIENT_SLOTS,"
 [[ -n "${KEEP_FREE_GB:-}" ]] && EK="$EK\"keep_free_gb\": $KEEP_FREE_GB,"
 EK="${EK%,}}"

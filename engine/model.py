@@ -93,12 +93,12 @@ class Weights:
 
         t0 = time.time()
         self.embed = get("embed.weight").to(device).to(torch.bfloat16)
-        # fp32, not bf16: the LM head is the last GEMM of every forward and the reference keeps it
-        # in fp32 too ("so the logits come out in fp32 directly"). Converting it per call instead
-        # allocates 2.65 GB on every single decoded token, which on a box whose expert arena already
-        # holds 75 GB makes the caching allocator fall back to cudaFree/cudaMalloc -- measured at
-        # ~0.75 s per token, more than the whole rest of the decode step.
-        self.head = get("head.weight").to(device).float()
+        # bf16 (the stored dtype) unless DSV41_HEAD_FP32=1. The reference keeps the LM head in fp32
+        # ("so the logits come out in fp32 directly"); the fast decode path already ran a bf16 copy
+        # (fp32 accumulate, logits rounded to bf16), so with a bf16 head here the two paths use the
+        # same weights and the 2.65 GB fp32 copy disappears (= ~140 more expert slots).
+        self.head = get("head.weight").to(device)
+        self.head = self.head.float() if os.environ.get("DSV41_HEAD_FP32", "0") == "1" else self.head.to(torch.bfloat16)
         self.norm = get("norm.weight").to(device).to(torch.bfloat16)
         self.layers = []
         self.indexers = {}
@@ -171,7 +171,7 @@ class MTPWeights:
             self.markov_embed = bf("markov_head.embed.weight")
             # fp32 once, for the same reason as the LM head: this one is applied once per drafted
             # token, i.e. five times per DSpark step.
-            self.markov_head = get(p + "markov_head.head.weight").to(dev).float()
+            self.markov_head = get(p + "markov_head.head.weight").to(dev).to(torch.bfloat16)
             self.conf_proj = get(p + "confidence_head.proj.weight").to(dev).float()
 
 
@@ -593,7 +593,7 @@ class Model:
         if need_logits:
             x = R.hc_pre(h, pre_mix)
             x = R.rmsnorm(x, self.W.norm, a.norm_eps)
-            logits = R.mm(x.float(), self.W.head)
+            logits = R.head_logits(x, self.W.head)
         self.stats["replay_tokens"] = self.stats.get("replay_tokens", 0) + T
         return logits, (torch.cat(main_hiddens, dim=-1) if main_hiddens else None), S
 
@@ -648,7 +648,7 @@ class Model:
         if need_logits and n_layers == a.n_layers:
             x = R.hc_pre(h, pre_mix)
             x = R.rmsnorm(x, self.W.norm, a.norm_eps)
-            logits = R.mm(x.float(), self.W.head)
+            logits = R.head_logits(x, self.W.head)
         return logits, (torch.cat(main_hiddens, dim=-1) if main_hiddens else None)
 
     # ------------------------------------------------------------------ DSpark
@@ -688,14 +688,14 @@ class Model:
         # to the LM head (inference/model.py::DSparkBlock.forward_head), so keep both.
         x_pre = x
         x = R.rmsnorm(x, w.norm, a.norm_eps)
-        logits = x.float() @ self.W.head.T  # [5, V]
+        logits = R.head_logits(x, self.W.head)  # [5, V] fp32
         out = torch.empty(B + 1, dtype=torch.long, device=self.dev)
         out[0] = tok
         probs = []
         embeds = []
         for i in range(B):
             e = w.markov_embed[out[i]]  # [256]
-            bias = e.float() @ w.markov_head.T  # [V]
+            bias = F.linear(e.to(torch.bfloat16)[None], w.markov_head).float()[0]  # [V]
             lg = logits[i] + bias
             if temperature <= 0:
                 p = torch.zeros_like(lg); p[lg.argmax()] = 1.0
