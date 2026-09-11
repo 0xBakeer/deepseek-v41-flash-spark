@@ -145,6 +145,8 @@ class V41Engine:
         self.model = Model(self.W, self.store, self.caches, self.moe_fn, act_quant=act_quant)
         self.model.hash_state = make_hash_state(model_dir, self.tokenizer, max_seq, device)
         self.tables = {L: EngramTable(model_dir, index, L, device) for L in self.args.engram_layer_ids}
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        self.eg_pool = _TPE(len(self.args.engram_layer_ids))
         self.model.engram_rows = lambda L, h: self.tables[L].rows(h)
         self.prune_keep = prune_keep
         if prune_keep and prune_keep < 1.0:
@@ -320,8 +322,13 @@ class V41Engine:
                     drafts = drafts.clone(); q = q.clone()
                     block = torch.cat([torch.tensor([tok], device=self.device), drafts])
                     hashes = m.hash_state(block[None], pos)[0]
-                    rows = {L: self.tables[L].rows(hashes[:, li, :]) for li, L in enumerate(self.args.engram_layer_ids)}
-                    logits, mh = self.fast.step(block, pos, rows)
+                    # both tables' rows are read in background threads (NVMe only, no CUDA calls there) and
+                    # each is dequantized on the main thread when its layer needs it. The hash ids go to the
+                    # host HERE, before any graph is queued: a .cpu() later would wait for the whole step.
+                    h_np = hashes.cpu().numpy()
+                    futs = {L: (self.eg_pool.submit(self.tables[L].read_raw, h_np[:, li, :]), self.tables[L].to_device)
+                            for li, L in enumerate(self.args.engram_layer_ids)}
+                    logits, mh = self.fast.step(block, pos, lambda: futs)
                 else:
                     drafts, q, conf = m.dspark_draft(tok, pos - 1, temperature)
                     block = torch.cat([torch.tensor([tok], device=self.device), drafts])  # 6 tokens at pos..pos+5

@@ -19,7 +19,7 @@ import torch
 
 
 class EngramTable:
-    def __init__(self, model_dir: str, index: dict, layer: int, device: str, threads: int = 16):
+    def __init__(self, model_dir: str, index: dict, layer: int, device: str, threads: int = 32):
         wm = index["weight_map"]
         self.path = os.path.join(model_dir, wm[f"layers.{layer}.engram.embed.weight"])
         with open(self.path, "rb") as f:
@@ -51,6 +51,31 @@ class EngramTable:
                 if len(self.cache) < self.cache_max:
                     self.cache[r] = b
             out[i] = np.frombuffer(b, np.uint8)
+        return out
+
+    def read_raw(self, hashes_np: np.ndarray):
+        """Host-only part (safe in a background thread: no CUDA calls): NVMe reads of the unique rows.
+        hashes_np: int64 [T, 24]. Returns (raw uint8 [n, 264], inv, shape)."""
+        t1 = time.perf_counter()
+        flat = hashes_np.reshape(-1)
+        uniq, inv = np.unique(flat, return_inverse=True)
+        n = len(uniq)
+        chunk = max(8, n // (self.pool._max_workers * 2) + 1)
+        parts = list(self.pool.map(self._read_rows, [uniq[i:i + chunk] for i in range(0, n, chunk)]))
+        raw = np.concatenate(parts) if parts else np.empty((0, 264), np.uint8)
+        self.stats["read_s"] = self.stats.get("read_s", 0.0) + time.perf_counter() - t1
+        self.stats["rows"] += int(n); self.stats["calls"] += 1
+        return raw, inv, hashes_np.shape
+
+    def to_device(self, raw, inv, shape) -> torch.Tensor:
+        """GPU part (main thread): dequantize the rows and expand to [T, 24, 256] float32."""
+        t0 = time.perf_counter()
+        rawt = torch.from_numpy(raw).to(self.device)
+        vals = rawt[:, :256].view(torch.float8_e4m3fn).float()
+        scales = torch.exp2(rawt[:, 256:].float() - 127.0)
+        deq = (vals.unflatten(-1, (8, 32)) * scales.unsqueeze(-1)).flatten(-2)
+        out = deq[torch.from_numpy(inv).to(self.device)].view(shape[0], shape[1], 256)
+        self.stats["seconds"] += time.perf_counter() - t0
         return out
 
     def rows(self, hashes: torch.Tensor) -> torch.Tensor:

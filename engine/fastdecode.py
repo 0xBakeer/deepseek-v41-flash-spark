@@ -391,8 +391,10 @@ class FastDecoder:
         assert self.c.len == S, (self.c.len, S)
         self.ids.copy_(block_ids)
         self.pos.copy_(S + torch.arange(T_VERIFY, device=self.dev))
-        for L, rows in engram_rows.items():
-            self.eg_rows[L].copy_(rows)
+        rows_fn = engram_rows if callable(engram_rows) else None
+        if rows_fn is None:
+            for L, rows in engram_rows.items():
+                self.eg_rows[L].copy_(rows)
         self.h.copy_(self.W.embed[self.ids].unsqueeze(1).repeat(1, a.hc_mult, 1))
         self.pre_mix.zero_(); self.pre_mix[:, 0] = 1.0
         parity = S % 2
@@ -400,9 +402,16 @@ class FastDecoder:
         self.capture(parity)
         self.prepare_pending_buffers()  # capture's warm-up/capture runs overwrite the buffers
         t0 = time.perf_counter()
+        futs = rows_fn() if rows_fn is not None else None  # {layer: Future} -- reads already in flight
         if self.use_graphs:
             gA, gB, gF, gD = self.graphs[parity]
             for L in range(a.n_layers):
+                if futs is not None and L in futs:
+                    # this layer's rows were read while the previous layers ran on the GPU
+                    t0r = time.perf_counter()
+                    fut, finish = futs[L]
+                    self.eg_rows[L].copy_(finish(*fut.result()))
+                    self.stats["engram_s"] += time.perf_counter() - t0r
                 gA[L].replay()
                 if gB[L] is not None:
                     self._resolve(L)
@@ -412,6 +421,9 @@ class FastDecoder:
                 # bookkeeping the host resolve would have done: LRU touch is irrelevant while resident
                 self.m.store.stats["hits"] += int(a.n_layers * self.route_idx.numel())
         else:
+            if futs is not None:
+                for LL, (f, finish) in futs.items():
+                    self.eg_rows[LL].copy_(finish(*f.result()))
             st = {"parity": parity, "ckv": None, "ik": None, "ratio": 0}
             for L in range(a.n_layers):
                 self._layer_a(L, st); self._resolve(L); self._layer_b(L)
