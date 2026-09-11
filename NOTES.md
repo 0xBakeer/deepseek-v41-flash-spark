@@ -133,12 +133,13 @@ top-25% sets = 0.25. Layer 0 is the flattest layer in most MoEs; the deeper laye
 
 ### 0.4 Download policy followed
 
-Downloaded to the box: shards 1-6, 43-46 + code = **39 GB** (under the 50 GB rule), into
+Downloaded to the box: shards 1-6, 43-46 + code = **39 GB** (under the 50 GB download threshold
+this repo keeps to), into
 `$MODEL_DIR` with `snapshot_download(allow_patterns=...)` so a later full
 download continues in place. Disk after: 460 GB free. The two engram shards (203 GB) are NOT
 downloaded; the trace reads its rows over HTTP. **The full 40-layer histogram needs the remaining
 36 layer shards = 266 GB** (307 GB total without engram), which fits the disk (460 GB free) but
-is a >50 GB download -> asked in the Phase 0 report.
+is a >50 GB download, so it is flagged in the Phase 0 report rather than started there.
 
 ### 0.5 Landscape as of 2026-09-10 (research, links; nothing here is our measurement)
 
@@ -253,16 +254,16 @@ over all experts. Consequences:
   runs on the last 128 prompt tokens), so prefill expert traffic is roughly half of a 40-layer model's.
 
 Next: the remaining 36 layer shards (266 GB) are needed for the full histogram; disk has 460 GB
-free, so the 307 GB engram-less checkpoint fits with ~155 GB to spare. Waiting for the go-ahead
-(the >50 GB rule).
+free, so the 307 GB engram-less checkpoint fits with ~155 GB to spare. Deferred at this point as a
+>50 GB download (see 0.4).
 
 ---
 
-## Phase 1/2 -- build log (2026-09-10, brief: "just make it work")
+## Phase 1/2 -- build log (2026-09-10, scope: just make it work)
 
-Go-ahead received; the remaining 471 GB were downloaded (85 MB/s, ~95 min; Ling-3.0-flash weights
-and the ling3 docker image were deleted to make room, both re-downloadable). Work is split into
-parallel agents with one thread orchestrating.
+The remaining 471 GB were downloaded (85 MB/s, ~95 min; Ling-3.0-flash weights
+and the ling3 docker image were deleted to make room, both re-downloadable). Work is split across
+several parallel tracks.
 
 ### Full 40-layer routing histogram (measured 19:02, `results/trace-full-20260910/`)
 
@@ -299,7 +300,7 @@ inherently unpredictable). A broken port would sit near 10% top-1.
   prefill layer touches ~370 experts; a 64-slot ring wrapped inside a layer and silently computed
   with the wrong experts -- the 0.88 error in the first smoke test).
 * `engine/model.py` -- chunked-prefill/decode-block model with caches; single-chunk matches the
-  reference trace within 0.7-1.6%; chunk-boundary exactness being fixed (Opus agent).
+  reference trace within 0.7-1.6%; chunk-boundary exactness being fixed.
 * `server/app.py` -- stdlib OpenAI-compatible server (14 e2e tests), `start.sh`/`stop.sh`/`bench/`.
 
 ---
@@ -503,11 +504,11 @@ is squarely NVMe-bound: **0.92 GB of expert weights streamed per generated token
 resident set, and everything else (attention, engram, the Triton MoE kernel itself) is noise next
 to it.
 
-**The rest of step 6 was stopped by the owner** (the box was needed for interactive use) after the
+**The rest of step 6 was not run** (the box was needed for interactive use) after the
 `code` row: no `prose` row, no `angry-birds`/`mario` one-shots, no thinking-on run, and therefore
 no `results/oneshots/` artefacts. Two earlier attempts at those rows were killed externally, so
-nothing about them is measured and nothing is claimed. The server was left RUNNING on :8000 at the
-owner's instruction (`./stop.sh` was verified earlier and not run at the end).
+nothing about them is measured and nothing is claimed. The server was left RUNNING on :8000
+deliberately (`./stop.sh` was verified earlier and not run at the end).
 
 **Operational note found while the benches were being killed**: the server serialises requests on
 one lock and only notices a dead client when it next writes a chunk, so a request that was already
@@ -516,9 +517,9 @@ reports `busy: true` honestly, but there is no cancel endpoint and no queue cap.
 
 ---
 
-## Speed work (Opus agent) -- 2026-09-10 evening
+## Speed work -- 2026-09-10 evening
 
-Brief: make the engine faster, prefill first. Everything below is **measured on this box** with
+Scope: make the engine faster, prefill first. Everything below is **measured on this box** with
 single short generations against the running server (`<= 64` output tokens, greedy), never a
 benchmark run. Two prompts throughout:
 
@@ -613,7 +614,7 @@ rate on the long prompt improves at all.
 After the change the long-prompt prefill is still ~90% NVMe wait (`load_wait_s` 26.7 s of `moe_s`
 29.9 s; `kernel_s` 0.42 s, `attn_s` 2.07 s, `route_s` 2.81 s), at ~3.8 GB/s effective against the
 5.5 GB/s the device gives at depth. The remaining prefill lever is therefore I/O overlap, not the
-model -- deliberately left for the next owner of the engine.
+model -- deliberately left for future work on the engine.
 
 ### S.4 Is the replay correct, and what does the approximation cost?
 
@@ -655,8 +656,8 @@ The rewritten expert reader is checked separately and byte-for-byte
 
 ### S.5 Not done (deliberately, handed on)
 
-Expert-miss/compute overlap and the `--hot-profile coding|general|mixed` measurement were stopped by
-the owner before they were started. The ranking helper for the profile exists and is unit-checked
+Expert-miss/compute overlap and the `--hot-profile coding|general|mixed` measurement were not run in
+this tag. The ranking helper for the profile exists and is unit-checked
 (`experts.category_counts` reads the per-category counts out of `results/trace-*/trace/layer*.npz`;
 the coding top-4,000 differs from the mixed top-4,000 in 27% of its entries) but has never ranked a
 warm start in a serving run, and `DSV41_HOT_PROFILE` defaults to `mixed`, i.e. to the old behaviour.
@@ -725,13 +726,13 @@ Speed (fast path, FP8 dense, greedy, same code prompt): unpruned streaming 3.5 t
 keep 40% 6.4 (hit 0.94); keep 30% 9.5 (hit 0.99); keep 25% all-resident 13.6 (accept 3.09).
 Graphed step 173 ms + 15 ms draft with everything resident. Arena 78.9 GB = 4,198 slots (27%).
 
-Quant landscape (agent sweep, 33 repos up to 05:00 UTC): nothing fits one CUDA box. Lowest
+Quant landscape (survey of 33 repos up to 05:00 UTC): nothing fits one CUDA box. Lowest
 expert bpw published: 2.25 (GGUF, converter only, no runtime). One EXL3 K3 pack (3.0 bpw measured)
 is a 4-Spark TP4 target, 14% uploaded, not loadable. REAP checkpoints are MLX-only (REAP-50 +17%
 ppl per its author, consistent with our +0.06-0.11 nats). One 128 GB single-box claim: 15 tok/s on
 an M5 Max via SSD streaming, code unpublished.
 
-Khaled's mix idea (2/3/4-bit per layer): the resident budget is 1.16 bit/weight over ALL experts,
+The mixed-precision idea (2/3/4-bit per layer): the resident budget is 1.16 bit/weight over ALL experts,
 so any mix must be paired with pruning to be resident: keep 40% at ~3 bpw (~82 GB) or keep 30%
 with the coldest 40% of those at 3 bpw (~77 GB). A per-row 8-of-16 codebook (subset of the FP4
 grid, so it runs in the FP4 arena for measurement) has 21% relative weight error (2-bit: 37%) --

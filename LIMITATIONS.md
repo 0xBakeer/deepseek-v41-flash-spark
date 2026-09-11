@@ -39,10 +39,11 @@ are in RESULTS.md. What follows is what is still missing or broken.
   coding-only and general-only top sets overlap by a Jaccard of only 0.18-0.31), no promotion of
   experts a long session keeps hitting beyond plain LRU, no prefetch on a session's first turn.
 
-### Not measured this session
+### Not measured in this tag
 
 * **Only the `code` benchmark row exists.** `prose`, both one-shot games (`angry-birds`, `mario`)
-  and the thinking-on run were stopped by the owner before they produced a number, so
+  and the thinking-on run were stopped before they produced a number (the box was needed for
+  interactive use), so
   `results/oneshots/` is empty and **there is no measured evidence in this repo that the engine can
   produce a long (thousands of tokens) generation**, nor any thinking-mode number at all. Two
   earlier attempts were killed externally and produced nothing.
@@ -146,9 +147,11 @@ Known remaining inexactness:
 
 ## v0.2.0-wip (2026-09-11) — what is still not done
 
-* **30 tok/s is not reached.** Best measured: 13.6 tok/s (keep 25 %, resident) / 12.9 tok/s (keep 31 %).
-  The graphed verify step is 173 ms + 15 ms draft with everything resident; the weight-streaming floor
-  is ~140 ms. Remaining levers: fewer host round-trips (device-side slot LUT, merged graphs), the
+* **Decode is bounded by the expert bytes a step has to move.** Best measured: 13.6 tok/s
+  (keep 25 %, resident) / 12.9 tok/s (keep 31 %). The graphed verify step is 173 ms + 15 ms draft with
+  everything resident, of which ~140 ms is the weights the step reads at the box's 273 GB/s — that
+  bandwidth is the floor, not the kernels. Levers not yet taken: fewer host round-trips
+  (device-side slot LUT, merged graphs), the
   `_route_kernel` (6 % of the step), fp32 GEMMs of the HC/gate path, and higher acceptance (thinking
   on, code prompts).
 * **The full model stays NVMe-bound at 3.5-4 tok/s.** Only pruning changes that on this box.

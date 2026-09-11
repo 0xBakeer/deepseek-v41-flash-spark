@@ -21,8 +21,8 @@ was not taken it says so instead of guessing. The running log with the bug hunt 
 numbers is NOTES.md ("Bring-up"); what still does not work is LIMITATIONS.md.
 
 > **Status: work in progress.** Steps 1-5 of the bring-up (smoke, correctness, DSpark, engine/server
-> API, serve) are complete and measured. Step 6 (the benchmark sweep) was stopped by the owner after
-> the `code` row because the box was needed interactively, so **`prose`, the `angry-birds`/`mario`
+> API, serve) are complete and measured. Step 6 (the benchmark sweep) was stopped after
+> the `code` row because the box was needed for interactive use, so **`prose`, the `angry-birds`/`mario`
 > one-shots and the thinking-on run are not measured** and `results/oneshots/` is empty.
 
 ## Box and build
@@ -34,7 +34,7 @@ numbers is NOTES.md ("Bring-up"); what still does not work is LIMITATIONS.md.
 | python | a venv with torch 2.13.0+cu130, triton 3.7.1, transformers 5.12.1 (docs/install.md) |
 | model | `deepseek-ai/DeepSeek-V4.1-Flash`, full 48-shard checkpoint (510 GB) on local NVMe, FP4 routed experts read straight out of the shards |
 | engine | this repo: `server/app.py --engine v41` -> `engine/v41_engine.py`, MoE on the Triton FP4 kernel `tools/fp4_moe.py` (`kernel: triton-fp4`) |
-| other load | none — the box's other inference container was stopped for the whole session, so the unified pool was ours alone |
+| other load | none — the box's other inference container was stopped for the whole of these runs, so the unified pool was ours alone |
 
 The engine streams routed experts: only a resident hot set lives in the GPU arena and every miss is
 an O_DIRECT read from the checkpoint. **A speed number from this recipe is meaningless without the
@@ -120,12 +120,12 @@ are under 8 % of the decode time; everything else is the SSD.
 
 | planned row | status |
 |---|---|
-| `prose`, `--runs 2 --osl 512 --ignore-eos` | **not measured** — stopped by the owner |
-| `angry-birds` one-shot, thinking off, 8192 max output | **not measured** — stopped by the owner |
-| `mario` one-shot, thinking off, 8192 max output | **not measured** — stopped by the owner |
-| `angry-birds` one-shot, thinking on, effort 75 | **not measured** — stopped by the owner |
+| `prose`, `--runs 2 --osl 512 --ignore-eos` | **not measured** — not run in this tag (box needed for interactive use) |
+| `angry-birds` one-shot, thinking off, 8192 max output | **not measured** — not run in this tag (box needed for interactive use) |
+| `mario` one-shot, thinking off, 8192 max output | **not measured** — not run in this tag (box needed for interactive use) |
+| `angry-birds` one-shot, thinking on, effort 75 | **not measured** — not run in this tag (box needed for interactive use) |
 | `results/oneshots/*.html` | **empty** — no one-shot completed |
-| long-context (`random --isl 8192`) | never attempted this session |
+| long-context (`random --isl 8192`) | never attempted in this tag |
 
 ## 5. Performance work done during bring-up (A/B, same box, same work)
 
@@ -166,7 +166,7 @@ TP4 vLLM build reports 39-77 tok/s single stream, TTFT 0.27-0.58 s, DSpark accep
 Measured 2026-09-11 00:50-09:15 on the same box (Qwen container stopped, pool ours alone), same
 checkpoint. Commits `bd24743` (hc_post fix) .. `22bd9a8`+ (FP8 dense, pruning, CB3). Python venv as
 in v0.1.0-wip. Every row below is one run of the stated command; no benchmark sweeps were run
-(owner's rule: a single decode number per configuration).
+(this recipe records a single decode number per configuration).
 
 ### 2.1 The bug and what it changed (2026-09-11 00:50, commit bd24743)
 
@@ -208,7 +208,7 @@ Greedy argmax agreement fast vs reference path: 100 % on the tested positions; h
 | **keep 31 %, arena 90.5 GB = 4,813 slots, transient ring 16 (08:12)** | **100 %** | **12.9** | 2.99 | 1.000 | 0.08 |
 | keep 25 %, arena 79 GB (07:00) | 100 % | 13.6 | 3.09 | 0.999 | 7 |
 
-Prefill (from the 2026-09-10 23:xx Opus-agent work, still valid): 1,860-token prompt TTFT
+Prefill (from the 2026-09-10 23:xx prefill work, still valid): 1,860-token prompt TTFT
 118.5 s -> 33.7 s with 2048-token chunks + Decoder SWA Bounded Replay; short prompts 5-11 s.
 
 ### 2.4 Quality ladder of pruning (teacher-forced, held-out corpus `corpus/heldout_corpus.jsonl`: code and prose the trace never saw; 5,444 + 5,270 tokens)

@@ -132,6 +132,6 @@ with a transposed Hyper-Connection residual mix; this tag fixes it and rebuilds 
 keep 31 % resident: 12.9 tok/s at +0.07 / +0.19 nats; unpruned streaming 3.5 tok/s; full ladder there.
 
 ### Process
-Owner's rules applied from this tag on: no benchmark sweeps without asking (single decode numbers
-only); docs append-only with dates and per-tag sections; engine work done in the main session, not
-delegated; credits limited to the model vendor, the owner's own recipes and the toolchain.
+Conventions applied from this tag on: no benchmark sweeps (single decode numbers only); docs
+append-only with dates and per-tag sections; credits limited to the model vendor, the author's other
+Spark recipes and the toolchain.

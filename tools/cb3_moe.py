@@ -40,7 +40,7 @@ class CB3Arena:
         self.w2_hi = torch.empty((slots, DIM, INTER // 8), **u8)
         self.w2_cb = torch.empty((slots, DIM, 8), **u8)
         self.s2 = torch.empty((slots, DIM, SG2), **u8)
-        self.sim = None  # engine.codebook_sim.CodebookSim(3), set by the owner
+        self.sim = None  # engine.codebook_sim.CodebookSim(3), set by the caller
 
     @property
     def bytes_per_slot(self) -> int:
