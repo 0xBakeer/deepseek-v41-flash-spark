@@ -35,8 +35,8 @@ T_VERIFY = 6   # tok + 5 drafts
 T_DRAFT = 5
 
 
-def _lin(x, w):  # bf16 GEMM, fp32 accumulate inside cuBLAS
-    return F.linear(x, w)
+def _lin(x, w):  # bf16 tensor -> cuBLAS; FP8Weight -> Triton fp8 kernel (stored format, half the bytes)
+    return R.dense(x, w)
 
 
 class FastDecoder:

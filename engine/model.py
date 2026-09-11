@@ -61,7 +61,8 @@ R.MM_TILE = MM_TILE
 # ----------------------------------------------------------------------------- weights
 class IndexerWeights:
     def __init__(self, get, p: str, owns_k: bool, device: str):
-        self.wq_b = R.dequant_fp8_block(get(p + "indexer.wq_b.weight").to(device), get(p + "indexer.wq_b.scale").to(device))
+        w, sc = get(p + "indexer.wq_b.weight").to(device), get(p + "indexer.wq_b.scale").to(device)
+        self.wq_b = R.FP8Weight(w, sc) if (R.FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1") else R.dequant_fp8_block(w, sc)
         self.weights_proj = get(p + "indexer.weights_proj.weight").to(device).to(torch.bfloat16)
         self.owns_k = owns_k
         if owns_k:
@@ -145,12 +146,15 @@ class MTPWeights:
             return get(p + name).to(dev).to(torch.float32)
 
         def fp8lin(name):
-            return R.dequant_fp8_block(get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev))
+            w, sc = get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev)
+            if R.FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1":
+                return R.FP8Weight(w, sc)
+            return R.dequant_fp8_block(w, sc)
 
         self.attn_norm = bf("attn_norm.weight"); self.ffn_norm = bf("ffn_norm.weight")
         self.attn_sink = f32("attn.attn_sink"); self.q_norm = bf("attn.q_norm.weight"); self.kv_norm = bf("attn.kv_norm.weight")
         self.wq_a = fp8lin("attn.wq_a"); self.wq_b = fp8lin("attn.wq_b"); self.wkv = fp8lin("attn.wkv")
-        self.wo_a = fp8lin("attn.wo_a").view(args.o_groups, args.o_lora_rank, -1); self.wo_b = fp8lin("attn.wo_b")
+        self.wo_a = R.dequant_fp8_block(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev)).view(args.o_groups, args.o_lora_rank, -1); self.wo_b = fp8lin("attn.wo_b")
         self.hc_attn_fn = f32("hc_attn_fn"); self.hc_ffn_fn = f32("hc_ffn_fn")
         self.hc_attn_base = f32("hc_attn_base"); self.hc_ffn_base = f32("hc_ffn_base")
         self.hc_attn_scale = f32("hc_attn_scale"); self.hc_ffn_scale = f32("hc_ffn_scale")

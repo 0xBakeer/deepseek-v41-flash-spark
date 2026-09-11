@@ -40,6 +40,11 @@ from functools import lru_cache
 import torch
 import torch.nn.functional as F
 
+try:
+    from fp8_linear import FP8Weight, fp8_linear  # tools/fp8_linear.py (Triton); dense weights stay fp8 in memory
+except Exception:  # noqa: BLE001
+    FP8Weight, fp8_linear = None, None
+
 FP4_TABLE = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
@@ -214,7 +219,10 @@ class LayerWeights:
             return get(p + name).to(dev).to(torch.float32)
 
         def fp8lin(name):
-            return dequant_fp8_block(get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev))
+            w, sc = get(p + name + ".weight").to(dev), get(p + name + ".scale").to(dev)
+            if FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1":
+                return FP8Weight(w, sc)  # kept in the stored format: half the bytes of bf16
+            return dequant_fp8_block(w, sc)
 
         self.attn_norm = bf("attn_norm.weight")
         self.ffn_norm = bf("ffn_norm.weight")
@@ -224,7 +232,7 @@ class LayerWeights:
         self.wq_a = fp8lin("attn.wq_a")
         self.wq_b = fp8lin("attn.wq_b")
         self.wkv = fp8lin("attn.wkv")
-        self.wo_a = fp8lin("attn.wo_a").view(args.o_groups, args.o_lora_rank, -1)  # convert.py dequantizes it
+        self.wo_a = dequant_fp8_block(get(p + "attn.wo_a.weight").to(dev), get(p + "attn.wo_a.scale").to(dev)).view(args.o_groups, args.o_lora_rank, -1)  # convert.py dequantizes it; used in a grouped einsum
         self.wo_b = fp8lin("attn.wo_b")
         self.hc_attn_fn = f32("hc_attn_fn")
         self.hc_ffn_fn = f32("hc_ffn_fn")
@@ -251,7 +259,8 @@ class LayerWeights:
 class EngramWeights:
     def __init__(self, get, layer: int, device: str):
         p = f"layers.{layer}.engram."
-        self.wkv = dequant_fp8_block(get(p + "wkv.weight").to(device), get(p + "wkv.scale").to(device))
+        w, sc = get(p + "wkv.weight").to(device), get(p + "wkv.scale").to(device)
+        self.wkv = FP8Weight(w, sc) if (FP8Weight is not None and os.environ.get("DSV41_DENSE_FP8", "1") == "1") else dequant_fp8_block(w, sc)
         self.q_weight = get(p + "q_weight").to(device).float()
         self.k_weight = get(p + "k_weight").to(device).float()
 
@@ -271,6 +280,8 @@ def mm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     the result identical for any chunk length. Set MM_TILE from engine/model.py; 0 keeps the
     plain behaviour for tools/expert_trace.py and the stored reference trace.
     """
+    if FP8Weight is not None and isinstance(w, FP8Weight):
+        return dense(x, w)  # fp8 kernel (decode) / transient dequant (prefill); not row-tiled
     B = MM_TILE
     if B <= 0 or x.ndim != 2 or x.size(0) == B:
         return F.linear(x, w)
@@ -315,6 +326,16 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     xf = x.float()
     xf = xf * rms_rsqrt(xf, eps)
     return (w.float() * xf).to(dtype)
+
+
+def dense(x: torch.Tensor, w) -> torch.Tensor:
+    """x @ w^T where w is a bf16 tensor or an FP8Weight (stored-format fp8 + ue8m0 block scales).
+    FP8Weight: the Triton kernel for decode-sized M, otherwise a transient bf16 dequant + cuBLAS."""
+    if FP8Weight is not None and isinstance(w, FP8Weight):
+        if x.numel() // x.shape[-1] <= 16:
+            return fp8_linear(x, w)
+        return F.linear(x.to(torch.bfloat16), w.dequant())
+    return F.linear(x, w)
 
 
 def qlinear(x: torch.Tensor, w_bf16: torch.Tensor) -> torch.Tensor:
