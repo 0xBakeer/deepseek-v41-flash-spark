@@ -162,3 +162,19 @@ Known remaining inexactness:
 * The routing trace and the warm-start ranking were recorded before the hc_post fix; they are
   approximate (routing agreement between the two states is high but not measured).
 * Thinking-on decode, sampled-output quality, long prompts (>2k) and the container image remain unmeasured.
+
+
+## v0.3.0-wip (2026-09-11) — what is still not done
+
+* **Warm start is 183 s in the CB3 format** (GPU packing of 6,160 experts) against 19 s for FP4;
+  no on-disk packed cache exists (it would be 88.8 GB).
+* **Prefill in the CB3 format unpacks to FP4 on the fly**: ~1.35x the MoE time of an FP4 arena of
+  the same size at 2,048-token chunks. A CB3 kernel efficient at prefill shapes is not written.
+* **No two-tier arena** (hot experts at FP4, cold at CB3): at 40.8 % all-CB3 the 90.5 GB arena has
+  no headroom for it, so it would trade share for precision rather than add capacity.
+* **Decode is still bounded by the bytes a step moves**: after the kernel work of this tag the
+  verify step is ~87 % weight traffic at the box's achievable bandwidth (routed experts, FP8 dense,
+  `wo_a`, LM head). Further speed comes from fewer bytes (lower-bit cold experts, lower-bit dense
+  projections), fewer of the ~5,300 small kernels per step, or higher acceptance, not from faster
+  kernels for the same bytes.
+* **Thinking-on, 8k+ prompts and sampled A/B are not measured in the CB3 configuration.**

@@ -6,7 +6,9 @@ from engine.v41_engine import V41Engine, log
 from engine.fastdecode import FastDecoder
 md = os.environ.get("MODEL_DIR", os.path.expanduser("~/models/DeepSeek-V4.1-Flash"))
 keep = float(os.environ.get("KEEP", "0.25"))
-eng = V41Engine(md, max_seq=8192, trace_stats="results/trace-full-20260910/stats/coverage.json", spec=True, prune_keep=keep)
+eng = V41Engine(md, max_seq=8192, trace_stats="results/trace-full-20260910/stats/coverage.json", spec=True, prune_keep=keep,
+                arena_gb=float(os.environ.get("ARENA_GB", 0)) or None, transient_slots=int(os.environ.get("TRANSIENT_SLOTS", 400)),
+                keep_free_gb=float(os.environ.get("KEEP_FREE_GB", 20)), expert_format=os.environ.get("EXPERT_FORMAT", "fp4"))
 m = eng.model
 sys.path.insert(0, os.path.join(md, "encoding")); from encoding import encode_messages
 pr = encode_messages([{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number, with tests."}], thinking_mode="chat")

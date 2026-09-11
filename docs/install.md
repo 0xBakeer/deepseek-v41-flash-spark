@@ -134,3 +134,21 @@ kernel, spec on/off — so you never have to remember what the server was starte
 
 Next: [architecture](architecture.md) · [OpenAI API](openai-api.md) ·
 [benchmarking](benchmarking.md) · [gotchas](gotchas.md)
+
+### Routed-expert arena format (`EXPERT_FORMAT`)
+
+`EXPERT_FORMAT` (empty or `fp4`, or `cb3`) chooses what the resident expert arena holds.
+
+| | bytes per expert | slots in 90.5 GB | share of the 15,360 routed experts |
+|---|---|---|---|
+| `fp4` (default) | 18,800,640 | 4,813 | 31.3 % |
+| `cb3` | 14,454,784 | 6,260 | 40.8 % |
+
+`cb3` is the 3-bit per-row codebook format (`tools/cb3.py`): per matrix row the 8 FP4 grid levels
+that best represent that row, one 3-bit index per weight, and the checkpoint's UE8M0 scales
+unchanged. It is packed on the GPU at warm start from the same FP4 shards, so nothing on disk
+changes; the price is a slower warm start. Because it is 0.769x the bytes, `PRUNE_KEEP=0.40`
+(6,160 experts, 89.0 GB) is all-resident in `cb3` where it would not fit in `fp4`.
+
+`--sim-bits` is a different thing and stays FP4-only: it simulates the same codebook inside an FP4
+arena to measure quality without a kernel, and the engine refuses to combine the two.

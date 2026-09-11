@@ -426,7 +426,9 @@ class ExpertStore:
             done += 1
             if done % 500 == 0:
                 log(f"warm start {done}/{len(jobs)} experts, {self.stats['bytes_read'] / 1e9:.1f} GB, {time.time() - t0:.0f}s")
-        log(f"warm start done: {len(jobs)} experts resident ({len(jobs) * EXPERT_BYTES / 1e9:.1f} GB) in {time.time() - t0:.0f}s")
+        per_slot = getattr(self.arena, "bytes_per_slot", EXPERT_BYTES)
+        log(f"warm start done: {len(jobs)} experts resident ({len(jobs) * per_slot / 1e9:.1f} GB, "
+            f"{self.stats['bytes_read'] / 1e9:.1f} GB read) in {time.time() - t0:.0f}s")
 
     def hit_rate(self):
         h, m = self.stats["hits"], self.stats["misses"]

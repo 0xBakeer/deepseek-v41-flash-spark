@@ -12,15 +12,21 @@ Per slot: w1/w3 lo [2304, 1280] + hi [2304, 640] + cb [2304, 8] + s [2304, 160];
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
 
 import fp4_moe as F4
-from fp4_moe import DIM, INTER, _chunk_dot, _split4, _ue8m0, build_routing, _pick_bm  # noqa: F401
+from fp4_moe import DIM, INTER, _chunk_dot, _split4, _ue8m0, build_routing, build_routing_small, _pick_bm  # noqa: F401
 from cb3 import dequant_cb3, fp4_to_cb3
 
 SG1, SG2 = DIM // 32, INTER // 32
+# lo + hi + 8 codebook bytes per row, plus the unchanged UE8M0 scales: 14,454,784 B vs FP4's
+# 18,800,640 (0.769x), i.e. 3.26-3.28 bit/weight.
+CB3_BYTES_PER_SLOT = (2 * (INTER * (DIM // 4 + DIM // 8 + 8) + INTER * SG1)
+                      + DIM * (INTER // 4 + INTER // 8 + 8) + DIM * SG2)
 
 
 class CB3Arena:
@@ -387,8 +393,21 @@ def _cb3v2_down_kernel(
     tl.store(y_ptr + row[:, None] * stride_y + offs_n[None, :], acc, mask=mask_m[:, None])
 
 
+UNPACK_BATCH = int(os.environ.get("DSV41_CB3_UNPACK_BATCH", 32))
+PREFILL_MODE = os.environ.get("DSV41_CB3_PREFILL", "fp4")   # "fp4" = unpack fallback, "direct" = CB3 kernel
+PREFILL_MIN_P = int(os.environ.get("DSV41_CB3_PREFILL_MIN_P", 65))
+
+
 class CB3ArenaV2(CB3Arena):
     """Same tensors as CB3Arena, v2 bit layout inside them."""
+
+    def fp4_scratch(self, slots: int):
+        """A small packed-FP4 arena the prefill path unpacks into. Allocated once and reused; at the
+        default batch of 32 it is 0.6 GB."""
+        sc = getattr(self, "_scratch", None)
+        if sc is None or sc.slots < slots:
+            self._scratch = sc = F4.ExpertArena(max(slots, UNPACK_BATCH), self.device)
+        return sc
 
     def load_slot(self, slot: int, w1, s1, w2, s2, w3, s3, non_blocking: bool = False) -> None:
         assert self.sim is not None, "CB3ArenaV2.sim must be a CodebookSim(3)"
@@ -675,11 +694,16 @@ def moe_forward_v3(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, 
     assert x.dtype == torch.bfloat16 and x.shape[1] == DIM and x.is_contiguous()
     T, K = slots.shape
     P = T * K
+    if P >= PREFILL_MIN_P and PREFILL_MODE == "fp4" and block_m is None and cfg_up is None:
+        return moe_forward_prefill(x, slots, weights, arena, swiglu_limit)
     dev = x.device
-    BM = block_m or 16
+    BM = block_m or _pick_bm(P)
     bn1, nw1, ns1 = cfg_up or CB3_UP_CFG[BM]
     bn2, nw2, ns2 = cfg_down or CB3_DOWN_CFG[BM]
-    block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
+    if P <= 64:  # decode-sized call: pure-torch routing (static shapes, graph-capturable)
+        block_slot, block_pair, NB = build_routing_small(slots, BM)
+    else:
+        block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
     wgt = weights.reshape(-1)
     if wgt.dtype != torch.float32 or not wgt.is_contiguous():
         wgt = wgt.float().contiguous()
@@ -692,4 +716,130 @@ def moe_forward_v3(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, 
     _cb3v3_down_kernel[(NB, DIM // bn2)](
         h, arena.w2_lo, arena.w2_hi, arena.w2_cb, arena.s2, parts, block_slot, block_pair,
         h.stride(0), parts.stride(0), TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T, NB512=CB3.block_plan(INTER)[0], NB256=CB3.block_plan(INTER)[1], num_warps=nw2, num_stages=ns2)
+    return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)
+
+
+# ---------------------------------------------------------------------------- prefill: unpack to FP4
+# CB3's decode work is paid once per PAIR BLOCK, its byte saving once per expert. At decode there is
+# one block per expert and CB3 wins (0.79x the FP4 time); at prefill shapes there are one to twelve,
+# the decode dominates, and CB3 measured 2.3-6.7x the FP4 time depending on the block size. So a
+# prefill-sized call does not run the CB3 kernel at all: it unpacks the experts it needs back into
+# packed FP4 codes -- bit-exact, since the CB3 codes ARE a subset of the FP4 grid -- a batch at a
+# time into a small scratch arena, and runs the ordinary FP4 kernel over them. One unpack of an
+# expert costs a read of its 14.45 MB and a write of 18.80; the FP4 kernel then behaves exactly as it
+# does today. `DSV41_CB3_PREFILL=direct` forces the CB3 kernel instead (for measurement).
+
+@triton.jit
+def _unpack_pair(out_base, Lk, Hm, A, B, KPAR: tl.constexpr, BN: tl.constexpr, KB: tl.constexpr):
+    """Store the two scale groups of one lo sub-tile as 2 x 16 packed-FP4 bytes."""
+    j = tl.arange(0, 16)[None, :]
+    if KPAR == 0:
+        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_00)
+        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_42)
+    else:
+        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_04)
+        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_46)
+    tl.store(out_base + j, p0)
+    tl.store(out_base + 16 + j, p1)
+
+
+@triton.jit
+def _cb3_unpack_kernel(LO, HI, CB, OUT, SRC, N,
+                       KL: tl.constexpr, KH: tl.constexpr, KB: tl.constexpr,
+                       BN: tl.constexpr, NB512: tl.constexpr, NB256: tl.constexpr):
+    b = tl.program_id(0)          # destination scratch slot
+    nb = tl.program_id(1)         # row block
+    src = tl.load(SRC + b).to(tl.int64)
+    offs_n = nb * BN + tl.arange(0, BN)
+    lo = LO + src * (N * KL) + offs_n[:, None] * KL
+    hi = HI + src * (N * KH) + offs_n[:, None] * KH
+    out = OUT + b.to(tl.int64) * (N * KB) + offs_n[:, None] * KB
+    A, Bc = _cb_ab(CB + src * (N * 8) + offs_n[:, None] * 8, BN)
+    for j in range(0, NB512):
+        L = tl.load(lo + (j * 128 + tl.arange(0, 128))[None, :])
+        H = tl.load(hi + (j * 64 + tl.arange(0, 64))[None, :])
+        La, Lb, Lc, Ld = _split4(L, BN, 32)
+        L0, L1 = _split2(La, BN, 16)
+        L2, L3 = _split2(Lb, BN, 16)
+        L4, L5 = _split2(Lc, BN, 16)
+        L6, L7 = _split2(Ld, BN, 16)
+        H0, H1, H2, H3 = _split4(H, BN, 16)
+        o = out + j * 256
+        _unpack_pair(o, L0, H0, A, Bc, 0, BN, KB)
+        _unpack_pair(o + 32, L1, H0, A, Bc, 1, BN, KB)
+        _unpack_pair(o + 64, L2, H1, A, Bc, 0, BN, KB)
+        _unpack_pair(o + 96, L3, H1, A, Bc, 1, BN, KB)
+        _unpack_pair(o + 128, L4, H2, A, Bc, 0, BN, KB)
+        _unpack_pair(o + 160, L5, H2, A, Bc, 1, BN, KB)
+        _unpack_pair(o + 192, L6, H3, A, Bc, 0, BN, KB)
+        _unpack_pair(o + 224, L7, H3, A, Bc, 1, BN, KB)
+    if NB256 > 0:
+        for j in range(0, NB256):
+            L = tl.load(lo + (NB512 * 128 + j * 64 + tl.arange(0, 64))[None, :])
+            H = tl.load(hi + (NB512 * 64 + j * 32 + tl.arange(0, 32))[None, :])
+            L0, L1, L2, L3 = _split4(L, BN, 16)
+            H0, H1 = _split2(H, BN, 16)
+            o = out + NB512 * 256 + j * 128
+            _unpack_pair(o, L0, H0, A, Bc, 0, BN, KB)
+            _unpack_pair(o + 32, L1, H0, A, Bc, 1, BN, KB)
+            _unpack_pair(o + 64, L2, H1, A, Bc, 0, BN, KB)
+            _unpack_pair(o + 96, L3, H1, A, Bc, 1, BN, KB)
+
+
+def _unpack_into(arena, src_slots: torch.Tensor, scratch) -> None:
+    """CB3 slots `src_slots` (int32 [B]) -> packed-FP4 scratch slots 0..B-1 (scales are copied: the
+    UE8M0 bytes are the same in both formats)."""
+    B = src_slots.numel()
+    BN = 64
+    for (lo, hi, cb, N, K, out, s_src, s_dst) in (
+            (arena.w1_lo, arena.w1_hi, arena.w1_cb, INTER, DIM, scratch.w1, arena.s1, scratch.s1),
+            (arena.w3_lo, arena.w3_hi, arena.w3_cb, INTER, DIM, scratch.w3, arena.s3, scratch.s3),
+            (arena.w2_lo, arena.w2_hi, arena.w2_cb, DIM, INTER, scratch.w2, arena.s2, scratch.s2)):
+        n512, n256 = CB3.block_plan(K)
+        _cb3_unpack_kernel[(B, triton.cdiv(N, BN))](
+            lo, hi, cb, out, src_slots, N, KL=K // 4, KH=K // 8, KB=K // 2,
+            BN=BN, NB512=n512, NB256=n256, num_warps=4, num_stages=2)
+        s_dst[:B].copy_(s_src[src_slots.long()])
+
+
+def moe_forward_prefill(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor,
+                        arena: CB3ArenaV2, swiglu_limit: float = 10.0,
+                        batch: int | None = None) -> torch.Tensor:
+    """Prefill-sized call over a CB3 arena, via the FP4 kernel and a batched unpack scratch."""
+    T, K = slots.shape
+    P = T * K
+    dev = x.device
+    batch = batch or UNPACK_BATCH
+    uniq = torch.unique(slots)
+    uniq = uniq[uniq >= 0].to(torch.int32)
+    n = int(uniq.numel())
+    batch = min(batch, n)
+    scratch = arena.fp4_scratch(batch)
+    inv = torch.full((arena.slots,), -1, dtype=torch.int32, device=dev)
+    ar = torch.arange(batch, dtype=torch.int32, device=dev)
+    BM = _pick_bm(P)
+    bn1, nw1, ns1 = F4._UP_CFG[BM]
+    bn2, nw2, ns2 = F4._DOWN_CFG[BM]
+    wgt = weights.reshape(-1)
+    if wgt.dtype != torch.float32 or not wgt.is_contiguous():
+        wgt = wgt.float().contiguous()
+    # h and parts are written exactly once per (token, k) pair across the batches -- every pair's
+    # expert is in exactly one batch -- so neither needs zeroing and the reduction runs once.
+    h = torch.empty((P, INTER), dtype=torch.bfloat16, device=dev)
+    parts = torch.empty((P, DIM), dtype=torch.float32, device=dev)
+    for i in range(0, n, batch):
+        sel = uniq[i:i + batch]
+        b = int(sel.numel())
+        _unpack_into(arena, sel, scratch)
+        inv.fill_(-1)
+        inv[sel.long()] = ar[:b]
+        s2 = torch.where(slots >= 0, inv[slots.long().clamp_min(0)], slots.to(torch.int32))
+        block_slot, block_pair, NB = build_routing(s2, b, BM)
+        F4._moe_up_kernel[(NB, INTER // bn1)](
+            x, scratch.w1, scratch.s1, scratch.w3, scratch.s3, h, wgt, block_slot, block_pair,
+            x.stride(0), h.stride(0), float(swiglu_limit),
+            TOPK=K, N=INTER, K=DIM, BM=BM, BN=bn1, num_warps=nw1, num_stages=ns1)
+        F4._moe_down_kernel[(NB, DIM // bn2)](
+            h, scratch.w2, scratch.s2, parts, block_slot, block_pair, h.stride(0), parts.stride(0),
+            TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T, num_warps=nw2, num_stages=ns2)
     return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)

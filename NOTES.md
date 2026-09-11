@@ -1110,3 +1110,91 @@ the same `h`/`parts` buffers, which is clean but touches the graph capture), war
 the coldest kept experts, and the `--cb3-cold-frac` CLI. That is a serving-path change of its own
 size and I stopped short of it rather than half-land it. The decode line at keep 40 % and its
 teacher-forced check belong with that wiring.
+
+### 2026-09-11 12:15-14:10 -- CB3 wired into the serving path: keep 40 % all-resident
+
+Single-tier: `expert_format` = `fp4` (default, unchanged) or `cb3`, where the WHOLE routed-expert
+arena is `CB3ArenaV2` slots packed on the GPU at warm start from the same FP4 shards. Plumbed
+through `V41Engine(expert_format=...)`, `--expert-format`, the generic `--engine-kwargs`,
+`EXPERT_FORMAT` in `start.sh` and `scripts/entrypoint.sh`, `env.example`, `config()`
+(`expert_format` + `expert_mb`) and `docs/install.md`. `--sim-bits` is unchanged and FP4-only; the
+engine refuses to combine them, because `cb3` IS the format `--sim-bits` simulates.
+
+The arena arithmetic works out: 90.5 GB is 6,260 CB3 slots of 14.45 MB (40.8 % of the 15,360 routed
+experts) against 4,813 FP4 slots (31.3 %). `--prune-keep 0.40` keeps `ceil(0.40*384) = 154` experts
+per layer = 6,160 = 89.0 GB, so the LRU (6,252 slots after the 8-slot transient ring) holds all of
+them and decode never touches NVMe. The ring stays at 8 slots of the same format.
+
+`moe_fn` became a dispatcher on the arena type rather than a fixed kernel, so the **DSpark draft
+arena stays FP4**: it is 384 experts (7.2 GB) read five times per step, and a 3-bit drafter would
+cost acceptance for nothing.
+
+**1. Prefill does NOT run the CB3 kernel.** CB3's decode work is paid once per pair BLOCK while its
+byte saving is paid once per expert, so the two scale differently. Measured on one layer's real kept
+set (154 experts, top-6), against an FP4 arena holding the *same* re-quantized weights:
+
+| | FP4 | CB3 kernel direct | CB3 via the unpack fallback |
+|---|---|---|---|
+| T=512 | 26.94 ms | 172.97 ms (6.42x) | 50.64 ms (1.88x) |
+| T=2048 | 55.31 ms | 368.55 ms (6.66x) | 74.52 ms (1.35x) |
+
+So a call with more than 64 pairs unpacks the experts it needs back into packed FP4 codes -- a
+Triton kernel reusing the same PTX decoder, writing bytes instead of dotting -- a batch of 32 at a
+time into a 0.6 GB scratch arena, and runs the ordinary FP4 kernel. It is **bit-exact**: the CB3
+codes are a subset of the FP4 grid, and the fallback's output is rel 0.0e+00 against the FP4 kernel
+on the same weights (`tools/test_cb3_moe.py` T=64 now exercises exactly this path). `h` and `parts`
+are written exactly once per (token, k) pair across the batches, so neither needs zeroing and the
+reduction runs once. `DSV41_CB3_PREFILL=direct` forces the CB3 kernel instead, for measurement.
+
+Also fixed on the way: `moe_forward_v3` was hard-coded to BM=16. With `_pick_bm` it now matches the
+FP4 path, and at prefill sizes the old default was 6.5x FP4 rather than 2.3x.
+
+**2. Warm start: 183 s** for 6,160 experts (89.0 GB resident, 123.1 GB read from NVMe), against 19 s
+for 4,800 FP4 experts (90.2 GB, 97.5 GB read). The extra ~160 s is the GPU packing, not the reads.
+`fp4_to_cb3_v2` was first made ~cheap: the old version found each code's position in its row
+codebook with an `[N, K, 8]` equality test (94 MB of bool temporaries per matrix); `CodebookSim`
+now carries a `pos` table (subset, level) -> index inside the subset, so the position is one gather,
+and the packer works in uint8/int16 instead of int64. No on-disk cache: it would be 88.8 GB and the
+box has 114 GB free, which is too tight to spend on a 3-minute start-up.
+
+**3/4. Graphs and correctness.** CUDA-graph capture and the 6,160-entry device slot LUT work
+unchanged (the decode call is P=36 <= 64, so it takes `build_routing_small`, static shapes, as the
+FP4 path does). `engine/test_fastdecode.py` in the CB3 config: drafts equal, logits rel err
+0.1175 / 0.0344, **argmax agreement 1.00 / 1.00** -- the same quality of agreement as FP4
+(0.0916 / 0.0350). Its own step timing was 124.0 ms against 133.9-136.3 ms for keep-31 % FP4.
+`engine/diag_decode.py` is a decode-vs-prefill consistency check that forces `DSV41_FAST=0`; with
+CB3 the two sides would use different kernels (CB3 for the 1-token decode, the unpack fallback for
+the prefill), so it measures the fallback's exactness rather than the decode path -- and that is
+already covered bit-exactly by the unit test.
+
+**Measurements** (one run each, same box, `--arena-gb 90.5 --transient-slots 8 --keep-free-gb 10`,
+one engine load per config so the decode and the TTFT share a warm arena):
+
+| | keep 0.31, fp4 (shipped) | keep 0.40, cb3 |
+|---|---|---|
+| resident | 4,800 experts, 90.2 GB, 31.3 % | **6,160 experts, 89.0 GB, 40.8 %** |
+| warm start | 19 s | 183 s |
+| 200-token greedy `decode_tok_s` | 16.61 | **18.98** (+14.3 %) |
+| accepted length / steps | 2.83 / 71 | 3.03 / 66 |
+| `decode_s` | 12.103 | 10.537 |
+| TTFT, 1,806-token prompt | 11.11 s | **9.81 s** |
+| held-out teacher-forced, coding NLL | 1.5705 | **1.5384** (-0.032) |
+| held-out teacher-forced, general NLL | 3.3790 | **3.2087** (-0.170) |
+
+The FP4 numbers reproduce RESULTS 2.4 (1.5729 / 3.3788), and the CB3 numbers reproduce the
+*simulated* 3-bit keep-40 % row of that table (1.5392 / 3.2122) to 0.0008 and 0.0035 nats -- which is
+the end-to-end proof that the packed format, the kernel and the simulation are the same thing.
+
+Faster and better on every axis except warm start, so the box's `.env` moves to
+`PRUNE_KEEP=0.40 EXPERT_FORMAT=cb3` (everything else unchanged).
+
+**Caveats.**
+* Warm start is 3 minutes instead of 19 seconds. That is the price of packing 123 GB of FP4 into
+  89 GB of CB3 on every start; an on-disk cache would fix it at 88.8 GB of disk, which this box does
+  not have to spare.
+* Prefill pays ~1.35x the MoE time of a same-sized FP4 arena for the unpack. It does not show in the
+  TTFT above because keep 0.40 and keep 0.31 are different working sets, but it is real.
+* The `num_warps=8` inline-asm miscompile (NOTES 2026-09-11 11:20) is still pinned out of every CB3
+  config, and the prefill path avoids the CB3 kernel entirely, so it cannot be hit there either.
+* The mixed hot-FP4 / cold-CB3 arena is still not built. At 40.8 % all-CB3 there is no headroom left
+  in 90.5 GB anyway; it would be a quality refinement (hot experts back at FP4), not a capacity one.

@@ -319,3 +319,40 @@ the Engram rows: step 147.2 → 146.6 ms, decode 16.56 vs 16.63 tok/s (bit-ident
 busy time is 144.9 of the 146.6 ms; the rest is per-kernel latency inside the graphs (about 5,300
 kernels per step), not launch count. Segmentation stays on (`DSV41_GRAPH_SEGMENTS=0` restores);
 pinned staging is off by default (`DSV41_ENGRAM_PINNED=1`).
+
+
+## v0.3.0-wip — 2026-09-11
+
+Measured 2026-09-11 10:00-14:10 on the same box and checkpoint, the pool ours alone. Commits
+`94a96a6` .. this tag. Every row is one run of the stated command; no benchmark sweeps were run.
+The kernel work that led here is in the dated addenda 2.8-2.11 above; this section is the shipped
+configuration that changed.
+
+### 3.1 Shipped default: keep 40 %, every resident expert in the 3-bit CB3 format
+
+`PRUNE_KEEP=0.40 EXPERT_FORMAT=cb3 ARENA_GB=90.5 TRANSIENT_SLOTS=8 KEEP_FREE_GB=10`, everything
+resident, CUDA-graph decode path, device slot LUT. Same prompt and flags as 2.6 for the decode
+line; teacher-forced on `corpus/heldout_corpus.jsonl`; TTFT on the 1,806-token prompt of 2.x.
+
+| | keep 31 %, FP4 (v0.2.0-wip default) | **keep 40 %, CB3 (this tag)** |
+|---|---|---|
+| resident experts | 4,800 = 90.2 GB (31.3 %) | **6,160 = 89.0 GB (40.8 %)** |
+| warm start (packing on the GPU) | 19 s | 183 s |
+| decode, 200 greedy tokens | 16.61 tok/s (acceptance 2.83, 71 steps) | **18.98 tok/s** (acceptance 3.03, 66 steps) |
+| TTFT, 1,806-token prompt | 11.11 s | **9.81 s** |
+| held-out coding NLL | 1.5705 | **1.5384** (−0.032) |
+| held-out general NLL | 3.3790 | **3.2087** (−0.170) |
+
+The CB3 row reproduces the simulated 3-bit keep-40 % row of 2.4 (1.5392 / 3.2122) to 0.0008 /
+0.0035 nats: the packed format, the kernel and the simulation are the same arithmetic. Against the
+full unpruned model on the same corpus (2.4: 1.5067 / 3.1884) this configuration costs +0.032
+(code) / +0.020 (prose) nats.
+
+Prefill does not run the CB3 decode kernel: above 64 token-expert pairs the experts are unpacked
+to FP4 codes on the fly (bit-exact) and the FP4 kernel runs; on one layer at 2,048 tokens that is
+1.35x the MoE time of an FP4 arena of the same size. The two-tier arena (hot experts back at FP4,
+cold in CB3) is not built; at 40.8 % all-CB3 there is no headroom in 90.5 GB for it.
+
+### What is not measured in this tag
+Thinking-on decode in this configuration, sampled quality A/B, long-context (8k+) serving in this
+configuration, the container image end to end.

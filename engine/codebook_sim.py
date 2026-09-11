@@ -39,8 +39,17 @@ class CodebookSim:
             j = d.argmin(dim=0)
             near[i] = members[j]
             cost[i] = (d.min(dim=0).values ** 2)
+        # position of each level's nearest member INSIDE the subset (0..k-1). `near` gives the FP4
+        # code, `pos` gives the codebook index, which is what a packed low-bit format stores; having
+        # it here means the packer never has to search for a code in its row's codebook.
+        pos = torch.zeros(S, 16, dtype=torch.uint8)
+        for i, sub in enumerate(subsets):
+            lut = {c: j for j, c in enumerate(sub)}
+            pos[i] = torch.tensor([lut[int(c)] for c in near[i]], dtype=torch.uint8)
         self.subsets = subsets
+        self.subsets_t = torch.tensor(subsets, dtype=torch.uint8, device=device)  # [S, k]
         self.near = near.to(device)
+        self.pos = pos.to(device)
         self.cost = cost.to(device)
         self.device = device
 

@@ -113,7 +113,8 @@ class V41Engine:
                  trace_stats: str | None = None, act_quant: bool = False, spec: bool = True, io_threads: int = 12,
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
                  hot_profile: str | None = None, prune_keep: float | None = None,
-                 sim_bits: int | None = None, sim_cold_frac: float = 1.0, prune_select: str = "uniform"):
+                 sim_bits: int | None = None, sim_cold_frac: float = 1.0, prune_select: str = "uniform",
+                 expert_format: str = "fp4"):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
@@ -129,16 +130,50 @@ class V41Engine:
 
         self.act_quant = act_quant
         self.trace_stats = trace_stats
+        self.expert_format = (expert_format or "fp4").lower()
+        assert self.expert_format in ("fp4", "cb3"), self.expert_format
         try:
             import fp4_moe as K
-            self.moe_fn, arena_cls = K.moe_forward, K.ExpertArena
+            fp4_moe_fn, fp4_arena_cls = K.moe_forward, K.ExpertArena
             self.kernel = "triton-fp4"
             log("using Triton FP4 MoE kernel")
         except Exception as e:  # noqa: BLE001
             from engine import moe_fallback as K
-            self.moe_fn, arena_cls = K.moe_forward, K.ExpertArena
+            fp4_moe_fn, fp4_arena_cls = K.moe_forward, K.ExpertArena
             self.kernel = "dequant-fallback"
             log(f"Triton kernel unavailable ({e!r}); using the slow dequant fallback")
+        cb3_cls = None
+        if self.expert_format == "cb3":
+            import cb3_moe as C3
+            from engine.codebook_sim import CodebookSim
+            assert not sim_bits, "--sim-bits simulates a low-bit format inside an FP4 arena; it is " \
+                                 "meaningless with --expert-format cb3, which IS the packed format"
+            cb3_cls = C3.CB3ArenaV2
+            self._cb3_sim = CodebookSim(3, device)
+            cb3_moe_fn = C3.moe_forward_v3
+            self.kernel = "triton-cb3"
+            log("using Triton CB3 (3-bit per-row codebook) MoE kernel for the routed experts")
+
+        def moe_fn(x, slots, weights, arena, limit):
+            """Dispatch on the arena's format. The DSpark draft arena stays FP4 whatever the main
+            arena is -- it is 384 experts (7.2 GB), it is read five times per step, and a 3-bit
+            drafter would cost acceptance for nothing."""
+            if cb3_cls is not None and isinstance(arena, cb3_cls):
+                return cb3_moe_fn(x, slots, weights, arena, limit)
+            return fp4_moe_fn(x, slots, weights, arena, limit)
+
+        self.moe_fn = moe_fn
+        arena_cls = fp4_arena_cls
+
+        def make_expert_arena(n_slots):
+            if cb3_cls is None:
+                return fp4_arena_cls(n_slots, device)
+            a = cb3_cls(n_slots, device)
+            a.sim = self._cb3_sim
+            return a
+
+        self.expert_bytes = (EX.EXPERT_BYTES if cb3_cls is None
+                             else __import__("cb3_moe").CB3_BYTES_PER_SLOT)
 
         self.W = Weights(model_dir, index, self.args, device, log=log, act_quant=act_quant)
         self.caches = Caches(self.args, max_seq, device)
@@ -164,12 +199,13 @@ class V41Engine:
                 log(f"arena {arena_gb:.1f} GB capped to {cap:.1f} GB (MemAvailable {host_avail / 1e9:.1f} GB, "
                     f"keep_free {keep_free_gb} GB)")
                 arena_gb = max(10.0, cap)
-        slots = int(arena_gb * 1e9 / EX.EXPERT_BYTES)
+        slots = int(arena_gb * 1e9 / self.expert_bytes)
         self.arena_gb, self.slots = round(arena_gb, 1), slots
         log(f"CUDA free {free / 1e9:.1f} GB of {total / 1e9:.1f}; host MemAvailable "
-            f"{(host_avail or 0) / 1e9:.1f} GB; arena {arena_gb:.1f} GB = {slots} expert slots "
+            f"{(host_avail or 0) / 1e9:.1f} GB; arena {arena_gb:.1f} GB = {slots} {self.expert_format} "
+            f"expert slots of {self.expert_bytes / 1e6:.2f} MB "
             f"({slots / 15360 * 100:.0f}% of all routed experts, {'auto' if auto else 'pinned'})")
-        self.arena = arena_cls(slots, device)
+        self.arena = make_expert_arena(slots)
         self.store = EX.ExpertStore(model_dir, index, self.arena, self.args.n_layers, transient_slots=transient_slots,
                                     io_threads=io_threads)
         # load the DSpark experts (all 3 x 128 resident in their own arena)
@@ -217,7 +253,7 @@ class V41Engine:
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
             log(f"pruned mode ({prune_select}): keep {prune_keep:.2f}, {len(ranked)} experts total "
-                f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * EX.EXPERT_BYTES / 1e9:.1f} GB")
+                f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * self.expert_bytes / 1e9:.1f} GB")
         else:
             self.model_prune_mask = None
             ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
@@ -441,6 +477,8 @@ class V41Engine:
             "spec": self.spec,
             "trace_stats": self.trace_stats,
             "kernel": self.kernel,
+            "expert_format": self.expert_format,
+            "expert_mb": round(self.expert_bytes / 1e6, 2),
             "act_quant": self.act_quant,
             "swa_replay": self.swa_replay,
             "prune_keep": self.prune_keep,
@@ -571,6 +609,7 @@ if __name__ == "__main__":
     ap.add_argument("--arena-gb", type=float, default=None)
     ap.add_argument("--trace-stats", default=None)
     ap.add_argument("--prompt", default="Write a Python function that returns the n-th Fibonacci number.")
+    ap.add_argument("--prompt-file", default=None, help="read the prompt from this file instead of --prompt")
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--no-spec", action="store_true")
@@ -597,6 +636,10 @@ if __name__ == "__main__":
     ap.add_argument("--transient-slots", type=int, default=None,
                     help="prefill-miss ring slots (default 400 = a whole layer; 16 is enough when every kept expert is resident)")
     ap.add_argument("--keep-free-gb", type=float, default=None, help="host memory to leave free when auto-sizing the arena (default 20)")
+    ap.add_argument("--expert-format", default=os.environ.get("EXPERT_FORMAT") or "fp4", choices=["fp4", "cb3"],
+                    help="routed-expert arena format: fp4 = the checkpoint's packed FP4 (18.80 MB/expert); "
+                         "cb3 = the 3-bit per-row codebook format (14.45 MB/expert, 0.769x), packed at warm "
+                         "start, which fits ~40.8%% of all routed experts in 90.5 GB instead of 31.3%%")
     ap.add_argument("--sim-bits", type=int, default=None, help="simulate a 2/3-bit per-row codebook expert format (quality only)")
     ap.add_argument("--sim-cold-frac", type=float, default=1.0, help="fraction of the kept experts (coldest first) that get --sim-bits")
     ap.add_argument("--prune-keep", type=float, default=None,
@@ -611,10 +654,12 @@ if __name__ == "__main__":
                          "one sampled spec run at --temperature/--top-p")
     ap.add_argument("--ab-out", default=None, help="write the --spec-ab result JSON here")
     a = ap.parse_args()
+    if a.prompt_file:
+        a.prompt = open(a.prompt_file).read()
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
                     swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep, prune_select=a.prune_select,
-                    sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac,
+                    sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac, expert_format=a.expert_format,
                     **({"transient_slots": a.transient_slots} if a.transient_slots else {}),
                     **({"keep_free_gb": a.keep_free_gb} if a.keep_free_gb else {}))
     if a.verify_replay:

@@ -123,6 +123,32 @@ def _v2_fields(block_w: int = BLOCK_W):
     return out
 
 
+def pack_idx_v2(idx: torch.Tensor, codebook: torch.Tensor, block_w: int | None = None):
+    """Pack codebook INDICES (uint8/int16 [N, K], values 0..7) into the v2 planes. This is the hot
+    path of the arena packer: `pack_cb3_v2` has to find each code's position in its row codebook with
+    an [N, K, 8] comparison (94 MB of temporaries per matrix), which `CodebookSim.pos` makes
+    unnecessary."""
+    N, K = idx.shape
+    if block_w is None:
+        n512, n256 = block_plan(K)
+        if n512 and n256:
+            cut = n512 * 512
+            a = pack_idx_v2(idx[:, :cut], codebook, 512)
+            b = pack_idx_v2(idx[:, cut:], codebook, 256)
+            return (torch.cat([a[0], b[0]], 1), torch.cat([a[1], b[1]], 1), a[2])
+        block_w = 512 if n512 else 256
+    NB, G = K // block_w, block_w // 32
+    v5 = idx.view(N, NB, G, 16, 2).to(torch.int16)
+    lo = torch.zeros(N, NB, G // 2, 16, dtype=torch.int16, device=idx.device)
+    hi = torch.zeros(N, NB, G // 4, 16, dtype=torch.int16, device=idx.device)
+    for g, r, k, sh, m, hb in _v2_fields(block_w):
+        v = v5[:, :, g, :, r]
+        lo[:, :, k, :] |= (v & 3) << sh
+        hi[:, :, m, :] |= ((v >> 2) & 1) << hb
+    return (lo.reshape(N, K // 4).to(torch.uint8), hi.reshape(N, K // 8).to(torch.uint8),
+            codebook.to(torch.uint8))
+
+
 def pack_cb3_v2(codes: torch.Tensor, codebook: torch.Tensor, block_w: int | None = None):
     """Same contract as `pack_cb3`, v2 bit layout. codes/codebook: long.
 
@@ -184,15 +210,22 @@ def dequant_cb3_v2(lo, hi, cb, scale_e8m0: torch.Tensor, block_w: int | None = N
 
 
 def fp4_to_cb3_v2(w_packed: torch.Tensor, scale: torch.Tensor, sim) -> tuple:
+    """One packed-FP4 matrix -> the v2 CB3 planes, via `sim`'s per-row subset choice.
+
+    Everything stays in the smallest dtype that fits: the codes are uint8, the histogram scatter is
+    the only fp32 step, and the codebook index comes straight out of `sim.pos` instead of an
+    [N, K, 8] equality test. Bit-identical to `pack_cb3_v2(sim.near[best][codes], subsets[best])`.
+    """
     N, K2 = w_packed.shape
     x = w_packed.view(torch.uint8)
-    codes = torch.stack([(x & 0x0F).long(), ((x >> 4) & 0x0F).long()], dim=-1).reshape(N, K2 * 2)
+    codes = torch.stack([x & 0x0F, (x >> 4) & 0x0F], dim=-1).reshape(N, K2 * 2)  # uint8 [N, K]
     scale2 = torch.exp2(2.0 * (scale.view(torch.uint8).float() - 127.0)).repeat_interleave(32, dim=1)
-    hist = torch.zeros(N, 16, device=x.device, dtype=torch.float32).scatter_add_(1, codes, scale2)
-    best = (hist @ sim.cost.T).argmin(dim=1)
-    new_codes = sim.near[best][torch.arange(N, device=x.device)[:, None], codes]
-    codebook = torch.tensor(sim.subsets, device=x.device)[best]
-    return pack_cb3_v2(new_codes, codebook)
+    hist = torch.zeros(N, 16, device=x.device, dtype=torch.float32).scatter_add_(1, codes.long(), scale2)
+    best = (hist @ sim.cost.T).argmin(dim=1)  # [N]
+    rows = torch.arange(N, device=x.device)[:, None]
+    idx = sim.pos[best][rows, codes.long()]           # [N, K] uint8, 0..7
+    codebook = sim.subsets_t[best].long()             # [N, 8]
+    return pack_idx_v2(idx, codebook)
 
 
 if __name__ == "__main__":
