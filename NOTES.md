@@ -2332,3 +2332,40 @@ the unified memory, and `free`'s MemAvailable is the number to look at before st
 failures were visible in it beforehand. The engine's cap keeps the process alive; it does not keep
 the machine responsive. `stop.sh`'s existing `MIN_FREE_GIB` wait is the right idea and `start.sh`
 inherits it, but neither looks at what a *non-server* process on the box is holding.
+
+### 2026-09-12 00:10 -- what actually breaks long generations: expert pruning, and two quantizations on top of it
+
+A story prompt through the gateway degenerated into one word repeated for the whole output. The
+same elimination as the HTML case, one variable per engine load (`results/htmlbug/`, each greedy):
+
+| configuration | story | html |
+|---|---|---|
+| unpruned, experts streamed on a miss (hit rate 0.889, 3.33 tok/s) | **clean, and good** | -- |
+| keep 31 %, dense fp4 + fp8 head | repeats | repeats |
+| keep 31 %, fp8 head only | repeats | repeats |
+| keep 31 %, dense fp4 only | repeats | clean |
+| keep 31 %, neither | clean at 300 tokens | clean |
+| keep 31 %, neither, keep-set ranked by max(coding, prose) | worse | repeats |
+
+Three separate findings.
+
+**Expert pruning is the root cause.** The unpruned model writes "The old man, Elara's grandfather,
+had a saying: 'A story is a map, and a map is a promise.' He'd been a cartographer for the Royal
+Survey..." -- there is nothing wrong with the checkpoint or the engine's arithmetic. Dropping 69 %
+of the routed experts is what makes a generation fall into a repeated phrase, and RESULTS 2.4 said
+so in a number nobody weighted properly: keep 31 % costs +0.19 nats on prose against +0.07 on code.
+Prose leans on the tail of the router's distribution; code does not.
+
+**The two dense quantizations make it much worse.** Each alone turns a clean 300-token generation
+into a repeating one, which is why the loop appeared this evening and not this morning: the fp8 head
+(0.027 relative weight error, straight onto the logits) and the fp4 attention/`wo_a` projections
+(0.12). Both were accepted on a held-out teacher-forced delta of +0.0004 and +0.002 nats. Both are
+now off by default.
+
+**A "better" keep-set ranking is not a way out.** Ranking by max(coding, prose) instead of their sum
+-- keeping each workload's specialists rather than what both use moderately -- was measured worse on
+both prose and HTML at the same budget (`DSV41_PRUNE_RANK`, default `sum`).
+
+At 288.8 GB of FP4 experts and 121 GiB of memory there is no arrangement that keeps every expert
+resident. Either the experts stream on a miss (full quality, NVMe-bound) or some are dropped (fast,
+and a workload the keep-set does not cover degenerates). The recipe now ships the first.

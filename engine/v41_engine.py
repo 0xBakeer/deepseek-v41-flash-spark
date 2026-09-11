@@ -372,7 +372,20 @@ class V41Engine:
             # routable, and exactly those are warm-started, so decode never touches NVMe
             cc, cg = EX.category_counts(trace_stats, "coding"), EX.category_counts(trace_stats, "general")
             assert len(cc) == 40 and len(cg) == 40, "pruned mode needs the per-layer trace npz files next to trace_stats"
-            counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in range(40)}
+            # How the two workloads are combined into one ranking. "sum" (the 0.2.0-wip default)
+            # adds the per-layer-normalized frequencies, which favours experts moderately used by
+            # both and drops each workload's specialists -- the coding and prose top sets overlap by
+            # a Jaccard of only 0.18-0.31, so that is most of the routing. Prose suffered for it:
+            # at keep 31 % a story prompt degenerated into a repeated phrase while the same budget
+            # ranked on prose alone wrote clean text (NOTES 2026-09-12). "max" keeps an expert that
+            # matters to EITHER workload, which is what a general-purpose server needs.
+            rank = os.environ.get("DSV41_PRUNE_RANK", "sum")  # "max" was measured worse (NOTES 2026-09-12)
+            if rank == "sum":
+                counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in range(40)}
+            elif rank == "max":
+                counts = {L: np.maximum(cc[L] / cc[L].sum(), cg[L] / cg[L].sum()) for L in range(40)}
+            else:
+                raise ValueError(f"unknown DSV41_PRUNE_RANK {rank!r} (max | sum)")
             self.prune_select = prune_select
             masks, keep = build_keep_masks(counts, prune_keep, prune_select, device)
             n_keep = max(len(v) for v in keep.values())
