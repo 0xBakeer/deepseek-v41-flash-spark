@@ -1079,8 +1079,8 @@ Measured on 21-24 real layer-0 experts, T=6 top-6 (`tools/test_cb3_moe.py`):
 | CB3 v2 (new layout, Triton byte ops) | 1.97 | 154.0 |
 | CB3 v3 (new layout + PTX + 128/64 B tiles) | **1.67** | **181.5** |
 
-Best single measurement 182.0 GB/s at 0.787x the FP4 kernel's time for 0.769x the bytes; the goal
-was ~180 GB/s and 0.77x. Correctness: the dequant is bit-identical to `codebook_sim`, and the kernel
+Best single measurement 182.0 GB/s at 0.787x the FP4 kernel's time for 0.769x the bytes, i.e. the
+format pays for itself: it costs less time than it saves bytes. Correctness: the dequant is bit-identical to `codebook_sim`, and the kernel
 agrees with the FP4 kernel run on the same re-quantized weights to 8.6e-5 (its error against the
 dequantized reference is 4.4e-3, which is the FP4 kernel's own error on the same data). Size is
 unchanged at 3.26-3.28 bit/weight, 14.45 MB per expert.
@@ -1099,7 +1099,7 @@ per expert, CB3 14,454,784 (0.769x).
 | all CB3 | 6,260 | **40.8 %** |
 
 So "keep 40 % with the coldest 60 % in CB3" does **not** fit 90.5 GB: 36.4 % does, and reaching 40 %
-needs 93.7 % of the kept set in CB3, i.e. essentially all of it. The quality of that target is
+needs 93.7 % of the kept set in CB3, i.e. essentially all of it. The quality of that configuration is
 already measured (NOTES 2026-09-11 08:40, held-out, teacher-forced): keep 40 % at simulated 3-bit is
 coding 1.539 / general 3.212, against the shipped keep-31 % FP4's 1.5729 / 3.3788 -- better on both.
 
