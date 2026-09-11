@@ -509,3 +509,62 @@ The step grows nearly linearly in the block and acceptance sublinearly, exactly 
 ratio is flat between 6 and 8 (a tie within this box's ±5 % acceptance spread) and worse at 4. Block
 8 also drafts beyond the horizon the DSpark head was trained for and lengthens the per-burst
 latency, so the block stays at 6. Nothing in the serving configuration changed in this addendum.
+
+### 3.6 Addendum 2026-09-11 23:40 — the 3-bit expert format degenerates in free generation, and is withdrawn
+
+Asked for a single-file HTML game, the configuration shipped in 3.1 (keep 40 %, every resident
+expert in the 3-bit CB3 format) writes one token over and over until the output cap:
+
+```
+```html
+<!<!DOCTYPE><!DOCTYPE><!DOCTYPE><!DOCTYPE> ...
+```
+
+Everything else was eliminated one variable at a time, same prompt, greedy, 200-300 tokens each
+(`results/htmlbug/`): the graphed decode path, CUDA graphs entirely, the fused attention kernel,
+speculative decoding (off: identical loop), the FP4 dense projections and the fp8 head (both
+reverted: identical loop), and sampling (temperature 0.0 / 0.3 / 0.6 / 0.8: identical loop, so the
+distribution itself is degenerate, not the choice rule). The last variable left was the expert
+configuration, and it is decisive:
+
+| experts | output |
+|---|---|
+| CB3 3-bit, keep 40 % (3.1) | the loop, distinct-token ratio 0.03 |
+| FP4, keep 31 % (v0.2.0-wip) | `<!DOCTYPE html / <html> / </html>`, closes and stops, ratio 0.71 |
+
+**The shipped default returns to FP4 experts at keep 31 %** (box `.env`: `PRUNE_KEEP=0.31
+EXPERT_FORMAT=fp4`), keeping the changes that are independently gated: the fp32 router (3.7 below),
+the FP4 attention and `wo_a` projections, and the fp8 head. A 600-token Python class on that
+configuration comes back complete and well-formed at 30.1 tok/s (acceptance 4.72).
+
+**What this says about the gate.** 3.1 measured *better* than the configuration that works —
+held-out teacher-forced 1.5384 / 3.2087 against 1.5705 / 3.3790 — and 2.4 predicted it from the
+simulator to three decimal places. Teacher-forced loss scores the next token of text the model is
+shown; it never lets an error compound, so it cannot see a model that cannot stay on its own
+trajectory. Every quantization decision in this repo was taken on that number alone. A format that
+improves it can still be unusable, and nothing here measured free-running generation until a user
+asked for an HTML file.
+
+`EXPERT_FORMAT=cb3` and its kernel remain in the tree, measured and documented, and must not be a
+default again without a generation gate (`engine/test_spec_lossless.py` plus a long-generation
+check) in front of it.
+
+### 3.7 Addendum 2026-09-11 21:25 — the graphed decode path routed tokens to the wrong experts
+
+`Model.moe` computes the router gate as `mm(y.float(), gate_w)`; the graphed path computed it in
+bf16, added 2026-09-11 morning as a micro-optimization. The gate picks 6 of 384 experts and its
+scores are dense with near-ties, so bf16 changed which experts ran: at layer 0, where the inputs are
+bit-identical, 11 % of the picks differed, rising to 31 % in the middle layers, and each layer then
+ran a different FFN than the reference.
+
+| layer | activation error before / after | routed experts equal before / after |
+|---|---|---|
+| 0 | 0.0000 / 0.0000 | 0.89 / **1.00** |
+| 6 | 0.1070 / **0.0073** | 0.83 / **1.00** |
+| 12 | 0.1361 / **0.0087** | 0.69 / **1.00** |
+| 36 | 0.0803 / **0.0131** | 0.69 / 0.94 |
+
+Logit error against the reference 0.049 → 0.012, argmax agreement 1.00 on both parities. The fused
+attention kernel (`DSV41_FUSED_ATTN`, default 0 since this addendum) is a second, smaller source of
+the same divergence: with it on, deep-layer error returns to 0.048-0.093 and routed experts equal
+falls to 0.72.

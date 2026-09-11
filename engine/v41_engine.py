@@ -105,6 +105,74 @@ class FixedStore:
         return (experts.to(torch.int32) + k * 128)
 
 
+class Penalties:
+    """OpenAI presence/frequency penalties, plus a breaker for exact repetition cycles.
+
+    The penalties are the standard ones (a token already generated loses
+    `presence_penalty + frequency_penalty * count` from its logit) and default to 0, because a flat
+    penalty hurts code, which is legitimately repetitive.
+
+    The cycle breaker is separate and defaults ON. Greedy decoding on this checkpoint can fall into
+    an exact repetition -- a run of one token, or a short block repeated verbatim -- and has no way
+    out of it, because the same context keeps producing the same argmax (NOTES 2026-09-11). It fires
+    only on an *exact* cycle of period <= `cycle_max_period` repeated `cycle_repeats` times, and
+    then bans just the one token that would continue the cycle for that single step, which is enough
+    to leave the attractor. Normal repetitive code never reaches an exact cycle of whole tokens
+    repeated three times over, so nothing else is affected.
+    """
+
+    def __init__(self, presence: float = 0.0, frequency: float = 0.0, cycle_repeats: int = 4,
+                 cycle_max_period: int = 16, enabled: bool | None = None):
+        self.presence = float(presence or 0.0)
+        self.frequency = float(frequency or 0.0)
+        self.cycle_repeats = int(cycle_repeats)
+        self.cycle_max_period = int(cycle_max_period)
+        if enabled is None:
+            enabled = os.environ.get("DSV41_CYCLE_BREAK", "1") == "1"
+        self.cycle_enabled = bool(enabled)
+        self.counts: dict[int, int] = {}
+        self.hits = 0
+
+    @property
+    def active(self) -> bool:
+        return self.presence != 0.0 or self.frequency != 0.0 or self.cycle_enabled
+
+    def observe(self, tokens) -> None:
+        for t in tokens:
+            self.counts[t] = self.counts.get(t, 0) + 1
+
+    def _cycle_token(self, history) -> int | None:
+        """The token that would continue an exact cycle, or None."""
+        if not self.cycle_enabled or len(history) < max(4, self.cycle_repeats):
+            return None
+        for p in range(1, min(self.cycle_max_period, len(history) // self.cycle_repeats) + 1):
+            block = history[-p:]
+            if all(history[-p * (i + 1):len(history) - p * i] == block for i in range(1, self.cycle_repeats)):
+                return block[0]
+        return None
+
+    def apply(self, logits: torch.Tensor, history) -> torch.Tensor:
+        """logits [V] or [T, V] fp32 -> the same tensor, penalised in place."""
+        if self.presence or self.frequency:
+            idx = torch.tensor(list(self.counts), device=logits.device, dtype=torch.long)
+            if idx.numel():
+                cnt = torch.tensor([self.counts[int(i)] for i in idx.tolist()],
+                                   device=logits.device, dtype=logits.dtype)
+                pen = self.presence + self.frequency * cnt
+                if logits.dim() == 1:
+                    logits[idx] -= pen
+                else:
+                    logits[:, idx] -= pen
+        t = self._cycle_token(history)
+        if t is not None:
+            self.hits += 1
+            if logits.dim() == 1:
+                logits[t] = float("-inf")
+            else:
+                logits[:, t] = float("-inf")
+        return logits
+
+
 def sample_probs(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
     """[V] fp32 logits -> probability vector (temperature + nucleus)."""
     if temperature <= 0:
@@ -259,6 +327,17 @@ class V41Engine:
             arena_gb = max(10.0, (budget - reserve) / 1e9 * 0.82)
         if host_avail is not None:
             cap = (host_avail - keep_free_gb * 1e9) / 1e9
+            if cap < 10.0:
+                # Refuse rather than squeeze. A cap this low means the host has no memory to give:
+                # another engine is still resident, or the kernel has not finished reclaiming the
+                # last one's arena (it is page-cache backed and released lazily). Loading anyway is
+                # how this box gets wedged -- it answers ping and accepts TCP on 22 while sshd can
+                # no longer fork, and only a power cycle brings it back.
+                raise RuntimeError(
+                    f"not enough host memory to start: MemAvailable {(host_avail or 0) / 1e9:.1f} GB "
+                    f"leaves {cap:.1f} GB for the expert arena after keep_free {keep_free_gb} GB. "
+                    f"Wait for the previous engine's memory to be reclaimed (watch MemAvailable in "
+                    f"/proc/meminfo) or lower --arena-gb/KEEP_FREE_GB.")
             if arena_gb > cap:
                 log(f"arena {arena_gb:.1f} GB capped to {cap:.1f} GB (MemAvailable {host_avail / 1e9:.1f} GB, "
                     f"keep_free {keep_free_gb} GB)")
@@ -375,6 +454,7 @@ class V41Engine:
         self.store.stats.update(EX.ZERO_STATS)
 
     def generate(self, prompt_ids, *, max_tokens=4096, temperature=1.0, top_p=0.95, stop_token_ids=None, seed=None,
+                 penalties=None,
                  ignore_eos=False, grammar=None):
         """Yield bursts of new token ids.
 
@@ -389,9 +469,10 @@ class V41Engine:
         """
         with self.lock:
             yield from self._generate(list(prompt_ids), max_tokens, temperature, top_p, set(stop_token_ids or ()),
-                                      seed, ignore_eos, grammar)
+                                      seed, ignore_eos, grammar, penalties)
 
-    def _generate(self, prompt, max_tokens, temperature, top_p, stop_ids, seed, ignore_eos=False, grammar=None):
+    def _generate(self, prompt, max_tokens, temperature, top_p, stop_ids, seed, ignore_eos=False, grammar=None,
+                  penalties=None):
         if seed is not None:
             torch.manual_seed(seed)
         stop_ids = set() if ignore_eos else (set(stop_ids) | {self.eos_token_id})
@@ -413,7 +494,7 @@ class V41Engine:
         t_decode0 = t_start
         try:
             yield from self._decode_loop(ids, P, max_tokens, temperature, top_p, stop_ids,
-                                         _st := {}, grammar)
+                                         _st := {}, grammar, penalties)
         finally:
             n_out = _st.get("n_out", n_out)
             steps = _st.get("steps", steps)
@@ -454,7 +535,7 @@ class V41Engine:
                 "promoted": st["promoted"],
             }
 
-    def _decode_loop(self, ids, P, max_tokens, temperature, top_p, stop_ids, out_st, grammar=None):
+    def _decode_loop(self, ids, P, max_tokens, temperature, top_p, stop_ids, out_st, grammar=None, penalties=None):
         m = self.model
         t_start = time.perf_counter()
         out_st["t_decode0"] = t_start
@@ -479,6 +560,7 @@ class V41Engine:
                     m.dspark_seed(mh, s)
         t_prefill = time.perf_counter() - t_start
         out_st["t_prefill"] = t_prefill
+        pen = penalties if (penalties is not None and penalties.active) else None
         p = sample_probs(logits[-1], temperature, top_p)
         tok = int(torch.multinomial(p, 1)) if temperature > 0 else int(p.argmax())
         out = [tok]
@@ -550,6 +632,8 @@ class V41Engine:
                     grammar.mask_rows(logits, block)
                     if ph is not None:
                         ph.mark("grammar")
+                if pen is not None:
+                    pen.apply(logits, out)
                 # verify drafts[i] (position pos+1+i) against logits[i]
                 if lean:
                     # Greedy verification, entirely on the GPU: argmax of the six logit rows, the
@@ -582,6 +666,8 @@ class V41Engine:
                     pos = pos + a + 1
                     tok = emitted[-1] if emitted else tok
                     if emitted:
+                        if pen is not None:
+                            pen.observe(emitted)
                         out += emitted
                         n_out += len(emitted)
                         out_st["n_out"] = n_out
@@ -642,6 +728,8 @@ class V41Engine:
                 pos = pos + a + 1
                 tok = emitted[-1] if emitted else tok
                 if emitted:
+                    if pen is not None:
+                        pen.observe(emitted)
                     out += emitted
                     n_out += len(emitted)
                     out_st["n_out"] = n_out
@@ -662,9 +750,13 @@ class V41Engine:
                 logits, mh = m.forward(torch.tensor([tok], device=self.device), pos, prefill=False)
                 if grammar is not None:
                     grammar.mask_rows(logits, None)
+                if pen is not None:
+                    pen.apply(logits, out)
                 pt = sample_probs(logits[0], temperature, top_p)
                 tok = int(torch.multinomial(pt, 1)) if temperature > 0 else int(pt.argmax())
                 pos += 1
+                if pen is not None:
+                    pen.observe([tok])
                 out.append(tok)
                 n_out += 1
                 steps += 1

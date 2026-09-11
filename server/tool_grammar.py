@@ -434,6 +434,19 @@ class ToolCallGrammar:
         """
         if not self.active:
             return 0
+        try:
+            return self._mask_rows(logits, block_ids)
+        except Exception as e:  # noqa: BLE001
+            # The mask sits on the decode loop's critical path. Whatever goes wrong in here --
+            # a kernel that will not build, a tensor that is not the shape this thinks it is --
+            # losing the constraint is recoverable (the tolerant parser is behind it) and
+            # killing the request is not.
+            self._failed = True
+            self.stats["error"] = f"{type(e).__name__}: {e}"
+            log.warning("tool grammar masking failed (%s); constraint dropped for this request", e)
+            return 0
+
+    def _mask_rows(self, logits, block_ids) -> int:
         t0 = time.perf_counter()
         xgr, torch = self._xgr, self._torch
         rows = int(logits.shape[0]) if logits.dim() > 1 else 1
@@ -458,16 +471,20 @@ class ToolCallGrammar:
                 nxt, sib = self._tree_of(rows)
                 self._matcher.traverse_draft_tree(nxt, sib, ids, bitmask)
             else:
-                # Reference walk: identical masks, one Python call per row.
-                accepted = 0
+                # Reference walk: identical masks, one Python call per row. Row r+1 needs
+                # block[r+1] accepted, so the walk stops at the first draft the grammar
+                # refuses -- and at one it accepts that ends the turn, because a matcher
+                # that has taken the stop token has no next-token set at all.
+                accepted = filled = 0
                 for r in range(rows):
                     self._matcher.fill_next_token_bitmask(bitmask, r)
-                    if r + 1 >= rows:
-                        break
-                    if self._matcher.is_terminated() or not self._matcher.accept_token(int(ids[r + 1])):
-                        rows = r + 1
+                    filled = r + 1
+                    if r + 1 >= rows or not self._matcher.accept_token(int(ids[r + 1])):
                         break
                     accepted += 1
+                    if self._matcher.is_terminated():
+                        break
+                rows = filled
                 if accepted:
                     self._matcher.rollback(accepted)
 

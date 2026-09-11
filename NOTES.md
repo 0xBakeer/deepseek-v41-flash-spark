@@ -2299,3 +2299,36 @@ python3 server/test_server.py                # CPU, mock engine
 # completion_tokens / finish_reason / x_engine_stats.tool_grammar
 ./stop.sh && python3 engine/test_spec_lossless.py --max-tokens 120
 ```
+
+#### 2026-09-11 23:10 -- correction to the paragraph above, and what the kernel log says
+
+The reason given above for the box going unresponsive is wrong. It was not the lazy reclaim of the
+previous server's arena. The server's own first log lines say what it was:
+
+```
+21:54:31 [engine] arena 90.5 GB capped to -4.8 GB (MemAvailable 5.2 GB, keep_free 10 GB)
+21:54:31 [engine] CUDA free 1.1 GB of 130.6; host MemAvailable 5.2 GB; arena 10.0 GB = 691 cb3
+                  expert slots of 14.45 MB (4% of all routed experts, pinned)
+```
+
+MemAvailable was 5.2 GB and CUDA free was 1.1 GB of 130.6 GB *before the arena was filled*, because
+a second engine instance with the same 90.5 GB arena (`engine/v41_engine.py --arena-gb 90.5`) was
+already running on the box. Two arenas of that size do not fit in 121 GiB, and the engine's own
+guard did the right thing -- it capped the arena to 10 GB -- but the box still went into swap-free
+memory pressure and stopped scheduling new work, including sshd's forks, while keeping the listening
+socket open. That is why port 22 accepted connections and never sent a banner.
+
+A second attempt after the box was restarted ran into the same collision, and the kernel log of that
+boot has the driver's side of it:
+
+```
+22:53:33 kernel: NVRM: Check failed: Out of memory [NV_ERR_NO_MEMORY] returned from
+                 _memdescAllocInternal(pMemDesc) @ mem_desc.c:1359     (x8, 22:53-22:55)
+22:55:19 systemd-journald: Under memory pressure, flushing caches.
+```
+
+So: on this box, `./start.sh` with the shipped `ARENA_GB=90.5` is only safe when nothing else holds
+the unified memory, and `free`'s MemAvailable is the number to look at before starting -- both
+failures were visible in it beforehand. The engine's cap keeps the process alive; it does not keep
+the machine responsive. `stop.sh`'s existing `MIN_FREE_GIB` wait is the right idea and `start.sh`
+inherits it, but neither looks at what a *non-server* process on the box is holding.

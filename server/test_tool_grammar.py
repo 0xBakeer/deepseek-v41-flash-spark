@@ -523,7 +523,10 @@ def test_masked_decode_loop_reproduces_a_valid_block():
         assert out[-1] == eos, f"traverse={traverse}: the loop did not stop at the end of turn"
         assert got == text[len(tok.decode(target[:already])):] + tok.decode([eos]), \
             f"traverse={traverse}: {got[:200]!r}"
-        assert gate.stats["accept_fail"] == 0 and gate.completed
+        # the end-of-turn token terminates the matcher, so the gate is no longer in force;
+        # what must hold is that nothing the loop emitted was ever refused
+        assert gate.stats["accept_fail"] == 0, gate.stats
+        assert not gate.active, "the gate is still constraining after the end of turn"
         parsed = enc.parse_message_from_completion_text("x" + text + enc.eos_token,
                                                         thinking_mode="chat")
         assert [c["function"]["name"] for c in parsed["tool_calls"]] == ["web_search", "get_weather"]
