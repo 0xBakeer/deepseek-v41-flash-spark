@@ -80,6 +80,13 @@ check("  the description", profs[0][1], "Arabic and English, for a bilingual ass
 check("  the topics", profs[0][2], ["arabic", "english", "translation"])
 check("  never gated, whatever the file says", [p[3] for p in profs], [False, False])
 check("  and where it came from", profs[0][4], T.short_path(good))
+odd = write("odd.json", {"profiles": [
+    {"name": "  Spaced   out ", "description": "a description\nover two lines",
+     "topics": ["python", "python", "html"]}]})
+got, problems = T.read_profiles(odd)
+check("a name is read as one line of text", got[0][0], "Spaced out")
+check("  and so is the description", got[0][1], "a description over two lines")
+check("  a topic named twice counts once", got[0][2], ["python", "html"])
 check("a bare list of profiles is accepted too",
       [p[0] for p in T.read_profiles(write("list.json", [
           {"name": "Plain list", "description": "", "topics": ["python"]}]))[0]], ["Plain list"])

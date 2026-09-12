@@ -123,8 +123,23 @@ Until now that was two numbers in a file and a three-minute wait to find out.
 - **`corpus/fetch_topics.py`** gathers the sources a 35-topic catalogue needs — sixteen programming
   languages from a tree you name, eleven natural languages and eight domain registers from
   Wikipedia — and prints the flags `make_corpus.py` wants.
-- **Four checks that need no GPU, no checkpoint and no torch**: `tools/test_budget.py`,
-  `tools/test_engine_kwargs.py`, `tools/test_tune_draw.py` and the existing `server/test_server.py`.
+- **Profiles you write yourself.** The named bundles on the first screen are no longer only the ten
+  built in: `results/keepsets/profiles.json` and
+  `$XDG_CONFIG_HOME/deepseek-v41-flash-spark/profiles.json` are read as well, and one of them may
+  replace a built-in profile by name. `s` on the topic screen and `--save-profile NAME` keep the
+  current selection as one. A profile from a file is never gated and the screen says `untested`; a
+  file that will not parse costs its own profiles and nothing else, and a topic name the keep-set
+  does not carry is named rather than dropped in silence.
+  [`docs/tune-reference.md`](docs/tune-reference.md#profiles-from-a-file).
+- **`--brief`**, and `b` on the profile screen, write out the task of adding a topic to the
+  catalogue, as Markdown, from the loaded keep-set: what it carries and how much text each topic was
+  traced on, which catalogue groups are absent here, the commands with this checkout's paths, how
+  many tokens a topic needs and the two correlations that say so, and what one more topic costs the
+  ones already selected. Coverage can see a gap in the selection and never a gap in the catalogue,
+  which is how a profile scoring 0.85 on all five of its topics still reasoned in circles.
+- **Six checks that need no GPU, no checkpoint and no torch**: `tools/test_budget.py`,
+  `tools/test_engine_kwargs.py`, `tools/test_tune_draw.py`, `tools/test_tune_profiles.py`,
+  `tools/test_tune_brief.py` and the existing `server/test_server.py`.
 
 ### Fixed
 - **`EXPERT_TOPICS` had never worked.** `expert_topics` was read inside `V41Engine.__init__` and

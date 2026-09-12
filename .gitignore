@@ -15,6 +15,11 @@ models/
 *.env
 !env.example
 
+# What ./tune.sh writes on request: the task brief from `b` or --brief. It is
+# generated from whatever keep-set was loaded, so it belongs to the run and not
+# to the repository.
+tune-brief.md
+
 # results/ is mostly tracked -- the measured rows ARE the deliverable -- with
 # two exceptions that are big and regenerable:
 #   * results/*/trace/*.npz  the raw per-layer routing trace (tools/expert_trace.py)

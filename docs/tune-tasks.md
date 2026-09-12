@@ -1,6 +1,6 @@
 # Working with `./tune.sh`
 
-Five things people actually do with the tool. The screen itself is described in
+Seven things people actually do with the tool. The screen itself is described in
 [`docs/tune.md`](tune.md), every field and flag in [`docs/tune-reference.md`](tune-reference.md),
 the ideas in [`docs/keep-sets.md`](keep-sets.md) and the arithmetic in
 [`docs/memory-budget.md`](memory-budget.md).
@@ -36,6 +36,36 @@ Without a terminal, the same decisions are available one at a time:
 ./tune.sh --topics coding --keep 0.32 --print   # exits non-zero if it will not load
 ./tune.sh --topics coding --keep 0.32 --write   # same, written into .env
 ```
+
+## Keep a selection as a profile
+
+A selection that turned out well is worth more than the twenty minutes it took to find, and the
+profile screen is where the next person looks first. `s` on the topic screen puts it there: it asks
+for a name on the key line, `Enter` saves it, `Esc` cancels. Without a terminal:
+
+```bash
+./tune.sh --topics arabic,english,translation --save-profile "Arabic desk" \
+    --describe "Arabic and English prose, for a bilingual assistant"
+```
+
+Both write `$XDG_CONFIG_HOME/deepseek-v41-flash-spark/profiles.json`, which is outside the
+checkout, so a saved profile survives a fresh clone and never shows up in `git status`. For a
+profile that should travel with the checkout instead, put the same object in
+`results/keepsets/profiles.json`; both files are read, the user's one last, and a profile there
+replaces a built-in one of the same name rather than appearing twice. The format, the precedence
+and what happens to a file with a mistake in it are in
+[`docs/tune-reference.md`](tune-reference.md#profiles-from-a-file).
+
+Two things to know before relying on one:
+
+* **Topic names are a keep-set's own.** A profile that names `html` applies to a keep-set that
+  carries `html`. Against one that does not, it applies with the rest of its topics, and the
+  profile screen prints `not in this keep-set: html` underneath so that a selection which is
+  quietly a topic short does not look like one that worked.
+* **A saved profile is untested and says so.** The screen marks every profile `untested` until a
+  generation gate has been run on it, and a profile from a file is never marked otherwise. Coverage
+  is a measurement; whether a selection generates sound long output is not. Step 7 of
+  [adding a topic](#add-a-topic-of-your-own) is how that gate is run.
 
 ## Read the verdict
 
@@ -168,6 +198,44 @@ and write both results down next to the profile, the way the shipped `GATE.md` f
 that never saw a domain fails in it structurally, not gradually, and teacher-forced loss will not
 show you that — the configuration that could not write an HTML file measured better on loss than the
 one that replaced it.
+
+## Write the topic work out as a task
+
+The step before all of that is deciding which topic to add, and the screen cannot help with it. A
+coverage bar is the fraction of a topic's *measured* routing that stays resident, so it sees a gap
+in the **selection** and never a gap in the **catalogue**: a register that was never traced has no
+histogram, therefore no bar, no number and no warning. That is not a hypothetical. A five-topic
+profile here scored 0.85 or better on every topic it had and still reasoned in circles on a
+two-train arithmetic question, because none of the 35 topics carries the register a reasoning trace
+is written in. Nothing on the screen was wrong. There was simply nothing there to be wrong.
+
+`--brief` writes that whole task out, as Markdown, from the keep-set that is loaded:
+
+```bash
+./tune.sh --brief > topic-task.md              # for the current keep-set and selection
+./tune.sh --stats results/keepsets/mine/coverage.json --topics python,html --brief
+```
+
+`b` on the profile screen does the same into `tune-brief.md` in the checkout and says so on the key
+line. What comes out is meant to be followed by hand or handed to somebody else, and it is
+generated rather than copied, so it stays true as the keep-set changes:
+
+* which topics this keep-set carries, and how many tokens each was traced on;
+* which of `corpus/fetch_topics.py`'s own groups are absent or thinly sampled here, counted rather
+  than asserted, and which registers the catalogue has no entry for at all;
+* the commands, in order, with this checkout's paths and the flags each script requires;
+* how much text a topic needs before its bar means anything, with the two measured correlations
+  behind that number;
+* what one more topic costs the topics already selected, in coverage and in keep fraction, computed
+  on the file in hand rather than as a general caution;
+* why the existing topics do not have to be traced again, with the snippet that concatenates the
+  per-layer counts;
+* and that the result is untested until it has been through the generation gate.
+
+The last three are the ones people get wrong. A new topic is cheap to trace and expensive to keep:
+it does not add slots, it takes a share of the ones there are, so every topic already in the
+selection covers slightly less once it is added. The brief prints that number for the selection in
+front of you.
 
 ## When the screen says something is already running
 

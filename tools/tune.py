@@ -226,7 +226,14 @@ def read_profiles(path: str) -> tuple:
                 isinstance(t, str) and t.strip() for t in topics):
             problems.append(f"{label}: topics must be a non-empty list of topic names")
             continue
-        out.append((name.strip(), " ".join(desc.split()), [t.strip() for t in topics], False, where))
+        # A repeated topic would get two votes in the per-layer sum, which is
+        # not what writing it twice means. First mention wins the order.
+        seen, want = set(), []
+        for t in (t.strip() for t in topics):
+            if t not in seen:
+                seen.add(t)
+                want.append(t)
+        out.append((" ".join(name.split()), " ".join(desc.split()), want, False, where))
     return out, problems
 
 
@@ -283,9 +290,12 @@ def save_profile(path: str, name: str, description: str, topics) -> str:
             raise ProfileError(f"{where} is not valid JSON ({e}); fix or move it, then save again")
         except OSError as e:
             raise ProfileError(f"{where}: {e.strerror or e}")
-    rec = {"name": name, "description": description, "topics": sorted(topics)}
+    name = " ".join(name.split())
+    rec = {"name": name, "description": " ".join(description.split()), "topics": sorted(topics)}
     for i, e in enumerate(entries):
-        if isinstance(e, dict) and str(e.get("name", "")).strip().lower() == name.lower():
+        # compared the way the loader will read it, so two entries cannot end up
+        # displaying the same name with only one of them reachable
+        if isinstance(e, dict) and " ".join(str(e.get("name", "")).split()).lower() == name.lower():
             entries[i] = rec
             break
     else:
@@ -521,11 +531,12 @@ def draw_easy(w, st: State):
         y = top + i * per
         here = st.pscroll + i == st.pcursor
         put(w, y, 0, "▌" if here else " ", C["accent"] | curses.A_BOLD)
-        put(w, y, 3, pr["name"], (C["bright"] | curses.A_BOLD) if here else C["bright"])
         st_txt = pr["status"]
+        put(w, y, 3, pr["name"][:max(10, W - len(st_txt) - 6)],
+            (C["bright"] | curses.A_BOLD) if here else C["bright"])
         # where a profile came from, since a file can replace a shipped one and
         # the two would otherwise be indistinguishable
-        if pr["mine"] and 3 + len(pr["name"]) + 8 < W - len(st_txt) - 2:
+        if pr["mine"] and 3 + len(pr["name"]) + 10 < W - len(st_txt) - 2:
             put(w, y, 4 + len(pr["name"]), "· yours", C["muted"])
         put(w, y, max(3, W - len(st_txt) - 2), st_txt, tone[pr["tone"]] | (curses.A_BOLD if here else 0))
         cost = (f"{pr['keep'] * 100:.0f} % of experts · {st.max_seq // 1024}k context"
@@ -826,7 +837,7 @@ def save_current(st: State, name: str) -> str:
     except ProfileError as e:
         return str(e)
     st.add_profile(name, blurb, st.sel)
-    return f"saved {name!r} to {short_path(where)} — v to see it"
+    return f"saved {name!r} to {short_path(where)}; v shows it on the profile screen"
 
 
 def write_brief(st: State) -> str:

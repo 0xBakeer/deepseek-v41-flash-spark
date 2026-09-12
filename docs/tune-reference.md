@@ -18,7 +18,8 @@ environment variable is read from `.env` as well as from the shell.
 ```
 
 The interactive screen is used only when stdout is a terminal **and** none of `--list`, `--print`,
-`--write` or `--render` was given. In a pipe or a CI job, a bare `./tune.sh` behaves as `--print`.
+`--write`, `--render`, `--profiles`, `--save-profile` or `--brief` was given. In a pipe or a CI
+job, a bare `./tune.sh` behaves as `--print`.
 
 ## Flags
 
@@ -36,6 +37,12 @@ The interactive screen is used only when stdout is a terminal **and** none of `-
 | `--list` | — | print the topics with their coverage at `--keep` and their traced token counts, then exit |
 | `--print` | — | print the environment the current settings imply, then exit |
 | `--write` | — | write those settings into `./.env` and exit |
+| `--profiles` | — | print the ready-made profiles with what each one needs, then exit |
+| `--profile NAME` | — | start from that profile's topics and the keep fraction they need. Matched case-insensitively on the start of the name, and an ambiguous match exits 2 |
+| `--profiles-file PATH` | `DSV41_TUNE_PROFILES` | read user profiles from this file instead of the two default locations, and save to it |
+| `--save-profile NAME` | — | keep the current selection under that name in the user profiles file, then exit |
+| `--describe TEXT` | the topic names | the one-line description `--save-profile` writes |
+| `--brief` | — | print the task of adding a topic to this keep-set, as Markdown, then exit |
 
 Without `--stats`, the file is chosen in this order:
 
@@ -54,10 +61,15 @@ pane says `this keep-set carries no per-topic histogram` and `--list` exits 1.
 |---|---|
 | 0 | the configuration will load (`FITS` or `TIGHT`); also a successful `--list` or `--render`, and quitting the interactive screen with `q` |
 | 1 | the configuration will not load (`WILL NOT LOAD`); also `--list` on a keep-set with no per-topic histograms |
-| 2 | a topic was named that this keep-set does not carry; also a `--render` argument that is not `HxW` |
+| 2 | a topic was named that this keep-set does not carry; also a `--render` argument that is not `HxW`, a `--profile` that matches no profile or more than one, and a `--save-profile` with nothing selected or onto a profiles file that does not parse |
 
 `--print` is therefore usable as a check in a script: it exits non-zero exactly when the selection
 would not serve. Note that `TIGHT` exits 0 — it means the margin is under 3 GB, not that it fails.
+
+A profiles file that cannot be read does not change any exit code. It costs the profiles in that
+file and nothing else: the problem goes to stderr, the tool starts on the built-in profiles, and
+`--list`, `--print` and `--write` behave exactly as they would have. `--brief` exits 0 whether or
+not the keep-set carries any topics.
 
 After `r` in the interactive screen the exit code is `./start.sh`'s.
 
@@ -75,6 +87,7 @@ After `r` in the interactive screen the exit code is `./start.sh`'s.
 | `←` `→` | adjust the focused slider. Context steps 4k, 8k, 16k, 32k, 64k, 128k, 256k; every other pane steps the keep fraction by 2 points between 6 % and 60 % |
 | `m` | snap the keep fraction to the smallest one at which every selected topic reaches the coverage target |
 | `f` | switch the arena format between `cb3` and `fp4` |
+| `s` | keep this selection as a profile: type a name on the key line, `Enter` saves it, `Esc` cancels |
 | `r` | write `.env` and run `./start.sh` |
 | `w` | write `.env` and stop |
 | `q` | quit without writing |
@@ -82,6 +95,68 @@ After `r` in the interactive screen the exit code is `./start.sh`'s.
 `f` and `w` are not in the on-screen key line. `r` refuses while something else is holding an arena,
 and refuses a configuration whose verdict is `WILL NOT LOAD`; `w` does neither, so it can write an
 over-budget `.env` on purpose.
+
+`s` writes the user profiles file described below and reports the path on the key line. It refuses
+an empty selection and an empty name, and it refuses to write over a profiles file it could not
+read, because that would take the profiles already in it. A saved profile is on the profile screen
+immediately, without a restart.
+
+On the profile screen the keys are `↑` `↓` to choose, `←` `→` for the context length, `Enter` to
+apply a profile and switch to the topic screen, `v` to switch without applying, `w`, `r`, `q` as
+above, and:
+
+| key | effect |
+|---|---|
+| `b` | write the topic task brief to `tune-brief.md` in the checkout, and say so on the key line |
+
+## Profiles from a file
+
+The profiles on the first screen are the ten built into `tools/tune.py` plus whatever these two
+files carry, read in this order:
+
+1. `results/keepsets/profiles.json`, inside the checkout, for a profile that should travel with it;
+2. `$XDG_CONFIG_HOME/deepseek-v41-flash-spark/profiles.json` (`~/.config/...` when that variable is
+   unset), for this user's own.
+
+Neither is shipped and neither has to exist. `--profiles-file PATH` replaces both, for reading and
+for saving. The user's file is read last, so a profile in it replaces one of the same name from the
+checkout file or from the built-in list; the replacement happens in place, so the order of the
+screen does not move. Names are matched without regard to case. `s` and `--save-profile` write to
+the last file in that list, which is the user's own unless `--profiles-file` says otherwise: a
+profile kept there survives a fresh clone and leaves the working tree clean.
+
+```json
+{
+  "profiles": [
+    {"name": "Arabic desk",
+     "description": "Arabic and English prose, for a bilingual assistant",
+     "topics": ["arabic", "english", "translation"]}
+  ]
+}
+```
+
+A bare JSON list of the same objects is accepted as well. A profile is a `name`, a one-line
+`description` (optional) and a non-empty list of `topics`. Whitespace in the name and the
+description is collapsed, so both stay one line on the screen, and a topic named twice counts once:
+the ranking gives every selected topic one vote per layer, and writing it twice does not mean two.
+Any other field is ignored, `gated` included: **a profile from a file is never gated** and the
+screen says `untested` for it, because the gate is a generation run on a keep-set and not a
+property of a name and a list of topics. See
+[`docs/keep-sets.md`](keep-sets.md) for what the gate is and
+[`results/keepsets/*/GATE.md`](../results/keepsets/) for what one looks like written down.
+
+What happens when a file is wrong:
+
+| what is wrong | what the tool does |
+|---|---|
+| the file is not there | nothing; there are simply no profiles from it |
+| it is not valid JSON, or not a list of profiles | one line on stderr naming the file and the parser's complaint, then the built-in profiles as usual. The interactive screen repeats it in the row under the header, where stderr cannot be seen |
+| one entry has no name, is not an object, or has no usable `topics` | one line naming that entry, by name where it has one and by position where it does not. Every other entry in the file is still loaded |
+| an entry names a topic this keep-set does not carry | one line naming the profile and every missing topic. The profile still applies, with the topics that do exist, and the profile screen prints `not in this keep-set: ...` under it |
+
+The last row is the one that matters in practice. Topic names differ between keep-sets, so a
+profiles file written against a 35-topic keep-set applies to a two-topic one with most of itself
+missing, and a selection that is quietly three topics short looks exactly like one that worked.
 
 ## The screen
 
@@ -108,11 +183,13 @@ source — and it is the one the engine's own pre-flight compares against.
 Off Linux there is no `/proc/meminfo`, so the header falls back to a GB10's 130.6 GB total and
 117.0 GB available and says so, which is what makes `--render` reproducible anywhere.
 
-The row under the header carries one of two warnings, or nothing:
+The row under the header carries one of three warnings, or nothing, in this order:
 
 * `already running here: <script> (pid N) — this box holds one at a time`, when a Python process
   whose script argument is `v41_engine.py`, `app.py`, `expert_trace.py` or `engram_rows.py` is
   alive. Only the script argument counts, so a shell watching for those names does not match.
+* `profiles: <file>: <what is wrong>`, when a profiles file could not be read. It outranks the note
+  below it because it is an error rather than a caveat, and because stderr is not visible here.
 * `not a GB10 -- numbers are the model's, not this machine's`, when the box is not a GB10.
 
 ### Topics pane
@@ -220,8 +297,22 @@ One line, in priority order:
      from the current one by more than half a point. Below 96 columns only the percentage is shown.
 3. `no topic selected — the keep-set would use all of them`.
 
-The bottom line carries the key hints, or a message from the last keypress. A message lasts until
-the next key.
+The bottom line carries the key hints, or a message from the last keypress, or the prompt `s`
+opens. A message lasts until the next key. Both screens use that line: on the profile screen it is
+where `b` says where it wrote the brief, and where `r` says why it refused.
+
+### Profile screen
+
+Three rows per profile: the name, with `· yours` after it when the profile came from a file and the
+status at the right edge; the description, with the budget the profile needs at the right edge; and,
+only when this keep-set is missing some of the profile's topics, `not in this keep-set: ...`.
+
+The status is computed from the worst coverage among the topics this keep-set actually has, at the
+keep fraction the profile needs: `serves all of it` at or above the coverage target, then `good` at
+0.75, `uneven` at 0.65, `spread thin` below that, `needs a bigger box` when no keep fraction that
+fits reaches it, and `not in this keep-set` when none of its topics is in the file at all. Every
+profile that resolves to topics also carries `· untested`, which is the gate flag and is never set
+for a profile from a file.
 
 ## Non-interactive output
 
@@ -279,11 +370,28 @@ Prints the screen as characters with no colour and no terminal, trailing blank r
 what keeps the screen in [`docs/tune.md`](tune.md) honest, and it is what `tools/test_tune_draw.py`
 draws into. Remember the argument is rows first: `--render 30x96` is 30 rows of 96 columns.
 
+### `--brief`
+
+Writes the task of adding a topic to this keep-set, as Markdown, on stdout, so it can be piped to a
+file or handed to somebody. It is generated from the keep-set that is loaded and the current
+selection, not from a template: which topics are there and how much text each was traced on, which
+of the catalogue's groups this keep-set is missing, what one more topic costs the ones already in
+the selection, and the commands with this checkout's paths. `b` on the profile screen writes the
+same thing to `tune-brief.md` in the checkout and says so on the key line.
+
+It works on a keep-set with no per-topic histograms as well, where it says that and keeps the
+sections that do not need any. The task guide for it is in
+[`docs/tune-tasks.md`](tune-tasks.md#write-the-topic-work-out-as-a-task).
+
 ## Checks
 
 ```bash
-python3 tools/test_budget.py      # the cost model against two loads this box actually ran
-python3 tools/test_tune_draw.py   # the screen renders at seven sizes without colliding
+python3 tools/test_budget.py         # the cost model against two loads this box actually ran
+python3 tools/test_tune_draw.py      # the screens render at seven sizes without colliding
+python3 tools/test_tune_profiles.py  # profiles from a file, including the files that are wrong
+python3 tools/test_tune_brief.py     # the brief comes from the keep-set, and its commands are real
 ```
 
-Neither needs a GPU, the checkpoint or torch.
+None of them needs a GPU, the checkpoint or torch. `test_tune_brief.py` checks every command the
+brief emits against the argument parser of the script it names, and runs the Python snippet in it
+against two keep-sets in the checkout.

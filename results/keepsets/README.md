@@ -53,6 +53,26 @@ EXPERT_TOPICS=python,html,german ./start.sh
 routing the current budget keeps resident, what that budget costs against the memory the box has
 free, and how many tokens each topic was traced on. See [`docs/tune.md`](../../docs/tune.md).
 
+A selection worth keeping becomes a named profile on the tool's first screen. `profiles.json` in
+this directory is one of the two files it reads them from, and the one to use for a profile that
+should travel with the checkout; the other is
+`$XDG_CONFIG_HOME/deepseek-v41-flash-spark/profiles.json`, which is where `s` on the topic screen
+saves and which survives a fresh clone. Neither is shipped. The format and the rules are in
+[`docs/tune-reference.md`](../../docs/tune-reference.md#profiles-from-a-file).
+
+```json
+{
+  "profiles": [
+    {"name": "Arabic desk",
+     "description": "Arabic and English prose, for a bilingual assistant",
+     "topics": ["arabic", "english", "translation"]}
+  ]
+}
+```
+
+A profile from a file is never gated, and the screen says `untested` for it, because the gate is a
+generation run on a keep-set rather than a property of a name and a list of topics.
+
 Selecting nothing is not an error — the engine then ranks on every topic in the file, which is
 what the profiles below do.
 
