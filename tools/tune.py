@@ -173,9 +173,9 @@ def draw(w, st: State):
         sub = f"{len(st.index.topics)} available · {len(st.sel)} selected"
     else:
         sub = "this keep-set carries no per-topic histogram"
+    hidden = 0
     if st.typing or st.filter:
         sub += f"   filter: {st.filter}" + ("_" if st.typing else "")
-    put(w, y + 1, 1, sub, C["muted"], maxw=split)
     put(w, y + 2, 1, "─" * split, C["muted"])
 
     curves = st.curves()
@@ -218,8 +218,13 @@ def draw(w, st: State):
             col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
             put(w, row, 22, bar(v, bw), col if on else C["muted"])
             put(w, row, 22 + bw + 1, f"{v:.2f}", (col | curses.A_BOLD) if on else C["muted"])
-    if len(vis) > list_h:
-        put(w, list_top + list_h - 1, split - 6, f"+{len(vis) - list_h}", C["muted"])
+    hidden = max(0, len(vis) - list_h - st.scroll)
+
+    if hidden:
+        sub += f" · {hidden} below"
+    if st.scroll:
+        sub += f" · {st.scroll} above"
+    put(w, y + 1, 1, sub.ljust(split), C["muted"], maxw=split)
 
     # --- right: budget
     put(w, y, rx, sp("BUDGET"), C["accent"] | curses.A_BOLD)
