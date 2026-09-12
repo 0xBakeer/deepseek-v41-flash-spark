@@ -46,6 +46,7 @@ err()  { echo "ERROR: $*" >&2; exit 1; }
 : "${ARENA_GB:=}"
 : "${TRACE_STATS:=}"
 : "${EXPERT_PROFILE:=}"
+: "${EXPERT_TOPICS:=}"
 : "${DEFAULT_THINKING:=off}"
 : "${DEFAULT_EFFORT:=75}"
 : "${SPEC:=1}"
@@ -146,6 +147,7 @@ EK="{"
 # expert instead of 18.80), so the same 90.5 GB holds ~40.8 % of all routed experts instead of
 # 31.3 %; pair it with PRUNE_KEEP=0.40. Warm start pays the packing (see NOTES 2026-09-11).
 [[ -n "${EXPERT_FORMAT:-}" ]] && EK="$EK\"expert_format\": \"$EXPERT_FORMAT\","
+[[ -n "${EXPERT_TOPICS:-}" ]] && EK="$EK\"expert_topics\": \"$EXPERT_TOPICS\","
 [[ -n "${PRUNE_SELECT:-}" ]] && EK="$EK\"prune_select\": \"$PRUNE_SELECT\","
 [[ -n "${TRANSIENT_SLOTS:-}" ]] && EK="$EK\"transient_slots\": $TRANSIENT_SLOTS,"
 [[ -n "${KEEP_FREE_GB:-}" ]] && EK="$EK\"keep_free_gb\": $KEEP_FREE_GB,"

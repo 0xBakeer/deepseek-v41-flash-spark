@@ -484,8 +484,25 @@ class V41Engine:
         if prune_keep and prune_keep < 1.0:
             # pruned, all-resident mode: per layer only the top-N experts (by trace frequency) stay
             # routable, and exactly those are warm-started, so decode never touches NVMe
-            cc, cg = EX.category_counts(trace_stats, "coding"), EX.category_counts(trace_stats, "general")
-            assert len(cc) == 40 and len(cg) == 40, "pruned mode needs the per-layer trace npz files next to trace_stats"
+            # Which topics the resident set must serve. Each topic is one per-layer expert
+            # histogram measured on a corpus of that topic alone; the keep-set is the top-N of their
+            # per-layer-normalised sum, so composing topics is arithmetic and needs no new trace.
+            # Normalising per topic before summing is the point: it gives a topic that contributed
+            # few tokens the same vote as one that contributed many, which is what "serve this
+            # workload too" means. Unset = every topic present in the coverage file.
+            topics = [t.strip() for t in (expert_topics or os.environ.get("DSV41_EXPERT_TOPICS", "")).split(",") if t.strip()]
+            if not topics:
+                topics = EX.available_topics(trace_stats)
+            per = {}
+            for t in topics:
+                c = EX.category_counts(trace_stats, t)
+                if len(c) != 40:
+                    raise ValueError(f"topic {t!r} is not in {trace_stats} (have: {', '.join(EX.available_topics(trace_stats))})")
+                per[t] = c
+            if not per:
+                raise ValueError(f"no topics found in {trace_stats}")
+            self.expert_topics_used = list(per)
+            log(f"keep-set topics: {', '.join(per)}")
             # How the two workloads are combined into one ranking. "sum" (the 0.2.0-wip default)
             # adds the per-layer-normalized frequencies, which favours experts moderately used by
             # both and drops each workload's specialists -- the coding and prose top sets overlap by
@@ -494,10 +511,13 @@ class V41Engine:
             # ranked on prose alone wrote clean text (NOTES 2026-09-12). "max" keeps an expert that
             # matters to EITHER workload, which is what a general-purpose server needs.
             rank = os.environ.get("DSV41_PRUNE_RANK", "sum")  # "max" was measured worse (NOTES 2026-09-12)
+            def _norm(c, L):
+                s_ = c[L].sum()
+                return c[L] / s_ if s_ > 0 else c[L]
             if rank == "sum":
-                counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in range(40)}
+                counts = {L: sum(_norm(c, L) for c in per.values()) for L in range(40)}
             elif rank == "max":
-                counts = {L: np.maximum(cc[L] / cc[L].sum(), cg[L] / cg[L].sum()) for L in range(40)}
+                counts = {L: np.maximum.reduce([_norm(c, L) for c in per.values()]) for L in range(40)}
             else:
                 raise ValueError(f"unknown DSV41_PRUNE_RANK {rank!r} (max | sum)")
             self.prune_select = prune_select
@@ -921,6 +941,7 @@ class V41Engine:
             "swa_replay": self.swa_replay,
             "prune_keep": self.prune_keep,
             "prune_select": getattr(self, "prune_select", None),
+            "expert_topics": getattr(self, "expert_topics_used", None),
             "hot_profile": self.hot_profile,
             "prefill_chunk": MAX_CHUNK,
             "io_threads": self.store.io_threads,
@@ -1069,6 +1090,8 @@ if __name__ == "__main__":
                     help="with --teacher-forced: comma list of keep fractions (e.g. 0.25,0.4,1.0); per layer only the "
                          "top-N experts by trace frequency stay routable; writes --tf-out with one entry per fraction")
     ap.add_argument("--prune-profile", default="mixed", choices=["mixed", "coding", "general"])
+    ap.add_argument("--expert-topics", default=None,
+                    help="comma-separated topics the resident set must serve; unset = every topic in the coverage file")
     ap.add_argument("--prune-select", default="uniform", choices=["uniform", "global"],
                     help="uniform: top-N per layer; global: one cross-layer ranking under the same total budget")
     ap.add_argument("--transient-slots", type=int, default=None,
@@ -1101,6 +1124,7 @@ if __name__ == "__main__":
     eng = V41Engine(a.model_dir, max_seq=a.max_seq, arena_gb=a.arena_gb, trace_stats=a.trace_stats,
                     spec=not a.no_spec, act_quant=a.act_quant,
                     swa_replay=(False if a.no_swa_replay else None), hot_profile=a.hot_profile, prune_keep=a.prune_keep, prune_select=a.prune_select,
+                    expert_topics=a.expert_topics,
                     sim_bits=a.sim_bits, sim_cold_frac=a.sim_cold_frac, expert_format=a.expert_format,
                     sim_cb2_frac=a.sim_cb2_frac,
                     **({"transient_slots": a.transient_slots} if a.transient_slots else {}),

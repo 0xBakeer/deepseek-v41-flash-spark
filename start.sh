@@ -34,7 +34,7 @@ done
 # Environment wins over .env, so `PORT=8001 ./start.sh` works.
 declare -A _CLI=()
 for v in MODEL_DIR PYTHON SERVED_MODEL_NAME HOST PORT MAX_SEQ ARENA_GB \
-         TRACE_STATS EXPERT_PROFILE DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP PRUNE_SELECT TRANSIENT_SLOTS KEEP_FREE_GB \
+         TRACE_STATS EXPERT_PROFILE EXPERT_TOPICS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP PRUNE_SELECT TRANSIENT_SLOTS KEEP_FREE_GB \
          EXPERT_FORMAT; do
     [[ -n "${!v:-}" ]] && _CLI[$v]="${!v}"
 done
@@ -144,6 +144,7 @@ EK="{"
 # expert instead of 18.80), so the same 90.5 GB holds ~40.8 % of all routed experts instead of
 # 31.3 %; pair it with PRUNE_KEEP=0.40. Warm start pays the packing (see NOTES 2026-09-11).
 [[ -n "${EXPERT_FORMAT:-}" ]] && EK="$EK\"expert_format\": \"$EXPERT_FORMAT\","
+[[ -n "${EXPERT_TOPICS:-}" ]] && EK="$EK\"expert_topics\": \"$EXPERT_TOPICS\","
 [[ -n "${PRUNE_SELECT:-}" ]] && EK="$EK\"prune_select\": \"$PRUNE_SELECT\","
 [[ -n "${TRANSIENT_SLOTS:-}" ]] && EK="$EK\"transient_slots\": $TRANSIENT_SLOTS,"
 [[ -n "${KEEP_FREE_GB:-}" ]] && EK="$EK\"keep_free_gb\": $KEEP_FREE_GB,"

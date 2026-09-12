@@ -443,6 +443,17 @@ class ExpertStore:
         return h / max(1, h + m)
 
 
+def available_topics(trace_stats_json: str) -> list:
+    """Topic names this coverage file carries a per-layer histogram for."""
+    try:
+        d = json.load(open(trace_stats_json))
+        pl = d.get("per_layer") or {}
+        any_layer = next(iter(pl.values()), {})
+        return sorted(k[len("counts_"):] for k in any_layer if k.startswith("counts_"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384,
                     n_layers: int = 40) -> dict[int, np.ndarray]:
     """Per-layer expert histogram restricted to one corpus category.
