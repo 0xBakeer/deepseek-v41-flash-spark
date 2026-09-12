@@ -171,6 +171,24 @@ rp = F4.moe_forward(xp, sp, wp, fp4q2)
 ok(float((yp.float() - rp.float()).abs().max()) == 0.0,
    f"T=128 (prefill): CB2 unpack fallback bit-exact vs the FP4 kernel (max |delta| {float((yp.float()-rp.float()).abs().max()):.1e})")
 
+# ------------------------------------------------------------------ chunk invariance
+# test_fp4_moe.py checks this for the FP4 kernel and it passes; the CB3 path -- the one
+# EXPERT_FORMAT=cb3 actually serves -- was never checked. It matters for the same reason
+# given there: the engine prefills a prompt in chunks and re-runs speculative blocks after
+# a rollback, so a prefix must reproduce the same rows of the larger call. A 6-token
+# speculative block lands in the small-T range.
+print("\n== chunk invariance (same tokens, different call sizes)")
+torch.manual_seed(1)
+Tc = 64
+xc = (torch.randn(Tc, F4.DIM, device="cuda") * 0.5).to(torch.bfloat16)
+sc_ = torch.stack([torch.randperm(S, device="cuda")[:6] for _ in range(Tc)]).to(torch.int32)
+wc = torch.rand(Tc, 6, device="cuda")
+full = C3.moe_forward_v3(xc, sc_, wc, a3)
+bad = [m for m in (1, 2, 4, 8, 16, 32)
+       if not torch.equal(C3.moe_forward_v3(xc[:m], sc_[:m], wc[:m], a3), full[:m])]
+ok(not bad, f"CB3 v3: every prefix bit-identical to the same rows of T={Tc}"
+            + (f" (differs at M={bad})" if bad else ""))
+
 print()
 print("FAILURES:", fails if fails else "none")
 sys.exit(1 if fails else 0)
