@@ -59,10 +59,7 @@ def find_stats(explicit: str | None) -> str | None:
     cands += sorted(glob.glob(os.path.join(ROOT, "results/trace-*/stats/coverage.json")))
     best, best_n = None, -1
     for c in cands:                       # the one that carries the most topics
-        try:
-            n = len(B.TopicIndex(c).topics)
-        except Exception:  # noqa: BLE001
-            continue
+        n = len(B.topic_names(c))
         if n > best_n:
             best, best_n = c, n
     return best
@@ -147,9 +144,18 @@ def put(w, y, x, s, attr=0, maxw=None):
         pass
 
 
+MIN_H, MIN_W = 20, 70
+
+
 def draw(w, st: State):
     w.erase()
     h, W = w.getmaxyx()
+    if h < MIN_H or W < MIN_W:
+        put(w, 0, 0, f"window is {W}x{h}; this needs at least {MIN_W}x{MIN_H}", C.get("warn", 0))
+        put(w, 1, 0, "resize, or use ./tune.sh --list / --print", C.get("muted", 0))
+        w.noutrefresh()
+        curses.doupdate()
+        return
     p = st.plan()
     split = max(46, int(W * 0.54))          # left pane width
     rx = split + 3                          # right pane x
@@ -348,6 +354,7 @@ def loop(w, st: State) -> str | None:
             return None
         st.msg = ""
         vis = st.visible
+        st.cursor = max(0, min(st.cursor, len(vis) - 1)) if vis else 0
 
         if st.typing:
             if k in (27,):                      # esc

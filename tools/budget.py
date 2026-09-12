@@ -198,6 +198,17 @@ def _cumsum_desc(counts_by_layer, order_by_layer, topic_counts):
     return curve
 
 
+def topic_names(path: str) -> list:
+    """The topic names in a coverage file, without loading its histograms --
+    find_stats compares every candidate in the checkout and there can be many."""
+    try:
+        d = json.load(open(path))
+        any_layer = next(iter((d.get("per_layer") or {}).values()), {})
+        return sorted(k[len("counts_"):] for k in any_layer if k.startswith("counts_"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 class TopicIndex:
     """The per-topic expert histograms in a coverage.json, and everything that
     can be derived from a selection of them without touching the model."""
