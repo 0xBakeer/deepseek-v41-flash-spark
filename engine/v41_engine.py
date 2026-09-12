@@ -96,8 +96,13 @@ class MemoryWatchdog:
     that does not itself need to allocate.
     """
 
-    def __init__(self, floor_gb: float = 4.0, interval: float = 0.5, log=print):
+    def __init__(self, floor_gb: float = 2.5, interval: float = 0.5, strikes: int = 6, log=print):
+        # `strikes` consecutive samples below the floor before acting: the warm start dips briefly
+        # while the packer's scratch is live and recovers on its own, and killing a configuration
+        # that works is its own kind of failure. A real collision (a second engine, a runaway
+        # allocation) stays below the floor and trips this within a few seconds.
         self.floor = floor_gb * 1e9
+        self.strikes = strikes
         self.interval = interval
         self.log = log
         self._stop = threading.Event()
@@ -120,11 +125,16 @@ class MemoryWatchdog:
                 return
             if self.low_water is None or avail < self.low_water:
                 self.low_water = avail
-            if avail < self.floor:
+            if avail >= self.floor:
+                self._below = 0
+                continue
+            self._below = getattr(self, "_below", 0) + 1
+            if self._below >= self.strikes:
                 try:
-                    self.log(f"FATAL: host MemAvailable {avail / 1e9:.1f} GB fell below the "
-                             f"{self.floor / 1e9:.1f} GB floor; exiting now so the kernel can "
-                             f"reclaim this process instead of thrashing the machine")
+                    self.log(f"FATAL: host MemAvailable {avail / 1e9:.1f} GB stayed below the "
+                             f"{self.floor / 1e9:.1f} GB floor for {self._below * self.interval:.1f} s; "
+                             f"exiting now so the kernel can reclaim this process instead of "
+                             f"thrashing the machine")
                     sys.stderr.flush()
                 except Exception:  # noqa: BLE001 - never let logging stop the exit
                     pass
@@ -427,14 +437,21 @@ class V41Engine:
             # top of it: the 3-bit packer works on the GPU in scratch buffers, and a chunked prefill
             # allocates activations. Reserve that too, and refuse up front rather than discovering it
             # halfway through a 3-minute warm start with 0.2 GB left.
-            pack_scratch = 6e9 if self.expert_format != "fp4" else 2e9
-            need = arena_gb * 1e9 + reserve + pack_scratch + keep_free_gb * 1e9
+            # This check runs after the dense weights are resident, so MemAvailable already
+            # excludes them: what is still to come is the arena itself plus the transient scratch of
+            # the warm start (the 3-bit packer works in GPU buffers). Calibrated against what this
+            # box actually does -- a 98 GB arena loads with ~110 GB available and settles with 6 GB
+            # free -- rather than a pessimistic sum, because refusing a configuration that works is
+            # its own failure. The MemoryWatchdog below is the backstop if this estimate is wrong.
+            pack_scratch = 3e9 if self.expert_format != "fp4" else 1e9
+            need = arena_gb * 1e9 + pack_scratch + keep_free_gb * 1e9
             if need > host_avail:
                 raise RuntimeError(
-                    f"refusing to start: arena {arena_gb:.1f} GB + {reserve / 1e9:.1f} GB activations "
-                    f"+ {pack_scratch / 1e9:.1f} GB warm-start scratch + {keep_free_gb:.1f} GB floor "
-                    f"= {need / 1e9:.1f} GB, but MemAvailable is {host_avail / 1e9:.1f} GB. "
-                    f"Lower --arena-gb by at least {(need - host_avail) / 1e9:.1f} GB.")
+                    f"refusing to start: arena {arena_gb:.1f} GB + {pack_scratch / 1e9:.1f} GB "
+                    f"warm-start scratch + {keep_free_gb:.1f} GB floor = {need / 1e9:.1f} GB, but "
+                    f"MemAvailable is {host_avail / 1e9:.1f} GB. Lower --arena-gb by at least "
+                    f"{(need - host_avail) / 1e9:.1f} GB, or stop whatever else holds memory "
+                    f"(on this box a boot-time vLLM container used to take 85 GB).")
         slots = int(arena_gb * 1e9 / self.expert_bytes)
         self.arena_gb, self.slots = round(arena_gb, 1), slots
         log(f"CUDA free {free / 1e9:.1f} GB of {total / 1e9:.1f}; host MemAvailable "
@@ -443,7 +460,7 @@ class V41Engine:
             f"({slots / 15360 * 100:.0f}% of all routed experts, {'auto' if auto else 'pinned'})")
         # from here on, anything that drives the host out of memory kills this process instead of
         # the machine (see MemoryWatchdog)
-        self.mem_watchdog = MemoryWatchdog(floor_gb=float(os.environ.get("DSV41_MEM_FLOOR_GB", "4")),
+        self.mem_watchdog = MemoryWatchdog(floor_gb=float(os.environ.get("DSV41_MEM_FLOOR_GB", "2.5")),
                                            log=log).start()
         self.arena = make_expert_arena(slots)
         self.store = EX.ExpertStore(model_dir, index, self.arena, self.args.n_layers, transient_slots=transient_slots,

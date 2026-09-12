@@ -2456,3 +2456,40 @@ HTML 36.6, JavaScript 28.2, SQL 31.8, explanation 18.1, German 25.2, arithmetic 
 19.4; a tool call returns `finish_reason: tool_calls` with well-formed arguments. The generated HTML
 game passes every structural check (doctype, balanced style and script tags, 3x3 grid, win check,
 reset button, click handlers, no corrupted CSS units) and stops on its own at 982 tokens.
+
+### 2026-09-12 09:30-10:40 -- prefill: what the routing timer was really measuring, and the memory guard
+
+**The device slot table now covers prefill too.** `Model.moe` takes the table the fast decode path
+builds (`self.slot_lut`) instead of resolving every (layer, expert) pair on the host, which turns a
+Python pass over 12,288 pairs per layer per chunk into one GPU gather. `route_s` on a 7,030-token
+prompt goes 13.72 s -> 0.0.
+
+**It did not make prefill faster, and the earlier reading of that timer was wrong.** `route_s` is
+nested inside `moe_s` and overlaps it, so removing it entirely leaves the wall time where it was:
+
+| | prefill | moe_s | route_s |
+|---|---|---|---|
+| host routing, chunk 2048, arena 98 | 17.8 s (396 tok/s) | 15.07 | 13.72 |
+| device table, chunk 2048, arena 88 | 19.0 s (369 tok/s) | 15.27 | **0.0** |
+
+The change is kept because it is correct and removes host work from the loop, but the claim that
+routing was three quarters of prefill was an artefact of reading a nested timer as if it were
+additive.
+
+**What prefill actually costs is the 3-bit unpack.** A CB3 expert cannot be used by the prefill
+kernel directly, so every chunk unpacks the experts it touches back into packed FP4 and runs the FP4
+kernel over them (`tools/cb3_moe.py::moe_forward_prefill`). A 2,048-token chunk touches nearly all
+384 experts in all 40 layers, and the unpack repeats for every chunk, so the cost scales with chunk
+*count*: at chunk 512 prefill is 291 tok/s, at 1024 it is 326, at 2048 it is 369.
+
+**Two memory guards, both earned.** The engine now refuses to start when the arena plus warm-start
+scratch plus the floor exceeds MemAvailable, and a watchdog thread samples `/proc/meminfo` twice a
+second and calls `os._exit` when it stays under 2.5 GB for three seconds. The kernel does not
+OOM-kill cleanly on this box: it thrashes until sshd can no longer fork, the machine answers ping
+while being unreachable, and only a power cycle recovers it. Exiting immediately lets the kernel
+reclaim everything at once. The watchdog fired correctly during a 7,030-token prefill at a 98 GB
+arena (MemAvailable 0.2 GB) and the box stayed up. Prefill memory, not the arena, is what bounds
+the arena size: 2,048-token chunks need roughly 10 GB of headroom on top of the resident experts.
+
+Also relevant on this box: a crontab entry started a Qwen vLLM container 90 seconds after every
+boot, on the same port, holding ~85 GB. It is what collided with the expert arena twice. Disabled.
