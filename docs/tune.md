@@ -133,9 +133,10 @@ between those two rows is context window and prefill room.
 
 `--print` exits non-zero when the selection will not load, so it works as a check in a script.
 The interactive `r` writes the same settings and then runs `./start.sh`; `w` writes them and
-stops. `.env` is only touched for the keys the tool manages (`EXPERT_TOPICS`, `PRUNE_KEEP`,
-`MAX_SEQ`, `ARENA_GB`, `EXPERT_FORMAT`, `TRACE_STATS`) and the previous file is kept as
-`.env.bak`.
+stops. `.env` is only touched for the eight keys the tool manages — `EXPERT_TOPICS`, `PRUNE_KEEP`,
+`MAX_SEQ`, `ARENA_GB`, `EXPERT_FORMAT`, `TRACE_STATS`, and also `TRANSIENT_SLOTS` and
+`KEEP_FREE_GB`, which it must write because the arena was sized against them. The previous file
+is kept as `.env.bak`.
 
 ## Where topics come from
 
@@ -160,16 +161,9 @@ It asks Wikipedia for twenty article introductions at a time, one request every 
 backs off when told to. A burst of parallel requests earns an IP-level rate limit that outlasts
 the job.
 
-To add a topic of your own, tag a corpus and trace it:
-
-```bash
-python3 corpus/make_corpus.py --topic rust:code:~/src/some-rust-project \
-                              --topic german:prose:~/texts/de --out corpus/trace.jsonl
-python3 tools/engram_rows.py  --corpus corpus/trace.jsonl --out engram_rows
-python3 tools/expert_trace.py --corpus corpus/trace.jsonl --engram-dir engram_rows \
-                              --out results/trace-mine --layers 0-39
-python3 tools/expert_stats.py --trace results/trace-mine
-```
+To add a topic of your own, see [`docs/tune-tasks.md`](tune-tasks.md), which carries the complete
+commands. In outline: tag the sources with a topic name, build the corpus, fetch the Engram rows
+it needs, trace it layer by layer, and turn the trace into a `coverage.json`.
 
 The trace is one pass over the corpus per layer and costs about the same whether the corpus
 carries five topics or thirty-five, so it is worth tagging generously.

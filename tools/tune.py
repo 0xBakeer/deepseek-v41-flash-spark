@@ -218,15 +218,24 @@ def draw(w, st: State):
         if st.index and st.index.topics:
             put(w, list_top, 3, "nothing matches that filter", C["muted"])
         else:
+            # kept short enough to fit the pane at the narrowest supported width
             for i, line in enumerate([
-                "Build one with a traced corpus:",
-                "  corpus/make_corpus.py --topic NAME:KIND:PATH",
-                "  tools/expert_trace.py  then  tools/expert_stats.py",
+                "Nothing to select: this keep-set has",
+                "no per-topic histograms in it.",
                 "",
-                "Without topics the whole keep-set is used, which is",
-                "what the shipped profiles do. The budget panel is live.",
+                "To build one:",
+                "  corpus/fetch_topics.py",
+                "  corpus/make_corpus.py",
+                "  tools/expert_trace.py",
+                "  tools/expert_stats.py",
+                "",
+                "docs/keep-sets.md walks the whole path.",
+                "",
+                "Without topics the engine ranks on all",
+                "of them, which is what the shipped",
+                "profiles do. The budget is live anyway.",
             ]):
-                put(w, list_top + i, 3, line, C["muted"], maxw=split)
+                put(w, list_top + i, 3, line, C["muted"], maxw=split - 3)
     for i, t in enumerate(vis[st.scroll:st.scroll + list_h]):
         row = list_top + i
         idx = st.scroll + i
@@ -277,8 +286,9 @@ def draw(w, st: State):
     row(ry + 6, f"KV cache · {st.max_seq // 1024}k", f"{p.kv:.1f} GB" if p.kv >= 1 else f"{p.kv * 1000:.0f} MB")
     put(w, ry + 7, rx, "─" * rw, C["muted"])
     row(ry + 8, "resident", f"{p.resident:.1f} GB", C["bright"] | curses.A_BOLD)
+    # the same threshold the verdict uses, or this row reads green under a red badge
     row(ry + 9, "free after load", f"{p.free_after_load:.1f} GB",
-        C["good"] if p.free_after_load >= p.floor else C["bad"])
+        C["good"] if p.free_after_load >= p.prefill else C["bad"])
     row(ry + 11, "room to launch", f"{p.launch_slack:+.1f} GB",
         C["good"] if p.launch_slack >= 3 else (C["warn"] if p.launch_slack >= 0 else C["bad"]))
     vmark = {"ok": (" FITS ", C["good"]), "tight": (" TIGHT ", C["warn"]), "over": (" WILL NOT LOAD ", C["bad"])}
@@ -360,10 +370,15 @@ def draw(w, st: State):
         # transient, and worth the key line for one keypress
         put(w, h - 1, 1, st.msg.ljust(W - 2)[:W - 2], C["warn"] | curses.A_BOLD)
     else:
-        keys = ("↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  "
-                "m fit  r RUN  q quit")
-        if len(keys) > W - 2:
-            keys = "↑↓ space ←→ tab · a all · n none · / filter · m fit · r RUN · q quit"
+        for keys in (
+            "↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  "
+            "m fit  f format  w write  r RUN  q quit",
+            "↑↓ space ←→ tab · a all · n none · / filter · m fit · f format · w write · r RUN · q quit",
+            "↑↓ space ←→ tab · / filter · m fit · f format · r RUN · q quit",
+            "space ←→ tab · m fit · r RUN · q quit",
+        ):
+            if len(keys) <= W - 2:
+                break
         put(w, h - 1, 1, keys[:W - 2], C["muted"])
     w.noutrefresh()
     curses.doupdate()

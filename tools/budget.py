@@ -72,6 +72,15 @@ DENSE_BYTES = {
 }
 DENSE_DEFAULT = 7.61e9
 
+
+def dense_key_from_env() -> tuple:
+    """Which dense-weight figure applies, from the same two variables start.sh
+    reads. Hardcoding the shipped pair understated resident memory by up to
+    11.8 GB for anyone who changed either one in .env, which is enough to make
+    the verdict wrong rather than merely imprecise."""
+    groups = ",".join(sorted(g for g in os.environ.get("DSV41_DENSE_FP4", "attn,wo_a").split(",") if g))
+    return (groups, os.environ.get("DSV41_HEAD_FMT", "fp8"))
+
 # The KV and indexer caches are allocated for MAX_SEQ up front (engine/model.py
 # Caches). Per token: for every kv_source_layer, one compressed-KV row of
 # head_dim and one index row of index_head_dim, both bf16, at that layer's
@@ -378,6 +387,7 @@ class Plan:
     n_keep: int
     kept: int
     slots: int
+    transient: int
     fmt: str
     max_seq: int
     arena: float
@@ -407,7 +417,10 @@ class Plan:
     # against MemAvailable as it is now, so the dense term is explicit.
     @property
     def launch_need(self) -> float:
-        return self.arena + self.scratch + self.dense + self.floor
+        # engine/v41_engine.py: floor = max(keep_free_gb, MAX_CHUNK * 5 MB).
+        # Mirroring it exactly matters -- reading `keep_free_gb` alone made this
+        # 4.2 GB more generous than the launcher's real margin at the default.
+        return self.arena + self.scratch + self.dense + max(self.floor, self.prefill)
 
     @property
     def launch_slack(self) -> float:
@@ -448,15 +461,16 @@ class Plan:
         return max(0.0, min(launch, serve))
 
     def max_keep(self) -> float:
-        slots = self.max_arena() * GB / EXPERT_BYTES[self.fmt] - TRANSIENT_SLOTS_DEFAULT
+        slots = self.max_arena() * GB / EXPERT_BYTES[self.fmt] - self.transient
         return max(0.0, slots / N_ROUTED)
 
 def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: int,
          fmt: str = "cb3", select: str = "uniform", arena_gb: float | None = None,
-         keep_free_gb: float = KEEP_FREE_GB_DEFAULT, dense_key=("attn,wo_a", "fp8"),
+         keep_free_gb: float = KEEP_FREE_GB_DEFAULT, dense_key=None,
          chunk: int = PREFILL_CHUNK_DEFAULT,
          transient_slots: int = TRANSIENT_SLOTS_DEFAULT) -> Plan:
     # the engine's own rounding: ceil(keep * 384) experts in every layer
+    dense_key = dense_key or dense_key_from_env()
     kept = keep_n(keep) * N_LAYERS
     slots = kept + transient_slots
     arena = (arena_gb * GB) if arena_gb else slots * EXPERT_BYTES[fmt]
@@ -466,7 +480,8 @@ def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: 
     kv = kv_bytes(max_seq)
     cov = index.coverage(tuple(selection), keep, select) if index else {}
     return Plan(
-        keep=keep, n_keep=keep_n(keep), kept=kept, slots=slots, fmt=fmt, max_seq=max_seq,
+        keep=keep, n_keep=keep_n(keep), kept=kept, slots=slots, transient=transient_slots,
+        fmt=fmt, max_seq=max_seq,
         arena=arena / GB,
         dense=DENSE_BYTES.get(dense_key, DENSE_DEFAULT) / GB,
         dspark=DSPARK_BYTES / GB,

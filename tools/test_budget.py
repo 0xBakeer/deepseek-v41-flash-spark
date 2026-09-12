@@ -42,7 +42,10 @@ check("KV at 128k", round(B.kv_bytes(131072) / 1e9 - B.WINDOW_BYTES / 1e9, 2), 0
 # once the dense weights are resident. The box had MemAvailable 111.1 GB there
 # and accepted an 88 GB arena; it would not have accepted 103.
 host = B.Host("test", 130.6e9, 111.1e9 + 7.61e9, True)
-for arena, want in ((88.0, True), (98.0, True), (103.0, False)):
+# Since 2026-09-12 the engine's floor is max(keep_free_gb, MAX_CHUNK * 5 MB), so
+# the 98 GB arena that used to pass this gate no longer does -- which is the
+# point: it loaded, reported ready, and died on the first request.
+for arena, want in ((88.0, True), (98.0, False), (103.0, False)):
     p = B.plan(host, None, (), 0.39, 32768, arena_gb=arena)
     check(f"arena {arena:.0f} GB accepted", p.launch_slack >= 0, want)
 
@@ -59,7 +62,7 @@ served = B.plan(box, None, (), 0.39, 32768)
 killed = B.plan(box, None, (), 0.44, 32768)
 check("keep 0.39 is offered", served.verdict != "over", True)
 check("keep 0.44 is refused", killed.verdict, "over")
-check("  the engine would have started it anyway", killed.launch_slack >= 0, True)
+check("  and the launcher refuses it too now", killed.launch_slack < 0, True)
 check("  free at 0.39 clears the prefill reserve", served.free_after_load > served.prefill, True)
 check("  free at 0.44 does not", killed.free_after_load < killed.prefill, True)
 check("max keep on that box", round(served.max_keep(), 2), 0.42, 0.01)
@@ -115,6 +118,25 @@ if os.path.exists(cov):
         check("coverage reaches 1.0 at keep 100%", round(c[384], 3), 1.0, 0.001)
 else:
     print("skip coverage checks (no keep-set in the checkout)")
+
+# --- the dense figure must follow the environment, not a hardcoded pair -----
+# DSV41_DENSE_FP4 and DSV41_HEAD_FMT are ordinary .env keys that tune.sh
+# already sources. Pinning the shipped pair understated resident memory by up
+# to 11.8 GB for anyone who changed either, which flips the verdict.
+_save = {k: os.environ.get(k) for k in ("DSV41_DENSE_FP4", "DSV41_HEAD_FMT")}
+os.environ["DSV41_DENSE_FP4"], os.environ["DSV41_HEAD_FMT"] = "", "bf16"
+bf16 = B.plan(host, None, (), 0.39, 32768)
+os.environ["DSV41_DENSE_FP4"], os.environ["DSV41_HEAD_FMT"] = "attn,wo_a", "fp8"
+fp8 = B.plan(host, None, (), 0.39, 32768)
+for k, v in _save.items():
+    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+check("a bf16 head and dense attention cost more", round(bf16.dense - fp8.dense, 1), 11.8, 0.05)
+
+# --- the ceiling must use this plan's ring, not the default one -------------
+ring400 = B.plan(host, None, (), 0.39, 32768, transient_slots=400)
+ring8 = B.plan(host, None, (), 0.39, 32768, transient_slots=8)
+check("a 400-slot ring lowers the ceiling", ring400.max_keep() < ring8.max_keep(), True)
+check("  by 392 slots", round((ring8.max_keep() - ring400.max_keep()) * B.N_ROUTED), 392, 1)
 
 # --- the tool and the engine must reserve the same prefill headroom ---------
 # If they drift, tune.sh advises configurations the engine refuses, or worse,

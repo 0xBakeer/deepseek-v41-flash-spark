@@ -58,10 +58,14 @@ STATES = [
     ("over budget", set(index.topics) if index else set(), 0.60, 262144, 2),
     ("tiny keep", set(), 0.06, 4096, 1),
 ]
+# the state nothing exercised: a keep-set with no per-topic histograms at all,
+# where the left pane is help text instead of a list
+NO_INDEX = ("no topic histograms", set(), 0.39, 32768, 0)
 
-for label, sel, keep, seq, pane in STATES:
+for label, sel, keep, seq, pane in STATES + [NO_INDEX]:
+    use_index = None if label == NO_INDEX[0] else index
     for h, w in SIZES:
-        st = T.State(host, index, stats, keep, seq, "cb3", sorted(sel))
+        st = T.State(host, use_index, stats, keep, seq, "cb3", sorted(sel))
         st.pane = pane
         st.msg = "a message that has to fit" if pane == 2 else ""
         try:
@@ -79,6 +83,13 @@ for label, sel, keep, seq, pane in STATES:
         problems = []
         if not any("BUDGET" in r.replace(" ", "") or "B U D G E T" in r for r in rows):
             problems.append("no budget panel")
+        # nothing in the left pane may reach the right pane's column
+        rx = max(46, int(w * 0.54)) + 3
+        for r in rows[6:h - 9]:
+            left = r[:rx - 1].rstrip()
+            if len(left) >= rx - 1:
+                problems.append(f"left pane reaches the budget column: {left[-28:]!r}")
+                break
         if not any("RESIDENTEXPERTS" in r.replace(" ", "") for r in rows):
             problems.append("no keep slider")
         if not any("CONTEXT" in r.replace(" ", "") for r in rows):

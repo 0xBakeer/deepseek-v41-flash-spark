@@ -335,6 +335,10 @@ docs/                 install · architecture · openai-api · benchmarking · g
 | | |
 |---|---|
 | [`docs/tune.md`](docs/tune.md) | choosing the topics a keep-set serves, and what they cost |
+| [`docs/tune-reference.md`](docs/tune-reference.md) | `./tune.sh` in full: every flag, key, screen field and exit code |
+| [`docs/tune-tasks.md`](docs/tune-tasks.md) | picking topics, reading the verdict, fixing an over-budget selection, adding a topic |
+| [`docs/keep-sets.md`](docs/keep-sets.md) | what a keep-set, a topic and coverage are, and why coverage predicts degeneration |
+| [`docs/memory-budget.md`](docs/memory-budget.md) | every memory term with its provenance, and the two gates a configuration must pass |
 | [`docs/install.md`](docs/install.md) | host prerequisites, the checkpoint, both run paths, first start |
 | [`docs/architecture.md`](docs/architecture.md) | how the engine is put together |
 | [`docs/openai-api.md`](docs/openai-api.md) | endpoints, thinking/effort, streaming, Open WebUI |
