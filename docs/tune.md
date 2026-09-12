@@ -107,12 +107,18 @@ What it does is reach a given coverage at a *smaller* budget, and the budget is 
 
 | selection | keep fraction for 0.85 coverage | arena |
 |---|---|---|
-| one topic | 32 % | 71 GB |
-| two topics | 51 % | more than this box holds |
+| `coding` alone | 32 % | 71 GB |
+| `coding` + `general` | 51 % | more than this box holds |
+
+Those are the two topics the shipped `general` keep-set carries, and the numbers are its own —
+name the topics whenever you quote a figure like this, because a different pair gives a different
+answer. On a 35-topic keep-set the same comparison runs 22 % for `python` alone, 32 % adding
+`html`, 41 % adding `german`. What does not change is the direction: each topic you add costs
+keep fraction, and keep fraction is arena.
 
 That is the trade the screen is built around. Press `m` to snap the keep fraction to the
 smallest one that serves every selected topic, and read the arena off the panel. The 27 GB
-between those two rows is context window and prefill room.
+between the two rows above is context window and prefill room.
 
 > **Not measured yet.** There is one path by which topic choice could touch step time after all.
 > Speculative decoding verifies a block of six tokens, and that block touches about 21 *distinct*
