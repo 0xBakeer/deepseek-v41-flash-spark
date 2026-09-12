@@ -340,8 +340,8 @@ def draw(w, st: State):
         # transient, and worth the key line for one keypress
         put(w, h - 1, 1, st.msg.ljust(W - 2)[:W - 2], C["warn"] | curses.A_BOLD)
     else:
-        keys = ("↑↓ topic   space select   ←→ adjust   tab pane   a all   n none   / filter   "
-                "m fit   r RUN   q quit")
+        keys = ("↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  "
+                "m fit  r RUN  q quit")
         if len(keys) > W - 2:
             keys = "↑↓ space ←→ tab · a all · n none · / filter · m fit · r RUN · q quit"
         put(w, h - 1, 1, keys[:W - 2], C["muted"])
