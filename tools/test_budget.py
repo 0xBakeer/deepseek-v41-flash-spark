@@ -50,6 +50,11 @@ for arena, want in ((88.0, True), (98.0, True), (103.0, False)):
 p = B.plan(host, None, (), 0.39, 32768)
 check("keep 39% kept experts", p.kept, 150 * 40)          # ceil(.39*384)=150 per layer
 check("arena holds kept + transient ring", p.slots, 6008)
+# the engine's OWN default ring is 400, not 8: sizing for 8 and running with
+# 400 leaves 392 kept experts outside the LRU, streaming from NVMe every step
+big = B.plan(host, None, (), 0.39, 32768, transient_slots=400)
+check("a 400-slot ring is sized for", big.slots, 6400)
+check("and costs more arena", round(big.arena - p.arena, 1), 5.7, 0.1)
 check("keep 39% arena GB", round(p.arena, 1), 86.8, 0.05)
 # max_keep must be exactly where the launch gate crosses zero
 mk = p.max_keep()

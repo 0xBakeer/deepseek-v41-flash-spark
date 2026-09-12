@@ -68,9 +68,15 @@ def find_stats(explicit: str | None) -> str | None:
 # --- state ------------------------------------------------------------------
 
 class State:
-    def __init__(self, host, index, stats_path, keep, max_seq, fmt, selection):
+    def __init__(self, host, index, stats_path, keep, max_seq, fmt, selection,
+                 transient_slots=B.TRANSIENT_SLOTS_DEFAULT, keep_free_gb=B.KEEP_FREE_GB_DEFAULT):
         self.host, self.index, self.stats_path = host, index, stats_path
         self.keep, self.max_seq, self.fmt = keep, max_seq, fmt
+        # The arena has to hold the kept set PLUS the transient ring, and the
+        # engine's own default ring is 400 slots, not 8. Sizing against one
+        # value and running with the other is how a keep-set that reads nothing
+        # from NVMe quietly starts reading 392 experts a step.
+        self.transient_slots, self.keep_free_gb = transient_slots, keep_free_gb
         self.sel = set(selection)
         self.cursor, self.scroll, self.filter, self.pane = 0, 0, "", 0
         self.typing = False
@@ -84,7 +90,8 @@ class State:
 
     def plan(self):
         return B.plan(self.host, self.index, tuple(sorted(self.sel)), self.keep,
-                      self.max_seq, fmt=self.fmt)
+                      self.max_seq, fmt=self.fmt, transient_slots=self.transient_slots,
+                      keep_free_gb=self.keep_free_gb)
 
     def curves(self):
         """Coverage under the CURRENT selection. With nothing selected the
@@ -428,7 +435,8 @@ def loop(w, st: State) -> str | None:
 
 # --- output -----------------------------------------------------------------
 
-MANAGED = ("EXPERT_TOPICS", "PRUNE_KEEP", "MAX_SEQ", "ARENA_GB", "TRACE_STATS", "EXPERT_FORMAT")
+MANAGED = ("EXPERT_TOPICS", "PRUNE_KEEP", "MAX_SEQ", "ARENA_GB", "TRACE_STATS", "EXPERT_FORMAT",
+           "TRANSIENT_SLOTS", "KEEP_FREE_GB")
 
 
 def env_for(st: State) -> dict:
@@ -438,6 +446,9 @@ def env_for(st: State) -> dict:
         "MAX_SEQ": str(st.max_seq),
         "ARENA_GB": f"{math.ceil(p.arena)}",
         "EXPERT_FORMAT": st.fmt,
+        # written because the arena above was sized against them
+        "TRANSIENT_SLOTS": str(st.transient_slots),
+        "KEEP_FREE_GB": f"{st.keep_free_gb:g}",
         "TRACE_STATS": os.path.relpath(st.stats_path, ROOT) if st.stats_path else "",
     }
     if st.sel:
@@ -479,6 +490,12 @@ def main() -> int:
     ap.add_argument("--keep", type=float, default=float(os.environ.get("PRUNE_KEEP", "0.39")))
     ap.add_argument("--max-seq", type=int, default=int(os.environ.get("MAX_SEQ", "32768")))
     ap.add_argument("--format", default=os.environ.get("EXPERT_FORMAT", "cb3"), choices=("cb3", "fp4"))
+    ap.add_argument("--transient-slots", type=int,
+                    default=int(os.environ.get("TRANSIENT_SLOTS") or B.TRANSIENT_SLOTS_DEFAULT),
+                    help="prefill slots outside the LRU; the arena is sized to hold these too")
+    ap.add_argument("--keep-free-gb", type=float,
+                    default=float(os.environ.get("KEEP_FREE_GB") or B.KEEP_FREE_GB_DEFAULT),
+                    help="host memory the launcher leaves free")
     ap.add_argument("--list", action="store_true", help="print the topics and exit")
     ap.add_argument("--print", dest="show", action="store_true", help="print the environment and exit")
     ap.add_argument("--write", action="store_true", help="write the selection into .env and exit")
@@ -495,7 +512,8 @@ def main() -> int:
             print(f"have: {', '.join(index.topics)}", file=sys.stderr)
             return 2
 
-    st = State(host, index, sp_, a.keep, a.max_seq, a.format, sel)
+    st = State(host, index, sp_, a.keep, a.max_seq, a.format, sel,
+               transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb)
 
     if a.list:
         if not index or not index.topics:
