@@ -32,12 +32,12 @@ does not shrink anything. What runs:
 
 ## The numbers
 
-### v0.4.0-wip (2026-09-12) — the shipped configuration today
+### v0.4.0-wip (2026-09-12) — the numbers, and a correction
 
-`PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98`, keep-set ranked on `results/trace-union`. The top
-44 % of routed experts per layer stay routable and resident in a 3-bit per-row codebook packed from
-the checkpoint's own FP4 experts; the rest are never read at serving time. One request each through
-the server, measured with the engine's own counters:
+`EXPERT_FORMAT=cb3`, keep-set ranked on `results/trace-union`. The top ~40 % of routed experts per
+layer stay routable and resident in a 3-bit per-row codebook packed from the checkpoint's own FP4
+experts; the rest are never read at serving time. One request each through the server, measured
+with the engine's own counters:
 
 | workload | tok/s | where |
 |---|---|---|
@@ -53,6 +53,12 @@ Every one of those was produced under a generation gate: five prompts of 900-2,0
 stay coherent and, where they finish on their own, be structurally intact. That gate exists because
 teacher-forced loss does not see degeneration — the previous tag's default measured better on loss
 and could not write an HTML file.
+
+**Two corrections since, both in [`LIMITATIONS.md`](LIMITATIONS.md).** The 44 % arena those rows
+were taken on does not reliably serve: it leaves 5.5 GB where one prefill chunk needs about 10, and
+on a second day it loaded, reported ready, and was killed by the memory watchdog on the first
+request. The shipped default is now 39 % in an 87 GB arena, which leaves 16.5 GB. And the gate runs
+to 2,000 tokens; past that, generations still degenerate.
 
 ### v0.1.0-wip (2026-09-10) — the original streaming mode (kept for the record)
 
