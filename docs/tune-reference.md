@@ -162,7 +162,7 @@ from, is in [`docs/memory-budget.md`](memory-budget.md).
 The verdict is the two gates together:
 
 ```
-will not load   room to launch < 0  or  free after load < one prefill chunk (10.24 GB at chunk 2,048)
+will not load   room to launch < 0  or  free after load < a prefill chunk plus the 2.5 GB watchdog floor
 tight           room to launch < 3 GB  or  free after load < that chunk + 3 GB
 fits            otherwise
 ```
@@ -170,7 +170,7 @@ fits            otherwise
 Two colouring details are worth knowing, because they are not the verdict rule:
 
 * `free after load` turns red only below the keep-free floor (6 GB by default), so between that
-  floor and the 10.24 GB a prefill chunk needs it is drawn green while the verdict already says
+  floor and what a prefill chunk needs it is drawn green while the verdict already says
   `WILL NOT LOAD`. The badge is the number to act on.
 * `room to launch` is green at 3 GB or more, amber down to 0, red below.
 

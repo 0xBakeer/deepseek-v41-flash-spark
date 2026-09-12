@@ -37,7 +37,7 @@ machine stops being reachable. Everything below is arranged around not doing tha
 | sliding-window rings | `43 x 4096 x 512 x 2` = 180,355,072 B | same, and independent of `max_seq` |
 | warm-start pack scratch | 3 GB for `cb3`, 1 GB for `fp4` | the 3-bit packer's GPU buffers |
 | keep-free floor | 6 GB as the tool writes it; 20 GB is the engine's default | `KEEP_FREE_GB` |
-| prefill chunk | 5 MB per token, so 10.24 GB at the default 2,048-token chunk | measured; see below |
+| prefill chunk | 7.2 GB at the default 2,048-token chunk, plus 15.1 KB per token of context | measured; see below |
 
 Everything except the last two rows stays resident for the whole run.
 
@@ -183,8 +183,8 @@ resident        = arena + dense weights + drafter experts + KV cache
 free after load = MemAvailable − resident
 ```
 
-and that has to leave room for one prefill chunk. This engine's activation cost is about **5 MB per
-prefill token**, so the default 2,048-token chunk needs about 10 GB. This number is measured, not
+and that has to leave room for one prefill chunk. At the default 2,048-token chunk that is **7.2 GB**,
+plus **15.1 KB for every token of context**: 7.5 GB at 32k, 9.2 GB at 128k, 11.2 GB at 256k. Measured, not
 derived, and the measurement is the reason the gate exists:
 
 | arena | free after load | what happened |
@@ -200,7 +200,7 @@ FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB floor for 3.0 s
 ```
 
 **Gate 1 accepts both.** It runs before the drafter experts, before the cache and before anything
-has prefilled, so it cannot see the 7.2 GB of drafter and the 10 GB of chunk that turn 98 GB from a
+has prefilled, so it cannot see the 7.2 GB of drafter and the chunk cost that turn 98 GB from a
 configuration that starts into one that dies. That asymmetry is the single most useful thing the
 tool does: it applies gate 2 and refuses configurations the engine would have accepted.
 

@@ -112,7 +112,7 @@ arena plus its packing scratch plus the free-memory floor exceeds `MemAvailable`
 
 **Free after load** is what is left for a prefill chunk once everything resident is resident,
 and it is the number that decides whether a configuration serves or dies. One 2,048-token chunk
-needs about 10 GB at this engine's activation cost, so the verdict is `over` whenever less than
+needs 7.2 GB, plus 15.1 KB for every token of context, so the verdict is `over` whenever less than
 that is left — even when the engine's own pre-flight would happily start it. That pre-flight runs
 before the drafter experts, the cache and any prefill exist, so it is the looser of the two
 checks. On 2026-09-12 a 98 GB arena passed it, reported ready, and was killed by the memory

@@ -242,7 +242,7 @@ FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB floor for 3.0 s
 
 The arithmetic says why. With `MemAvailable` at 111.0 GB once the dense weights are resident, a
 98 GB arena plus 7.2 GB of drafter experts leaves 5.5 GB, and one 2,048-token prefill chunk needs
-about 10 GB at this engine's activation cost. An 87 GB arena leaves 16.5 GB and serves. The
+about 7.5 GB at 32k context. An 87 GB arena leaves 16.5 GB and serves. The
 configuration was always inside the margin; it passed its gate on a quieter box.
 
 The engine's own pre-flight accepts the 98 GB arena, because that check runs before the drafter
