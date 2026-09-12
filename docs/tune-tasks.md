@@ -157,6 +157,49 @@ and a thin topic's coverage is biased upward rather than merely noisy. The scrip
 topic actually reached — that is the number to check, not the file size, because CJK text is far
 denser per character than Latin text.
 
+Only the first `--target` tokens are taken, in file order, so the ordering of a hand-written source
+file is load-bearing: put the registers you care about first, or rotate them, and everything past
+the cut is never traced.
+
+### The `think` kind, for deliberation
+
+`code` and `prose` both write `</think>` immediately after the assistant tag, so both close an
+*empty* think block, and `prose` collapses every run of whitespace to a single space. Neither can
+represent what a model writes inside a think block when the task is code — prose and code
+interleaved, a fragment revised in the next sentence, an approach abandoned mid-thought — and
+neither ever measures the close itself. Counted over the two shipped trace corpora: 95 sequences,
+85 with `</think>` adjacent to the assistant tag, none with it after real content.
+
+That gap is not cosmetic. The experts that fire on "the deliberation is finished, close it, begin
+the answer" are never ranked, so on a pruned server they are not resident and the model cannot stop
+deliberating: at temperature 0 it writes a decisive closing line and then repeats a short phrase to
+the token cap with an answer of length zero. Lowering `reasoning_effort` makes it worse, not better.
+
+`think` reads records and wraps them as `<think>{deliberation}</think>{answer}`, preserving
+indentation and fences:
+
+```
+=== PROMPT
+one line, a realistic request
+=== THINK
+the deliberation, fenced fragments and all
+=== ANSWER
+the answer
+=== END
+```
+
+```bash
+python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3400 \
+    --topic reasoning_code:think:corpus/sources/reasoning_code.txt \
+    --out corpus/trace_reasoning_code.jsonl
+```
+
+The whole record — prompt, deliberation and answer together — must fit `--max-len` (512, the
+exactness bound of the pure-torch port); a record over budget is reported and skipped, so check the
+count the script prints. Write the deliberation by hand. A model cannot produce a register its
+resident experts do not cover, so sampling this text from the server that needs it is circular, and
+the samples come back degenerate.
+
 **3. Fetch the Engram rows the corpus needs.** The two n-gram tables are 101 GB each and are never
 downloaded; only the rows this corpus touches are fetched, over multipart HTTP range requests.
 

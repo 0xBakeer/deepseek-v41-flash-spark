@@ -59,6 +59,30 @@ topic gets one vote per layer.
 The alternative combination — keeping an expert that matters to *any* selected topic, rather than
 summing — exists as `DSV41_PRUNE_RANK=max` and was measured worse, so `sum` is the default.
 
+### One vote each is not the same as one outcome each
+
+`sum` maximises the total routing mass the resident set keeps. That is the wrong quantity when one
+request spans several topics at once, which is what a coding request with thinking on does: it
+writes English prose, deliberation, HTML, CSS and JavaScript in a single generation, and it
+degenerates at whichever of them the resident set serves least. A rule that maximises the total is
+free to let an already well-served topic go on taking slots while another starves.
+
+Normalising per layer has a second consequence that is easy to miss: it divides corpus size out, so
+a *broad* topic — one that spreads its mass over many experts — scores low on every one of them and
+loses slot after slot to a peaky specialist. Over
+{english, html, python, reasoning, css, javascript} at `PRUNE_KEEP=0.36` on a GB10, `sum` leaves
+english at 0.556 while css and javascript sit at 0.803 and 0.814.
+
+`DSV41_PRUNE_RANK=maxmin` hands each layer's slots out one at a time to whichever selected topic is
+currently least covered. An expert admitted for one topic counts for every topic that also routes
+to it, so overlap is paid for once instead of per topic, and the selected topics converge on a
+common coverage rather than a spread. The same budget then holds 0.676–0.688 across all six.
+
+It also changes what adding a topic costs. Under `sum` the worst-served topic falls from 0.657 at
+four topics to 0.410 at eighteen; under `maxmin` the same span costs 0.06. Breadth is affordable
+under `maxmin` and ruinous under `sum` — but neither rule creates capacity, and past roughly twenty
+topics the shared budget is thin enough that every one of them suffers.
+
 ## Coverage
 
 **Coverage** is the fraction of a topic's *measured* routing that lands on an expert the current
