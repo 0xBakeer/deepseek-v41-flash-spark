@@ -85,6 +85,13 @@ WINDOW_BYTES = 43 * 4096 * 512 * 2
 PACK_SCRATCH_BYTES = {"cb3": 3e9, "fp4": 1e9}
 KEEP_FREE_GB_DEFAULT = 6.0
 
+# Prefill misses go through a small ring of slots instead of the LRU, so the
+# arena has to hold the kept set PLUS that ring: engine/experts.py sets
+# lru_slots = n_slots - transient_slots, and a kept set larger than lru_slots
+# streams its tail from NVMe on every step -- which is exactly the property a
+# fully resident keep-set exists to buy.
+TRANSIENT_SLOTS_DEFAULT = 8
+
 PREFILL_CHUNK_DEFAULT = 2048
 N_INDEX_LAYERS = 8               # config.json index_source_layers
 
@@ -285,6 +292,7 @@ def keep_n(keep: float) -> int:
 class Plan:
     keep: float
     n_keep: int
+    kept: int
     slots: int
     fmt: str
     max_seq: int
@@ -301,7 +309,7 @@ class Plan:
 
     @property
     def resident_frac(self) -> float:
-        return self.slots / N_ROUTED
+        return self.kept / N_ROUTED
 
     @property
     def resident(self) -> float:
@@ -351,20 +359,25 @@ class Plan:
         return max(0.0, self.available - self.scratch - self.dense - self.floor)
 
     def max_keep(self) -> float:
-        return self.max_arena() * GB / EXPERT_BYTES[self.fmt] / N_ROUTED
+        slots = self.max_arena() * GB / EXPERT_BYTES[self.fmt] - TRANSIENT_SLOTS_DEFAULT
+        return max(0.0, slots / N_ROUTED)
 
 def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: int,
          fmt: str = "cb3", select: str = "uniform", arena_gb: float | None = None,
          keep_free_gb: float = KEEP_FREE_GB_DEFAULT, dense_key=("attn,wo_a", "fp8"),
-         chunk: int = PREFILL_CHUNK_DEFAULT) -> Plan:
-    slots = int(round(keep * N_ROUTED))
+         chunk: int = PREFILL_CHUNK_DEFAULT,
+         transient_slots: int = TRANSIENT_SLOTS_DEFAULT) -> Plan:
+    # the engine's own rounding: ceil(keep * 384) experts in every layer
+    kept = keep_n(keep) * N_LAYERS
+    slots = kept + transient_slots
     arena = (arena_gb * GB) if arena_gb else slots * EXPERT_BYTES[fmt]
     if arena_gb:
         slots = int(arena / EXPERT_BYTES[fmt])
+        kept = min(kept, slots - transient_slots)
     kv = kv_bytes(max_seq)
     cov = index.coverage(tuple(selection), keep, select) if index else {}
     return Plan(
-        keep=keep, n_keep=keep_n(keep), slots=slots, fmt=fmt, max_seq=max_seq,
+        keep=keep, n_keep=keep_n(keep), kept=kept, slots=slots, fmt=fmt, max_seq=max_seq,
         arena=arena / GB,
         dense=DENSE_BYTES.get(dense_key, DENSE_DEFAULT) / GB,
         dspark=DSPARK_BYTES / GB,

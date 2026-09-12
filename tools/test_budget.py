@@ -48,8 +48,9 @@ for arena, want in ((88.0, True), (98.0, True), (103.0, False)):
 
 # --- keep fraction -> slots -------------------------------------------------
 p = B.plan(host, None, (), 0.39, 32768)
-check("keep 39% slots", p.slots, 5990)
-check("keep 39% arena GB", round(p.arena, 1), 86.6, 0.05)
+check("keep 39% kept experts", p.kept, 150 * 40)          # ceil(.39*384)=150 per layer
+check("arena holds kept + transient ring", p.slots, 6008)
+check("keep 39% arena GB", round(p.arena, 1), 86.8, 0.05)
 # max_keep must be exactly where the launch gate crosses zero
 mk = p.max_keep()
 check("max keep fits", B.plan(host, None, (), mk - 0.002, 32768).launch_slack >= 0, True)

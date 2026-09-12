@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import curses
 import glob
+import math
 import os
 import shutil
 import subprocess
@@ -231,7 +232,7 @@ def draw(w, st: State):
         put(w, yy, rx + rw - len(s), s, attr or C["bright"])
 
     ry = y + 3
-    row(ry, "experts resident", f"{p.slots:,} / {B.N_ROUTED:,}", C["bright"] | curses.A_BOLD)
+    row(ry, "experts resident", f"{p.kept:,} / {B.N_ROUTED:,}", C["bright"] | curses.A_BOLD)
     row(ry + 1, "", f"{p.resident_frac * 100:.1f} %", C["bright"])
     row(ry + 3, "expert arena", f"{p.arena:.1f} GB")
     row(ry + 4, "dense weights", f"{p.dense:.1f} GB")
@@ -417,7 +418,7 @@ def env_for(st: State) -> dict:
     e = {
         "PRUNE_KEEP": f"{st.keep:.2f}",
         "MAX_SEQ": str(st.max_seq),
-        "ARENA_GB": f"{p.arena:.0f}",
+        "ARENA_GB": f"{math.ceil(p.arena)}",
         "EXPERT_FORMAT": st.fmt,
         "TRACE_STATS": os.path.relpath(st.stats_path, ROOT) if st.stats_path else "",
     }
@@ -499,7 +500,7 @@ def main() -> int:
             print(f"# already running here: {host.busy} — this box holds one at a time", file=sys.stderr)
         for k, v in env.items():
             print(f"{k}={v}")
-        print(f"# {p.slots:,} experts resident ({p.resident_frac:.1%}), {p.resident:.1f} GB resident, "
+        print(f"# {p.kept:,} experts resident ({p.resident_frac:.1%}), {p.resident:.1f} GB resident, "
               f"{p.free_after_load:.1f} GB free after load — {p.verdict}", file=sys.stderr)
         return 0 if p.verdict != "over" else 1
 
@@ -509,7 +510,7 @@ def main() -> int:
     env = env_for(st)
     write_env(env, os.path.join(ROOT, ".env"))
     p = st.plan()
-    print(f"{p.slots:,} experts resident ({p.resident_frac:.1%}) · arena {p.arena:.0f} GB · "
+    print(f"{p.kept:,} experts resident ({p.resident_frac:.1%}) · arena {p.arena:.0f} GB · "
           f"context {st.max_seq // 1024}k · {p.free_after_load:.1f} GB free after load")
     if st.sel:
         print(f"topics: {', '.join(sorted(st.sel))}")
