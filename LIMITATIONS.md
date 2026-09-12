@@ -205,3 +205,20 @@ Known remaining inexactness:
   unit tests pass, the end-to-end run never happened.
 * **Not measured**: sampled quality at scale, generation quality at 8k+ context, the container image
   end to end.
+
+## 2026-09-12 — `./tune.sh`, and the claim on its screen
+
+The screen says a step reads only the experts a token activates, so choosing fewer topics buys a
+smaller keep fraction rather than a faster step. The mechanism is the architecture's and the
+supporting measurement is §4.3 of `RESULTS.md` — ~145 ms per step across nine workloads on one
+keep-set, with the whole tok/s spread coming from drafter acceptance.
+
+**The A/B that would settle it has not been run**: one topic against many at the same
+`PRUNE_KEEP`, same prompts, comparing step time. A verify block of six tokens touches ~21
+distinct experts per layer, and a keep-set matched to its workload could concentrate that.
+`coverage.json` carries `block6_unique_mean` but measures it without a keep mask, so it cannot
+answer the question.
+
+The coverage numbers on the screen are measurements. The memory numbers reproduce the engine's
+own pre-flight and are checked against a real load in `tools/test_budget.py`. Only the
+speed sentence is an inference, and it is marked as one in `docs/tune.md`.

@@ -60,9 +60,11 @@ run rather than predicting a ceiling it has not reached.
 
 ## Fewer topics are not faster. They are cheaper.
 
-A decode step reads the experts the token activates, six of 384 per layer, and that is the same
-number whether the keep-set was built for one topic or thirty-five. **Selecting fewer topics
-does not make a step faster.**
+A decode step reads the experts the token activates — six of 384 per layer — and that count does
+not depend on how the keep-set was chosen. The measured behaviour agrees: across nine workloads
+on one keep-set the step is ~145 ms in every case, and the 17-to-37 tok/s spread between them is
+entirely the drafter's acceptance length (`RESULTS.md` §4.3). **So selecting fewer topics should
+not be expected to make a step faster.**
 
 What it does is reach a given coverage at a *smaller* budget, and the budget is the arena:
 
@@ -72,7 +74,16 @@ What it does is reach a given coverage at a *smaller* budget, and the budget is 
 | two topics | 51 % | more than this box holds |
 
 That is the trade the screen is built around. Press `m` to snap the keep fraction to the
-smallest one that serves every selected topic, and read the arena off the panel.
+smallest one that serves every selected topic, and read the arena off the panel. The 27 GB
+between those two rows is context window and prefill room.
+
+> **Not measured yet.** There is one path by which topic choice could touch step time after all.
+> Speculative decoding verifies a block of six tokens, and that block touches about 21 *distinct*
+> experts per layer rather than six. A keep-set matched to the workload may concentrate routing
+> and lower that count. `block6_unique_mean` in `coverage.json` is measured without a keep mask,
+> so it cannot answer this — only an A/B at a fixed keep fraction with one topic against many
+> can, and it has not been run. Until it is, treat the paragraph above as the mechanism, not a
+> measurement.
 
 ## Without a terminal
 

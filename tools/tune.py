@@ -249,10 +249,10 @@ def draw(w, st: State):
     put(w, ry + 12, rx + rw - len(txt), txt, col | curses.A_REVERSE | curses.A_BOLD)
 
     if h >= 28:
-        note = ["Topics do not change how fast a step is:",
-                "it reads only the experts a token",
-                "activates. They change the keep fraction",
-                "that is enough — and that is the arena."]
+        note = ["A step reads only the experts a token",
+                "activates. Topics change the keep",
+                "fraction you need — and that is the",
+                "arena, not the step."]
         for i, ln in enumerate(note):
             put(w, ry + 15 + i, rx, ln, C["muted"], maxw=rw)
 
