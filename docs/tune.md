@@ -72,7 +72,14 @@ coverage was 0.03. Raising it to 0.40 fixed it. Coverage below about 0.7 is wher
 arena plus its packing scratch plus the free-memory floor exceeds `MemAvailable`
 (`engine/v41_engine.py`). Finding that out by loading costs three minutes; this costs nothing.
 
-**Free after load** is what is left for a prefill chunk once everything resident is resident.
+**Free after load** is what is left for a prefill chunk once everything resident is resident,
+and it is the number that decides whether a configuration serves or dies. One 2,048-token chunk
+needs about 10 GB at this engine's activation cost, so the verdict is `over` whenever less than
+that is left — even when the engine's own pre-flight would happily start it. That pre-flight runs
+before the drafter experts, the cache and any prefill exist, so it is the looser of the two
+checks. On 2026-09-12 a 98 GB arena passed it, reported ready, and was killed by the memory
+watchdog on the first request with 5.5 GB free; an 87 GB arena left 16.5 GB and served.
+
 The KV cache is the smallest term on the screen — 285 MB at 32k, 3.4 GB at 1M — so it is not
 what bounds the context window. Prefill is, and the tool says how far the box has actually been
 run rather than predicting a ceiling it has not reached.
