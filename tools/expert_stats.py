@@ -82,6 +82,10 @@ def main():
     ap.add_argument("--trace", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--budgets", default="1000,1500,2000,3000,4000,5000,6000,8000")
+    ap.add_argument("--cov-curves", action="store_true",
+                    help="also write the per-category coverage curves; they are derived from the "
+                         "histograms, nothing reads them back, and at 35 topics they are 7.7 MB "
+                         "of a 9.8 MB file")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     layers, meta = load(a.trace)
@@ -89,6 +93,7 @@ def main():
     budgets = [int(x) for x in a.budgets.split(",")]
     n_tok = layers[Ls[0]]["idx"].shape[0]
     cats = sorted(set(layers[Ls[0]]["cat"].tolist()))
+    curves = a.cov_curves
 
     per_layer = {}
     glob_counts = {}
@@ -107,11 +112,16 @@ def main():
         for c in cats:
             m = layers[L]["cat"] == c
             cat_counts = np.bincount(idx[m].reshape(-1), minlength=N_EXP)
-            per_layer[L][f"cov_{c}"] = coverage_curve(cat_counts)
             # the histogram itself, not just its coverage curve: the engine's pruned mode ranks
             # experts per category, and reading it from here means a checkout does not need the
             # raw per-layer trace arrays (tens of MB) to reproduce a keep-set.
             per_layer[L][f"counts_{c}"] = cat_counts
+            # The per-category coverage CURVE is derived from that histogram in one pass and
+            # nothing reads it back -- but it is 384 full-precision floats per category per
+            # layer, which at 35 topics is 7.7 MB of a 9.8 MB file. Off by default; the
+            # histograms above are what a keep-set is actually built from.
+            if curves:
+                per_layer[L][f"cov_{c}"] = coverage_curve(cat_counts)
         for e in range(N_EXP):
             glob_counts[(L, e)] = int(counts[e])
 
