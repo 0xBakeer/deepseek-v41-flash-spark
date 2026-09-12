@@ -125,6 +125,7 @@ between those two rows is context window and prefill room.
 ## Without a terminal
 
 ```bash
+./tune.sh --render 30x96                  # the screen as text, no terminal needed
 ./tune.sh --list                          # the topics this keep-set carries, with coverage
 ./tune.sh --topics python,html --print    # the environment that selection implies
 ./tune.sh --topics python,html --write    # write those settings into .env

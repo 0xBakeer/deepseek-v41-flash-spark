@@ -25,32 +25,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 fails = []
 
 
-class FakeWin:
-    """Enough curses.window for draw(): a grid plus the calls it makes."""
-
-    def __init__(self, h, w):
-        self.h, self.w = h, w
-        self.grid = [[" "] * w for _ in range(h)]
-        self.out_of_bounds = []
-
-    def getmaxyx(self):
-        return self.h, self.w
-
-    def erase(self):
-        self.grid = [[" "] * self.w for _ in range(self.h)]
-
-    def noutrefresh(self):
-        pass
-
-    def addstr(self, y, x, s, attr=0):
-        if not (0 <= y < self.h) or x < 0 or x + len(s) > self.w:
-            self.out_of_bounds.append((y, x, len(s), s[:20]))
-            raise curses.error("out of bounds")
-        for i, ch in enumerate(s):
-            self.grid[y][x + i] = ch
-
-    def row(self, y):
-        return "".join(self.grid[y]).rstrip()
+# the window-shaped object the tool already uses for --render
+FakeWin = T._Grid
 
 
 def render(st, h, w):

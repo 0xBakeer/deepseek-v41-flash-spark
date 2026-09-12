@@ -473,6 +473,50 @@ def loop(w, st: State) -> str | None:
             return "write"
 
 
+class _Grid:
+    """A window-shaped object that collects characters instead of drawing them,
+    so the screen can be dumped without a terminal -- for `--render`, and for
+    tools/test_tune_draw.py."""
+
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+        self.g = [[" "] * w for _ in range(h)]
+
+    def getmaxyx(self):
+        return self.h, self.w
+
+    def erase(self):
+        self.g = [[" "] * self.w for _ in range(self.h)]
+
+    def noutrefresh(self):
+        pass
+
+    def addstr(self, y, x, t, attr=0):
+        if not (0 <= y < self.h) or x < 0 or x + len(t) > self.w:
+            raise curses.error("out of bounds")
+        for i, c in enumerate(t):
+            self.g[y][x + i] = c
+
+    def row(self, y):
+        return "".join(self.g[y]).rstrip()
+
+
+def render(st: State, h: int, w: int) -> str:
+    """The screen as text. Used to keep docs/tune.md honest."""
+    for k in ("accent", "good", "warn", "bad", "muted", "bright", "on"):
+        C.setdefault(k, 0)
+    save, curses.doupdate = curses.doupdate, lambda: None
+    try:
+        grid = _Grid(h, w)
+        draw(grid, st)
+    finally:
+        curses.doupdate = save
+    rows = [grid.row(y) for y in range(h)]
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return "\n".join(rows)
+
+
 # --- output -----------------------------------------------------------------
 
 MANAGED = ("EXPERT_TOPICS", "PRUNE_KEEP", "MAX_SEQ", "ARENA_GB", "TRACE_STATS", "EXPERT_FORMAT",
@@ -539,6 +583,8 @@ def main() -> int:
                     help="host memory the launcher leaves free")
     ap.add_argument("--coverage-target", type=float, default=COVERAGE_TARGET,
                     help="coverage every selected topic should reach (default %(default).2f)")
+    ap.add_argument("--render", metavar="HxW", default=None,
+                    help="print the screen as text at this size and exit (no terminal needed)")
     ap.add_argument("--list", action="store_true", help="print the topics and exit")
     ap.add_argument("--print", dest="show", action="store_true", help="print the environment and exit")
     ap.add_argument("--write", action="store_true", help="write the selection into .env and exit")
@@ -550,7 +596,7 @@ def main() -> int:
     index = B.TopicIndex(sp_) if sp_ else None
     sel = [t.strip() for t in a.topics.split(",") if t.strip()]
     unknown = [t for t in sel if not index or t not in index.topics] if sel else []
-    interactive = sys.stdout.isatty() and not (a.list or a.show or a.write)
+    interactive = sys.stdout.isatty() and not (a.list or a.show or a.write or a.render)
     if unknown and not interactive:
         # a script asked for something this keep-set cannot serve: say so and stop
         where = os.path.relpath(sp_, ROOT) if sp_ else "any coverage.json in the checkout"
@@ -564,6 +610,16 @@ def main() -> int:
                transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb)
     if unknown:
         st.msg = f"dropped, not in this keep-set: {', '.join(unknown)}"
+
+    if a.render:
+        try:
+            rh, _, rw = a.render.partition("x")
+            rh, rw = int(rh), int(rw)
+        except ValueError:
+            print("--render wants HxW, e.g. 30x96", file=sys.stderr)
+            return 2
+        print(render(st, rh, rw))
+        return 0
 
     if a.list:
         if not index or not index.topics:
