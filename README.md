@@ -263,7 +263,16 @@ Full API reference: [`docs/openai-api.md`](docs/openai-api.md) (operator's view)
 
 ## Reproduce the checks and the trace
 
-Neither needs a server; both need the checkpoint and an interpreter with torch.
+Four checks need nothing at all — no GPU, no checkpoint, no torch — so they run anywhere:
+
+```bash
+python3 tools/test_budget.py        # the memory model against two loads this box actually ran
+python3 tools/test_engine_kwargs.py # every launcher kwarg is a parameter the engine has
+python3 tools/test_tune_draw.py     # the tune screen renders at 7 sizes without colliding
+python3 server/test_server.py       # the HTTP layer against the mock engine
+```
+
+The rest need a server or the checkpoint and an interpreter with torch.
 
 ```bash
 # the engine's math against the pure-PyTorch reference port (RESULTS.md §2)
@@ -274,8 +283,6 @@ python3 engine/v41_engine.py --model-dir ./models/DeepSeek-V4.1-Flash --act-quan
 python3 engine/v41_engine.py --model-dir ./models/DeepSeek-V4.1-Flash --spec-ab \
     --max-tokens 64 --temperature 1.0 --ab-out results/spec_ab.json
 
-# the HTTP layer, against the mock engine -- no GPU, no weights, tokenizer metadata is enough
-python3 server/test_server.py
 ```
 
 The routing trace that ranks the warm start, one 7.4 GB layer shard at a time (resumable, so
