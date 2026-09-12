@@ -18,7 +18,7 @@ selection of these topics produces sound long output is not, until it is gated. 
 
 ## Why the corpus was rebuilt, and what it changed
 
-The first attempt at these 35 topics averaged a few hundred tokens each, with Chinese at 150. That
+The first attempt at these 35 topics averaged a few hundred tokens each, the thinnest at 221. That
 is not enough to rank 384 experts per layer, and the failure is not merely noisy, it is
 *optimistic*: coverage is computed on the same trace that chose the experts, so a thinly traced
 topic scores as though it were well served.

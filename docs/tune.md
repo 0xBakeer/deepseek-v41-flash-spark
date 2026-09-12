@@ -145,8 +145,8 @@ What it does is reach a given coverage at a *smaller* budget, and the budget is 
 
 Those are the two topics the shipped `general` keep-set carries, and the numbers are its own —
 name the topics whenever you quote a figure like this, because a different pair gives a different
-answer. On a 35-topic keep-set the same comparison runs 22 % for `python` alone, 32 % adding
-`html`, 41 % adding `german`. What does not change is the direction: each topic you add costs
+answer. On the shipped 35-topic keep-set the same comparison runs 29 % for `python` alone, 35 % adding
+`html`, 49 % adding `german`. What does not change is the direction: each topic you add costs
 keep fraction, and keep fraction is arena.
 
 That is the trade the screen is built around. Press `m` to snap the keep fraction to the
