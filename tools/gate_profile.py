@@ -460,6 +460,11 @@ def corrupt_run(text: str):
             return m.group(0), line.strip()[:60]
         before = text[i - 1] if i else " "
         after = text[j] if j < len(text) else " "
+        # An ellipsis between words or numbers is ordinary prose -- `wait...no`, `6...10` -- and a
+        # numeric range tripped this on a C++ ring-buffer answer. Three or four dots welded in are
+        # a writer's ellipsis; five or more are a run.
+        if ch == "." and j - i < 5:
+            continue
         if before.isalnum() and after.isalnum():
             return text[i - 1:j + 1], line.strip()[:60]
     return None

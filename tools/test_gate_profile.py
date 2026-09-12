@@ -592,6 +592,12 @@ check("a markdown rule is not a corrupted run", G.corrupt_run("text\n\n---------
 check("a box-drawing rule is not a corrupted run",
       G.corrupt_run("| a | b |\n──────────") is None)
 check("three blank lines are not a corrupted run", G.corrupt_run("a\n\n\n\nb") is None)
+# A numeric range and a writer's ellipsis are welded between alphanumerics and are not runs;
+# `overflow 6...10` on a ring-buffer answer was the false positive that found this.
+check("a numeric range with an ellipsis is not a corrupted run",
+      G.corrupt_run("push 1..5, overflow 6...10 returns false") is None)
+check("an ellipsis between words is not a corrupted run", G.corrupt_run("wait...no, that fires twice") is None)
+check("five or more welded dots still are", G.corrupt_run("wait.....no") is not None)
 
 bad = G.universal("I thought about the grid, the win lines and the reset button at length.",
                   "", "stop", True)
