@@ -66,6 +66,7 @@ for label, sel, keep, seq, pane in STATES + [NO_INDEX]:
     use_index = None if label == NO_INDEX[0] else index
     for h, w in SIZES:
         st = T.State(host, use_index, stats, keep, seq, "cb3", sorted(sel))
+        st.view = "advanced"
         st.pane = pane
         st.msg = "a message that has to fit" if pane == 2 else ""
         try:
@@ -114,9 +115,50 @@ for label, sel, keep, seq, pane in STATES + [NO_INDEX]:
             problems.append("a row is wider than the window")
         check(f"{label} at {w}x{h}", not problems, "; ".join(problems))
 
+# --- the easy view, at every size and on every profile ----------------------
+for h, w in SIZES:
+    for cursor in range(len(T.PROFILES)):
+        st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+        st.pcursor = cursor
+        try:
+            win = render(st, h, w)
+        except curses.error:
+            check(f"profiles at {w}x{h} row {cursor}", False, True)
+            continue
+        except Exception as e:  # noqa: BLE001
+            check(f"profiles at {w}x{h} row {cursor}", False, True)
+            print(f"     {type(e).__name__}: {e}")
+            continue
+        if h < T.MIN_H or w < T.MIN_W:
+            continue
+        rows = [win.row(y) for y in range(h)]
+        bad = []
+        if not any("WHATSHOULDTHISBOX" in r.replace(" ", "") for r in rows):
+            bad.append("no heading")
+        # the highlighted profile must always be on screen, whatever the scroll
+        if not any(T.PROFILES[cursor][0] in r for r in rows):
+            bad.append(f"selected profile {T.PROFILES[cursor][0]!r} scrolled off")
+        if not any(r.startswith("▌") for r in rows):
+            bad.append("no cursor marker")
+        if any(len(r) > w for r in rows):
+            bad.append("a row is wider than the window")
+        if cursor == 0:
+            check(f"profiles at {w}x{h}", not bad, "; ".join(bad))
+        elif bad:
+            check(f"profiles at {w}x{h} row {cursor}", False, "; ".join(bad))
+
+# applying a profile selects its topics and a keep fraction that fits
+st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+pr = next(p for p in st.profiles() if p["topics"])
+st.apply_profile(pr)
+check("applying a profile selects its topics", sorted(st.sel), sorted(pr["topics"]))
+check("  and a keep fraction that loads", st.plan().verdict != "over", True)
+check("  every profile resolves", all(p["status"] for p in st.profiles()), True)
+
 # every topic row must carry its traced-token count
 if index and index.topics:
     st = T.State(host, index, stats, 0.39, 32768, "cb3", index.topics[:1])
+    st.view = "advanced"
     win = render(st, 32, 104)
     rows = [win.row(y) for y in range(32)]
     hit = [r for r in rows if index.topics[0] in r]

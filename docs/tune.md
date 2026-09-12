@@ -42,6 +42,30 @@ traced on too little text to be believed.
  ↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  m fit  r RUN  q quit
 ```
 
+## Two views
+
+The screen opens on **profiles**: named bundles of topics, one per line, with what each needs on
+the box in front of you. Pick the job rather than the experts.
+
+```
+  Frontend                                                          good
+  HTML, CSS, JavaScript, TypeScript, and the English around them    40 % of experts · 32k context
+```
+
+`enter` applies a profile and drops you into the **topic view** so you can see what it selected and
+adjust it; `r` applies it and starts the server; `v` moves between the two views at any time.
+The topic view is the screen below, and it is where every number lives.
+
+Every profile carries a natural-language topic, which is not padding. Selecting markup and
+stylesheets alone drops English coverage to 0.31, well inside the range where long output falls
+apart, and the prose inside an HTML page is English. Adding it back costs the markup topics about
+five points of coverage and buys English forty-five.
+
+```bash
+./tune.sh --profiles              # the profiles, with what each one needs
+./tune.sh --profile frontend --print
+```
+
 ## Where the header's numbers come from
 
 On a GB10 there is no separate pool to ask about: the memory is unified, and `nvidia-smi` answers

@@ -318,11 +318,11 @@ class TopicIndex:
     def __bool__(self) -> bool:
         return bool(self.topics)
 
-    def curves(self, selection: tuple, select: str = "uniform"):
+    def curves(self, selection: tuple, select: str = "uniform", only: tuple | None = None):
         """coverage curves for a selection: {topic: [384+1 floats]}, index n =
         keeping the top-n experts per layer. Computed once per selection, so a
         slider move is a lookup."""
-        key = (tuple(sorted(selection)), select)
+        key = (tuple(sorted(selection)), select, only)
         hit = self._cache.get(key)
         if hit is not None:
             return hit
@@ -343,8 +343,10 @@ class TopicIndex:
         order = {L: sorted(range(N_EXPERTS), key=lambda e: -combined[L][e]) for L in range(N_LAYERS)}
         out = {}
         # every topic in the file gets a curve, so an unselected one can be read
-        # off too -- that is how you see what a selection costs the rest
-        for t in self.topics:
+        # off too -- that is how you see what a selection costs the rest.
+        # `only` narrows that when the caller just wants the selected ones,
+        # which is ten times cheaper when ten selections are compared at once.
+        for t in (only if only is not None else self.topics):
             tot = self.totals[t] or 1.0
             curve = _cumsum_desc(combined, order, self.counts[t])
             out[t] = [x / tot for x in curve]
@@ -363,7 +365,7 @@ class TopicIndex:
         """Smallest keep fraction at which every selected topic reaches `target`.
         An empty selection means every topic, which is what the engine ranks on."""
         selection = tuple(selection) or tuple(self.topics)
-        got = self.curves(selection, select)
+        got = self.curves(selection, select, only=tuple(sorted(selection)))
         if not got:
             return None
         curves = got[0]

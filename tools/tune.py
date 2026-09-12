@@ -33,6 +33,41 @@ import budget as B  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BLOCKS = " ▏▎▍▌▋▊▉█"
+
+# --- the easy view ----------------------------------------------------------
+# Named bundles of topics, for people who know what they want the box to do and
+# not which experts that implies. A profile fixes only WHICH topics; the keep
+# fraction it needs is computed from whatever coverage file is loaded, so these
+# stay correct as the trace behind them improves.
+#
+# Every one of them carries a natural-language topic, and that is not padding.
+# Selecting markup and stylesheets alone drops English coverage to 0.31, deep
+# into the range where long output falls apart, and the prose inside an HTML
+# page is English. Adding it back costs the markup topics about five points of
+# coverage and buys English forty-five.
+PROFILES = [
+    ("Frontend", "HTML, CSS, JavaScript, TypeScript, and the English around them",
+     ["html", "css", "javascript", "typescript", "english"]),
+    ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
+     ["python", "go", "java", "sql", "config", "technical", "english"]),
+    ("Programming, broadly", "Eleven languages plus the prose that surrounds code",
+     ["python", "javascript", "typescript", "go", "rust", "cpp", "java", "php", "ruby",
+      "swift", "sql", "config", "technical", "english"]),
+    ("Chat and explanation", "Everyday questions, essays, summaries, technical explanation",
+     ["english", "technical", "academic", "journalism", "translation"]),
+    ("Medicine", "Clinical and pharmacological register, with academic prose",
+     ["medical", "academic", "technical", "english"]),
+    ("Law and finance", "Contracts, statutes, filings, financial reporting",
+     ["legal", "finance", "academic", "english"]),
+    ("Data and research", "Python, R, SQL, LaTeX, academic writing",
+     ["python", "rlang", "sql", "latex", "academic", "technical", "english"]),
+    ("Many languages", "Eleven natural languages, for translation and multilingual chat",
+     ["english", "german", "french", "spanish", "italian", "portuguese", "arabic",
+      "chinese", "japanese", "russian", "turkish"]),
+    ("Writing", "Journalism, marketing copy, essays, translation",
+     ["english", "journalism", "marketing", "academic", "translation"]),
+    ("Everything", "Every topic this keep-set carries, spread thin", None),
+]
 KEEP_STEPS = [round(0.02 * i, 2) for i in range(3, 31)]          # 6 % .. 60 %
 CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
 # The coverage a selected topic should reach. There is no universal right
@@ -56,6 +91,15 @@ def bar(frac: float, width: int, solid: bool = True) -> str:
         return ("▒" * full).ljust(width, "·")
     s = "█" * full + (BLOCKS[rem] if rem and full < width else "")
     return s.ljust(width, "·")
+
+
+def short_path(path: str | None) -> str:
+    """Relative when it is inside the checkout, absolute when it is not --
+    `../../../elsewhere/coverage.json` helps nobody."""
+    if not path:
+        return "no keep-set"
+    rel = os.path.relpath(path, ROOT)
+    return path if rel.startswith("..") else rel
 
 
 def find_stats(explicit: str | None) -> str | None:
@@ -90,6 +134,12 @@ class State:
         self.transient_slots, self.keep_free_gb = transient_slots, keep_free_gb
         self.sel = set(selection)
         self.cursor, self.scroll, self.filter, self.pane = 0, 0, "", 0
+        # "easy" names what the box should be good at; "advanced" is the topic
+        # list with every number on it. Easy is the default because the
+        # advanced screen asks you to know which experts a job implies.
+        self.view = "easy"
+        self.pcursor, self.pscroll = 0, 0
+        self._profiles = None
         self.typing = False
         self.msg = ""
 
@@ -98,6 +148,64 @@ class State:
         ts = self.index.topics if self.index else []
         f = self.filter.lower()
         return [t for t in ts if f in t.lower()] if f else list(ts)
+
+    def profiles(self):
+        """Each profile with the budget it needs, computed once. A profile fixes
+        the topics; the keep fraction comes from the coverage file in use."""
+        if self._profiles is not None:
+            return self._profiles
+        out = []
+        have = set(self.index.topics) if self.index else set()
+
+        def fits(k):
+            return B.plan(self.host, None, (), k, self.max_seq, fmt=self.fmt,
+                          transient_slots=self.transient_slots,
+                          keep_free_gb=self.keep_free_gb).verdict != "over"
+
+        # The largest STEP that fits, not the continuous ceiling: keep_n rounds
+        # the per-layer count up, so a plan at the continuous maximum is already
+        # over it. Walk down until one actually fits.
+        ceiling = next((k for k in reversed(KEEP_STEPS) if fits(k)), KEEP_STEPS[0])
+
+        for name, blurb, topics in PROFILES:
+            want = list(self.index.topics) if (topics is None and self.index) else (topics or [])
+            avail = [t for t in want if t in have]
+            missing = [t for t in want if t not in have]
+            need = self.index.keep_for(tuple(sorted(avail)), COVERAGE_TARGET) if avail else None
+            keep = ceiling
+            if need is not None:
+                # smallest step that reaches the target, then clamp to what fits
+                want_step = next((k for k in KEEP_STEPS if k >= need), KEEP_STEPS[-1])
+                keep = min(want_step, ceiling)
+            capped = need is None or need > keep + 1e-9
+            p = B.plan(self.host, self.index, tuple(sorted(avail)), keep, self.max_seq, fmt=self.fmt,
+                       transient_slots=self.transient_slots, keep_free_gb=self.keep_free_gb)
+            # What differs between profiles is not whether they load -- most of
+            # them land on the same ceiling -- but how well the budget covers
+            # the weakest topic in the bundle. Say that, in words.
+            worst = min((p.coverage.get(t, 0.0) for t in avail), default=0.0)
+            if not avail:
+                status, tone = "not in this keep-set", "bad"
+            elif p.verdict == "over":
+                status, tone = "needs a bigger box", "bad"
+            elif worst >= COVERAGE_TARGET:
+                status, tone = "serves all of it", "good"
+            elif worst >= 0.75:
+                status, tone = "good", "good"
+            elif worst >= 0.65:
+                status, tone = "uneven", "warn"
+            else:
+                status, tone = "spread thin", "bad"
+            out_worst = worst
+            out.append({"name": name, "blurb": blurb, "topics": avail, "missing": missing,
+                        "keep": keep, "plan": p, "status": status, "tone": tone,
+                        "capped": capped, "worst": out_worst})
+        self._profiles = out
+        return out
+
+    def apply_profile(self, pr):
+        self.sel = set(pr["topics"])
+        self.keep = pr["keep"]
 
     def plan(self):
         return B.plan(self.host, self.index, tuple(sorted(self.sel)), self.keep,
@@ -165,9 +273,74 @@ def put(w, y, x, s, attr=0, maxw=None):
 MIN_H, MIN_W = 20, 70
 
 
+def draw_easy(w, st: State):
+    """Name the job, not the experts. Each row is a bundle of topics with the
+    budget it needs on this box, computed from the coverage file in use."""
+    h, W = w.getmaxyx()
+    title = " DeepSeek-V4.1-Flash "
+    put(w, 0, 0, title, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
+    hostline = f"{st.host.name[:28]} · {st.host.total_gb:.1f} GB · {st.host.available_gb:.1f} free"
+    put(w, 0, max(len(title) + 2, W - len(hostline) - 1), hostline, C["muted"])
+    if st.host.busy:
+        put(w, 1, 0, f" already running here: {st.host.busy} — this box holds one at a time",
+            C["bad"] | curses.A_BOLD)
+    elif st.host.note:
+        put(w, 1, 0, " " + st.host.note, C["warn"])
+
+    put(w, 2, 1, sp("WHAT SHOULD THIS BOX BE GOOD AT?"), C["accent"] | curses.A_BOLD)
+    n_top = len(st.index.topics) if st.index else 0
+    put(w, 3, 1, f"{n_top} topics available · v switches to the topic-by-topic view", C["muted"])
+    put(w, 4, 1, "─" * (W - 2), C["muted"])
+
+    profs = st.profiles()
+    top, per = 5, 3
+    rows = max(1, (h - top - 4) // per)
+    if st.pcursor < st.pscroll:
+        st.pscroll = st.pcursor
+    if st.pcursor >= st.pscroll + rows:
+        st.pscroll = st.pcursor - rows + 1
+    tone = {"good": C["good"], "warn": C["warn"], "bad": C["bad"]}
+
+    for i, pr in enumerate(profs[st.pscroll:st.pscroll + rows]):
+        y = top + i * per
+        here = st.pscroll + i == st.pcursor
+        put(w, y, 0, "▌" if here else " ", C["accent"] | curses.A_BOLD)
+        put(w, y, 3, pr["name"], (C["bright"] | curses.A_BOLD) if here else C["bright"])
+        st_txt = pr["status"]
+        put(w, y, max(3, W - len(st_txt) - 2), st_txt, tone[pr["tone"]] | (curses.A_BOLD if here else 0))
+        cost = (f"{pr['keep'] * 100:.0f} % of experts · {st.max_seq // 1024}k context"
+                if pr["topics"] else "")
+        put(w, y + 1, 3, pr["blurb"][:max(10, W - len(cost) - 6)], C["muted"])
+        if cost:
+            put(w, y + 1, max(3, W - len(cost) - 2), cost, C["muted"])
+    if len(profs) > rows:
+        below = len(profs) - rows - st.pscroll
+        if below > 0:
+            put(w, 3, W - 14, f"{below} more below", C["muted"])
+
+    cur = profs[st.pcursor] if profs else None
+    if cur and cur["topics"]:
+        p = cur["plan"]
+        weakest = min(cur["topics"], key=lambda t: p.coverage.get(t, 0.0)) if cur["topics"] else None
+        line = (f"{cur['name']} · {len(cur['topics'])} topics · {p.kept:,} of {B.N_ROUTED:,} experts "
+                f"in memory · {p.arena:.0f} GB")
+        if p.verdict == "tight":
+            line += " · tight, little spare memory"
+        put(w, h - 3, 1, line[:W - 2], C["muted"])
+        if weakest and W >= 88:
+            note = f"weakest of them: {weakest} at {p.coverage.get(weakest, 0):.2f} coverage"
+            put(w, h - 2, 1, note[:W - 2], C["muted"])
+    keys = "↑↓ choose · enter apply and inspect · v topic view · r RUN · q quit"
+    put(w, h - 1, 1, keys[:W - 2], C["muted"])
+    w.noutrefresh()
+    curses.doupdate()
+
+
 def draw(w, st: State):
     w.erase()
     h, W = w.getmaxyx()
+    if h >= MIN_H and W >= MIN_W and st.view == "easy":
+        return draw_easy(w, st)
     if h < MIN_H or W < MIN_W:
         put(w, 0, 0, f"window is {W}x{h}; this needs at least {MIN_W}x{MIN_H}", C.get("warn", 0))
         put(w, 1, 0, "resize, or use ./tune.sh --list / --print", C.get("muted", 0))
@@ -372,10 +545,10 @@ def draw(w, st: State):
     else:
         for keys in (
             "↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  "
-            "m fit  f format  w write  r RUN  q quit",
-            "↑↓ space ←→ tab · a all · n none · / filter · m fit · f format · w write · r RUN · q quit",
-            "↑↓ space ←→ tab · / filter · m fit · f format · r RUN · q quit",
-            "space ←→ tab · m fit · r RUN · q quit",
+            "m fit  f format  v profiles  w write  r RUN  q quit",
+            "↑↓ space ←→ tab · a all · n none · / filter · m fit · f format · v profiles · r RUN · q quit",
+            "↑↓ space ←→ tab · / filter · m fit · v profiles · r RUN · q quit",
+            "space ←→ tab · v profiles · r RUN · q quit",
         ):
             if len(keys) <= W - 2:
                 break
@@ -433,6 +606,40 @@ def loop(w, st: State) -> str | None:
 
         if k == ord("q"):
             return None
+        if k in (ord("v"), ord("V")):
+            st.view = "advanced" if st.view == "easy" else "easy"
+            continue
+
+        if st.view == "easy":
+            profs = st.profiles()
+            if k in (curses.KEY_DOWN, ord("j")):
+                st.pcursor = min(len(profs) - 1, st.pcursor + 1)
+            elif k in (curses.KEY_UP, ord("k")):
+                st.pcursor = max(0, st.pcursor - 1)
+            elif k in (10, 13, curses.KEY_ENTER, ord(" ")):
+                if profs[st.pcursor]["topics"]:
+                    st.apply_profile(profs[st.pcursor])
+                    st.view = "advanced"      # show what it did, so it can be adjusted
+                else:
+                    st.msg = "this keep-set does not carry those topics"
+            elif k in (ord("r"), ord("R")):
+                pr = profs[st.pcursor]
+                if not pr["topics"]:
+                    st.msg = "this keep-set does not carry those topics"
+                    continue
+                st.apply_profile(pr)
+                if st.host.busy:
+                    st.msg = "something is already running — ./stop.sh first"
+                    continue
+                if st.plan().verdict == "over":
+                    st.msg = "that will not load on this box"
+                    continue
+                return "run"
+            elif k in (ord("w"), ord("W")):
+                if profs[st.pcursor]["topics"]:
+                    st.apply_profile(profs[st.pcursor])
+                    return "write"
+            continue
         if k == ord("/"):
             st.typing = True
         elif k == 9:                            # tab
@@ -548,7 +755,7 @@ def env_for(st: State) -> dict:
         # written because the arena above was sized against them
         "TRANSIENT_SLOTS": str(st.transient_slots),
         "KEEP_FREE_GB": f"{st.keep_free_gb:g}",
-        "TRACE_STATS": os.path.relpath(st.stats_path, ROOT) if st.stats_path else "",
+        "TRACE_STATS": short_path(st.stats_path) if st.stats_path else "",
     }
     if st.sel:
         e["EXPERT_TOPICS"] = ",".join(sorted(st.sel))
@@ -600,6 +807,10 @@ def main() -> int:
                     help="coverage every selected topic should reach (default %(default).2f)")
     ap.add_argument("--render", metavar="HxW", default=None,
                     help="print the screen as text at this size and exit (no terminal needed)")
+    ap.add_argument("--profiles", action="store_true",
+                    help="print the ready-made profiles with what each needs, and exit")
+    ap.add_argument("--profile", default=None, metavar="NAME",
+                    help="select a profile's topics and the keep fraction it needs")
     ap.add_argument("--list", action="store_true", help="print the topics and exit")
     ap.add_argument("--print", dest="show", action="store_true", help="print the environment and exit")
     ap.add_argument("--write", action="store_true", help="write the selection into .env and exit")
@@ -611,10 +822,10 @@ def main() -> int:
     index = B.TopicIndex(sp_) if sp_ else None
     sel = [t.strip() for t in a.topics.split(",") if t.strip()]
     unknown = [t for t in sel if not index or t not in index.topics] if sel else []
-    interactive = sys.stdout.isatty() and not (a.list or a.show or a.write or a.render)
+    interactive = sys.stdout.isatty() and not (a.list or a.show or a.write or a.render or a.profiles)
     if unknown and not interactive:
         # a script asked for something this keep-set cannot serve: say so and stop
-        where = os.path.relpath(sp_, ROOT) if sp_ else "any coverage.json in the checkout"
+        where = short_path(sp_) if sp_ else "any coverage.json in the checkout"
         print(f"not in {where}: {', '.join(unknown)}", file=sys.stderr)
         print(f"have: {', '.join(index.topics) if index else '(none)'}", file=sys.stderr)
         return 2
@@ -625,6 +836,32 @@ def main() -> int:
                transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb)
     if unknown:
         st.msg = f"dropped, not in this keep-set: {', '.join(unknown)}"
+
+    if a.profile:
+        match = [p for p in st.profiles() if p["name"].lower().startswith(a.profile.lower())]
+        if len(match) != 1:
+            names = ", ".join(p["name"] for p in st.profiles())
+            print(f"{'no' if not match else 'more than one'} profile matches {a.profile!r}; "
+                  f"have: {names}", file=sys.stderr)
+            return 2
+        if not match[0]["topics"]:
+            print(f"{match[0]['name']}: this keep-set carries none of its topics", file=sys.stderr)
+            return 2
+        st.apply_profile(match[0])
+
+    if a.profiles:
+        print(f"{short_path(sp_)} — {len(index.topics) if index else 0} topics, "
+              f"{st.max_seq // 1024}k context")
+        for pr in st.profiles():
+            p = pr["plan"]
+            head = f"  {pr['name']:<22} {pr['status']}"
+            print(head)
+            print(f"  {'':<22} {pr['blurb']}")
+            if pr["topics"]:
+                print(f"  {'':<22} {pr['keep']:.0%} of experts · {p.arena:.0f} GB · "
+                      f"{p.free_after_load:.0f} GB free · {len(pr['topics'])} topics")
+            print()
+        return 0
 
     if a.render:
         try:
@@ -642,7 +879,7 @@ def main() -> int:
             return 1
         cur = index.curves(tuple(index.topics))[0]
         n = B.keep_n(a.keep)
-        print(f"{os.path.relpath(sp_, ROOT)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}")
+        print(f"{short_path(sp_)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}")
         for t in index.topics:
             nt = index.tokens.get(t, 0)
             flag = "  thin" if nt < B.TopicIndex.THIN else ""
