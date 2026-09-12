@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-dashboard
+  namespace: prod
+  labels: { app: dashboard, tier: web }
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: dashboard }
+  template:
+    metadata:
+      labels: { app: dashboard, tier: web }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001 }
+      containers:
+        - name: web
+          image: registry.internal/dashboard:1.14.2
+          ports: [{ containerPort: 8080, name: http }]
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: dashboard-db, key: url } }
+            - name: LOG_LEVEL
+              value: info
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            failureThreshold: 6

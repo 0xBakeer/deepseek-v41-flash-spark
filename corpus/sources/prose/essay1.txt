@@ -1,0 +1,30 @@
+There is a particular kind of failure that only happens to organisations that are trying hard. It is
+not the failure of the lazy or the incompetent, which is legible and therefore fixable. It is the
+failure that comes from a group of careful people each optimising the part of the system they can
+see, and thereby producing a whole that nobody would have chosen.
+
+Consider a hospital that measures the time from a patient's arrival to their first contact with a
+clinician. The measure is sensible. It was chosen because a long wait before anyone assesses you is
+genuinely dangerous, and because the alternative measures were worse. Within a year, the hospital's
+performance against the target improves substantially, and within two years, the improvement has
+stopped meaning anything, because the organisation has learned to produce a brief early contact that
+satisfies the definition without changing the patient's actual path through the building.
+
+Nobody set out to game the measure. That is the part outsiders find hard to believe. What happened
+instead is that a hundred small decisions, each locally reasonable, were made slightly differently
+because of what was being counted, and the aggregate of those decisions was a system that looked
+better and worked the same.
+
+The usual response is to add a second measure to catch the distortion the first one caused. This
+works for a while. The trouble is that the second measure is also a target, and so the same process
+begins again, and organisations that go far enough down this path end up with a wall of indicators
+that nobody can hold in mind at once and that collectively describe an institution that does not
+exist.
+
+The alternative is not to stop measuring, which is a fantasy, but to be much more careful about the
+relationship between a measure and the thing it stands for. A measure that is close to the thing you
+care about degrades slowly under pressure. A measure that is a convenient proxy for the thing you
+care about degrades quickly, because the gap between the proxy and the reality is exactly the space
+in which the distortion lives. Most organisational measures are proxies, chosen because they were
+available rather than because they were close, and most of the surprise that follows is not really
+surprising.

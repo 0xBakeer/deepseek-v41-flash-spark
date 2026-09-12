@@ -1,0 +1,959 @@
+{
+ "corpus": "trace_corpus_v2 + trace_corpus_v3",
+ "n_seqs": 190,
+ "n_tokens": 36250,
+ "max_len": 512,
+ "seqs": [
+  {
+   "id": "code-oneshot-angry-birds",
+   "category": "coding",
+   "n": 62
+  },
+  {
+   "id": "code-oneshot-mario",
+   "category": "coding",
+   "n": 52
+  },
+  {
+   "id": "code-cc8c8059",
+   "category": "coding",
+   "n": 452
+  },
+  {
+   "id": "code-6607dad4",
+   "category": "coding",
+   "n": 446
+  },
+  {
+   "id": "code-d6c122a7",
+   "category": "coding",
+   "n": 84
+  },
+  {
+   "id": "code-667864f6",
+   "category": "coding",
+   "n": 302
+  },
+  {
+   "id": "code-4a2dec78",
+   "category": "coding",
+   "n": 444
+  },
+  {
+   "id": "code-c1304f46",
+   "category": "coding",
+   "n": 231
+  },
+  {
+   "id": "code-5ad2bb7d",
+   "category": "coding",
+   "n": 444
+  },
+  {
+   "id": "code-0dad61cb",
+   "category": "coding",
+   "n": 193
+  },
+  {
+   "id": "code-0648bd07",
+   "category": "coding",
+   "n": 449
+  },
+  {
+   "id": "code-ad9fb4a2",
+   "category": "coding",
+   "n": 81
+  },
+  {
+   "id": "code-d3302d8e",
+   "category": "coding",
+   "n": 340
+  },
+  {
+   "id": "code-f9255ccc",
+   "category": "coding",
+   "n": 405
+  },
+  {
+   "id": "code-a8073847",
+   "category": "coding",
+   "n": 365
+  },
+  {
+   "id": "code-abdf79cf",
+   "category": "coding",
+   "n": 447
+  },
+  {
+   "id": "code-92026525",
+   "category": "coding",
+   "n": 450
+  },
+  {
+   "id": "code-5174b198",
+   "category": "coding",
+   "n": 445
+  },
+  {
+   "id": "code-1bddb072",
+   "category": "coding",
+   "n": 430
+  },
+  {
+   "id": "code-2f8ec931",
+   "category": "coding",
+   "n": 442
+  },
+  {
+   "id": "code-d88a776d",
+   "category": "coding",
+   "n": 445
+  },
+  {
+   "id": "code-875a33a6",
+   "category": "coding",
+   "n": 441
+  },
+  {
+   "id": "code-a9281c77",
+   "category": "coding",
+   "n": 449
+  },
+  {
+   "id": "code-1a4043f4",
+   "category": "coding",
+   "n": 455
+  },
+  {
+   "id": "code-ae8b0fd1",
+   "category": "coding",
+   "n": 443
+  },
+  {
+   "id": "code-ea2113a8",
+   "category": "coding",
+   "n": 451
+  },
+  {
+   "id": "gen-qa-3256cdcb",
+   "category": "general",
+   "n": 38
+  },
+  {
+   "id": "gen-qa-48c1c969",
+   "category": "general",
+   "n": 20
+  },
+  {
+   "id": "gen-qa-20febd4c",
+   "category": "general",
+   "n": 27
+  },
+  {
+   "id": "gen-qa-d1326b3e",
+   "category": "general",
+   "n": 18
+  },
+  {
+   "id": "gen-qa-f500370d",
+   "category": "general",
+   "n": 31
+  },
+  {
+   "id": "gen-qa-54350d04",
+   "category": "general",
+   "n": 23
+  },
+  {
+   "id": "gen-qa-1a1671be",
+   "category": "general",
+   "n": 20
+  },
+  {
+   "id": "gen-qa-697c7f5f",
+   "category": "general",
+   "n": 17
+  },
+  {
+   "id": "gen-d82dc2d5",
+   "category": "general",
+   "n": 81
+  },
+  {
+   "id": "gen-69ae981b",
+   "category": "general",
+   "n": 165
+  },
+  {
+   "id": "gen-f0f97837",
+   "category": "general",
+   "n": 79
+  },
+  {
+   "id": "gen-9c6a8878",
+   "category": "general",
+   "n": 102
+  },
+  {
+   "id": "gen-e37e2ff6",
+   "category": "general",
+   "n": 77
+  },
+  {
+   "id": "gen-49b1cd93",
+   "category": "general",
+   "n": 104
+  },
+  {
+   "id": "gen-f1cbbab9",
+   "category": "general",
+   "n": 84
+  },
+  {
+   "id": "gen-ba2b68e3",
+   "category": "general",
+   "n": 85
+  },
+  {
+   "id": "gen-6fbbb63c",
+   "category": "general",
+   "n": 95
+  },
+  {
+   "id": "gen-23fc5777",
+   "category": "general",
+   "n": 88
+  },
+  {
+   "id": "gen-033da322",
+   "category": "general",
+   "n": 190
+  },
+  {
+   "id": "gen-9ef28161",
+   "category": "general",
+   "n": 195
+  },
+  {
+   "id": "gen-47eefcaa",
+   "category": "general",
+   "n": 99
+  },
+  {
+   "id": "gen-a7780242",
+   "category": "general",
+   "n": 91
+  },
+  {
+   "id": "gen-91c27c78",
+   "category": "general",
+   "n": 66
+  },
+  {
+   "id": "gen-15d65ce2",
+   "category": "general",
+   "n": 111
+  },
+  {
+   "id": "gen-e4b0bcc2",
+   "category": "general",
+   "n": 119
+  },
+  {
+   "id": "gen-826085de",
+   "category": "general",
+   "n": 118
+  },
+  {
+   "id": "gen-1f89c2c9",
+   "category": "general",
+   "n": 71
+  },
+  {
+   "id": "gen-630b9f24",
+   "category": "general",
+   "n": 193
+  },
+  {
+   "id": "gen-62e277e3",
+   "category": "general",
+   "n": 93
+  },
+  {
+   "id": "gen-1bceebeb",
+   "category": "general",
+   "n": 208
+  },
+  {
+   "id": "gen-921d808e",
+   "category": "general",
+   "n": 80
+  },
+  {
+   "id": "gen-c69480dd",
+   "category": "general",
+   "n": 149
+  },
+  {
+   "id": "gen-3c2098de",
+   "category": "general",
+   "n": 97
+  },
+  {
+   "id": "gen-deb0afe9",
+   "category": "general",
+   "n": 436
+  },
+  {
+   "id": "gen-439c6823",
+   "category": "general",
+   "n": 122
+  },
+  {
+   "id": "gen-356b79b0",
+   "category": "general",
+   "n": 322
+  },
+  {
+   "id": "gen-7756163f",
+   "category": "general",
+   "n": 332
+  },
+  {
+   "id": "gen-f37470a3",
+   "category": "general",
+   "n": 136
+  },
+  {
+   "id": "gen-878250c0",
+   "category": "general",
+   "n": 104
+  },
+  {
+   "id": "gen-150b7d6c",
+   "category": "general",
+   "n": 480
+  },
+  {
+   "id": "gen-172f8a21",
+   "category": "general",
+   "n": 300
+  },
+  {
+   "id": "gen-2093982b",
+   "category": "general",
+   "n": 123
+  },
+  {
+   "id": "gen-3db13abc",
+   "category": "general",
+   "n": 45
+  },
+  {
+   "id": "gen-a6b82735",
+   "category": "general",
+   "n": 48
+  },
+  {
+   "id": "gen-b325c91e",
+   "category": "general",
+   "n": 46
+  },
+  {
+   "id": "gen-22323e98",
+   "category": "general",
+   "n": 150
+  },
+  {
+   "id": "gen-b28f30e5",
+   "category": "general",
+   "n": 123
+  },
+  {
+   "id": "gen-abe19225",
+   "category": "general",
+   "n": 236
+  },
+  {
+   "id": "gen-a9760558",
+   "category": "general",
+   "n": 306
+  },
+  {
+   "id": "gen-983c43b6",
+   "category": "general",
+   "n": 129
+  },
+  {
+   "id": "gen-d62ef866",
+   "category": "general",
+   "n": 227
+  },
+  {
+   "id": "gen-bc856360",
+   "category": "general",
+   "n": 173
+  },
+  {
+   "id": "gen-5eaea599",
+   "category": "general",
+   "n": 251
+  },
+  {
+   "id": "gen-c9337565",
+   "category": "general",
+   "n": 462
+  },
+  {
+   "id": "gen-3360805f",
+   "category": "general",
+   "n": 259
+  },
+  {
+   "id": "gen-e6578ebd",
+   "category": "general",
+   "n": 42
+  },
+  {
+   "id": "gen-82d0050c",
+   "category": "general",
+   "n": 31
+  },
+  {
+   "id": "gen-73484797",
+   "category": "general",
+   "n": 35
+  },
+  {
+   "id": "gen-d1899478",
+   "category": "general",
+   "n": 39
+  },
+  {
+   "id": "gen-86d23c12",
+   "category": "general",
+   "n": 35
+  },
+  {
+   "id": "gen-a263dae3",
+   "category": "general",
+   "n": 109
+  },
+  {
+   "id": "gen-2ccf1621",
+   "category": "general",
+   "n": 343
+  },
+  {
+   "id": "gen-4009d09e",
+   "category": "general",
+   "n": 148
+  },
+  {
+   "id": "gen-b446ab4a",
+   "category": "general",
+   "n": 46
+  },
+  {
+   "id": "gen-5f7658d9",
+   "category": "general",
+   "n": 27
+  },
+  {
+   "id": "gen-0ee6c0f4",
+   "category": "general",
+   "n": 50
+  },
+  {
+   "id": "gen-59103025",
+   "category": "general",
+   "n": 100
+  },
+  {
+   "id": "gen-df180a47",
+   "category": "general",
+   "n": 256
+  },
+  {
+   "id": "gen-e0604058",
+   "category": "general",
+   "n": 193
+  },
+  {
+   "id": "code-oneshot-angry-birds",
+   "category": "coding",
+   "n": 62
+  },
+  {
+   "id": "code-oneshot-mario",
+   "category": "coding",
+   "n": 52
+  },
+  {
+   "id": "code-cc8c8059",
+   "category": "coding",
+   "n": 452
+  },
+  {
+   "id": "code-6607dad4",
+   "category": "coding",
+   "n": 446
+  },
+  {
+   "id": "code-d6c122a7",
+   "category": "coding",
+   "n": 84
+  },
+  {
+   "id": "code-667864f6",
+   "category": "coding",
+   "n": 302
+  },
+  {
+   "id": "code-4a2dec78",
+   "category": "coding",
+   "n": 444
+  },
+  {
+   "id": "code-c1304f46",
+   "category": "coding",
+   "n": 231
+  },
+  {
+   "id": "code-5ad2bb7d",
+   "category": "coding",
+   "n": 444
+  },
+  {
+   "id": "code-0dad61cb",
+   "category": "coding",
+   "n": 193
+  },
+  {
+   "id": "code-0648bd07",
+   "category": "coding",
+   "n": 449
+  },
+  {
+   "id": "code-ad9fb4a2",
+   "category": "coding",
+   "n": 81
+  },
+  {
+   "id": "code-d3302d8e",
+   "category": "coding",
+   "n": 340
+  },
+  {
+   "id": "code-f9255ccc",
+   "category": "coding",
+   "n": 405
+  },
+  {
+   "id": "code-a8073847",
+   "category": "coding",
+   "n": 365
+  },
+  {
+   "id": "code-abdf79cf",
+   "category": "coding",
+   "n": 447
+  },
+  {
+   "id": "code-92026525",
+   "category": "coding",
+   "n": 450
+  },
+  {
+   "id": "code-5174b198",
+   "category": "coding",
+   "n": 445
+  },
+  {
+   "id": "code-1bddb072",
+   "category": "coding",
+   "n": 430
+  },
+  {
+   "id": "code-2f8ec931",
+   "category": "coding",
+   "n": 442
+  },
+  {
+   "id": "code-d88a776d",
+   "category": "coding",
+   "n": 445
+  },
+  {
+   "id": "code-875a33a6",
+   "category": "coding",
+   "n": 441
+  },
+  {
+   "id": "code-a9281c77",
+   "category": "coding",
+   "n": 449
+  },
+  {
+   "id": "code-1a4043f4",
+   "category": "coding",
+   "n": 455
+  },
+  {
+   "id": "code-ae8b0fd1",
+   "category": "coding",
+   "n": 443
+  },
+  {
+   "id": "code-ea2113a8",
+   "category": "coding",
+   "n": 451
+  },
+  {
+   "id": "code-e7a40436",
+   "category": "coding",
+   "n": 455
+  },
+  {
+   "id": "code-5e053e69",
+   "category": "coding",
+   "n": 411
+  },
+  {
+   "id": "code-ce201207",
+   "category": "coding",
+   "n": 450
+  },
+  {
+   "id": "code-642130a1",
+   "category": "coding",
+   "n": 435
+  },
+  {
+   "id": "code-e83a5b57",
+   "category": "coding",
+   "n": 447
+  },
+  {
+   "id": "gen-qa-3256cdcb",
+   "category": "general",
+   "n": 38
+  },
+  {
+   "id": "gen-qa-48c1c969",
+   "category": "general",
+   "n": 20
+  },
+  {
+   "id": "gen-qa-20febd4c",
+   "category": "general",
+   "n": 27
+  },
+  {
+   "id": "gen-qa-d1326b3e",
+   "category": "general",
+   "n": 18
+  },
+  {
+   "id": "gen-qa-f500370d",
+   "category": "general",
+   "n": 31
+  },
+  {
+   "id": "gen-qa-54350d04",
+   "category": "general",
+   "n": 23
+  },
+  {
+   "id": "gen-qa-1a1671be",
+   "category": "general",
+   "n": 20
+  },
+  {
+   "id": "gen-qa-697c7f5f",
+   "category": "general",
+   "n": 17
+  },
+  {
+   "id": "gen-e2b77f7c",
+   "category": "general",
+   "n": 97
+  },
+  {
+   "id": "gen-67c90fc8",
+   "category": "general",
+   "n": 110
+  },
+  {
+   "id": "gen-f10e7442",
+   "category": "general",
+   "n": 100
+  },
+  {
+   "id": "gen-9420dbf0",
+   "category": "general",
+   "n": 97
+  },
+  {
+   "id": "gen-4c57f8a8",
+   "category": "general",
+   "n": 94
+  },
+  {
+   "id": "gen-eadb3e15",
+   "category": "general",
+   "n": 136
+  },
+  {
+   "id": "gen-21b9ab0a",
+   "category": "general",
+   "n": 92
+  },
+  {
+   "id": "gen-30c43459",
+   "category": "general",
+   "n": 120
+  },
+  {
+   "id": "gen-9fa700d2",
+   "category": "general",
+   "n": 75
+  },
+  {
+   "id": "gen-0c1c4aea",
+   "category": "general",
+   "n": 152
+  },
+  {
+   "id": "gen-f624ba68",
+   "category": "general",
+   "n": 73
+  },
+  {
+   "id": "gen-717ad6bd",
+   "category": "general",
+   "n": 113
+  },
+  {
+   "id": "gen-d2444bd8",
+   "category": "general",
+   "n": 73
+  },
+  {
+   "id": "gen-37b7b631",
+   "category": "general",
+   "n": 130
+  },
+  {
+   "id": "gen-d6109dbf",
+   "category": "general",
+   "n": 137
+  },
+  {
+   "id": "gen-3299d365",
+   "category": "general",
+   "n": 125
+  },
+  {
+   "id": "gen-afd2d749",
+   "category": "general",
+   "n": 105
+  },
+  {
+   "id": "gen-96d2177a",
+   "category": "general",
+   "n": 88
+  },
+  {
+   "id": "gen-a903e246",
+   "category": "general",
+   "n": 85
+  },
+  {
+   "id": "gen-e54c13d7",
+   "category": "general",
+   "n": 94
+  },
+  {
+   "id": "gen-52208c1c",
+   "category": "general",
+   "n": 99
+  },
+  {
+   "id": "gen-763bc06b",
+   "category": "general",
+   "n": 88
+  },
+  {
+   "id": "gen-e0d469df",
+   "category": "general",
+   "n": 103
+  },
+  {
+   "id": "gen-a2013659",
+   "category": "general",
+   "n": 100
+  },
+  {
+   "id": "gen-80eaf3c4",
+   "category": "general",
+   "n": 79
+  },
+  {
+   "id": "gen-f2365b28",
+   "category": "general",
+   "n": 127
+  },
+  {
+   "id": "gen-d1c4581a",
+   "category": "general",
+   "n": 86
+  },
+  {
+   "id": "gen-bd073902",
+   "category": "general",
+   "n": 126
+  },
+  {
+   "id": "gen-0cd29a91",
+   "category": "general",
+   "n": 73
+  },
+  {
+   "id": "gen-762c1bb8",
+   "category": "general",
+   "n": 106
+  },
+  {
+   "id": "gen-de6962c4",
+   "category": "general",
+   "n": 128
+  },
+  {
+   "id": "gen-047c8006",
+   "category": "general",
+   "n": 91
+  },
+  {
+   "id": "gen-98651556",
+   "category": "general",
+   "n": 90
+  },
+  {
+   "id": "gen-0875e02e",
+   "category": "general",
+   "n": 99
+  },
+  {
+   "id": "gen-e6cf925a",
+   "category": "general",
+   "n": 71
+  },
+  {
+   "id": "gen-53b7ffa4",
+   "category": "general",
+   "n": 110
+  },
+  {
+   "id": "gen-d82dc2d5",
+   "category": "general",
+   "n": 81
+  },
+  {
+   "id": "gen-69ae981b",
+   "category": "general",
+   "n": 165
+  },
+  {
+   "id": "gen-f0f97837",
+   "category": "general",
+   "n": 79
+  },
+  {
+   "id": "gen-9c6a8878",
+   "category": "general",
+   "n": 102
+  },
+  {
+   "id": "gen-f65db35e",
+   "category": "general",
+   "n": 71
+  },
+  {
+   "id": "gen-5f3988db",
+   "category": "general",
+   "n": 210
+  },
+  {
+   "id": "gen-067caf67",
+   "category": "general",
+   "n": 180
+  },
+  {
+   "id": "gen-8a1868e4",
+   "category": "general",
+   "n": 110
+  },
+  {
+   "id": "gen-ba32f662",
+   "category": "general",
+   "n": 80
+  },
+  {
+   "id": "gen-364940e3",
+   "category": "general",
+   "n": 84
+  },
+  {
+   "id": "gen-991f2e2b",
+   "category": "general",
+   "n": 99
+  },
+  {
+   "id": "gen-a1d84a46",
+   "category": "general",
+   "n": 129
+  },
+  {
+   "id": "gen-91cd0630",
+   "category": "general",
+   "n": 96
+  },
+  {
+   "id": "gen-6bd8823b",
+   "category": "general",
+   "n": 86
+  },
+  {
+   "id": "gen-e374f016",
+   "category": "general",
+   "n": 169
+  },
+  {
+   "id": "gen-40849cd3",
+   "category": "general",
+   "n": 113
+  },
+  {
+   "id": "gen-38257f20",
+   "category": "general",
+   "n": 190
+  },
+  {
+   "id": "gen-2f764d76",
+   "category": "general",
+   "n": 95
+  },
+  {
+   "id": "gen-74a1f75b",
+   "category": "general",
+   "n": 140
+  },
+  {
+   "id": "gen-0761b587",
+   "category": "general",
+   "n": 113
+  }
+ ],
+ "act_quant": true
+}

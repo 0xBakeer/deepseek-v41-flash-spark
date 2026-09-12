@@ -106,7 +106,12 @@ def main():
         per_layer[L]["block6_unique_mean"] = float(np.mean(bl))
         for c in cats:
             m = layers[L]["cat"] == c
-            per_layer[L][f"cov_{c}"] = coverage_curve(np.bincount(idx[m].reshape(-1), minlength=N_EXP))
+            cat_counts = np.bincount(idx[m].reshape(-1), minlength=N_EXP)
+            per_layer[L][f"cov_{c}"] = coverage_curve(cat_counts)
+            # the histogram itself, not just its coverage curve: the engine's pruned mode ranks
+            # experts per category, and reading it from here means a checkout does not need the
+            # raw per-layer trace arrays (tens of MB) to reproduce a keep-set.
+            per_layer[L][f"counts_{c}"] = cat_counts
         for e in range(N_EXP):
             glob_counts[(L, e)] = int(counts[e])
 

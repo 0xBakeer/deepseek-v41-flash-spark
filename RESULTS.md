@@ -568,3 +568,89 @@ Logit error against the reference 0.049 → 0.012, argmax agreement 1.00 on both
 attention kernel (`DSV41_FUSED_ATTN`, default 0 since this addendum) is a second, smaller source of
 the same divergence: with it on, deep-layer error returns to 0.048-0.093 and routed experts equal
 falls to 0.72.
+
+
+## v0.4.0-wip — 2026-09-12
+
+Measured 2026-09-12 03:00-05:40 on the same box and checkpoint. Every row is one request through the
+server; the quality column is the generation gate described in 4.1, not a loss number.
+
+### 4.1 The gate this tag is built on
+
+Teacher-forced loss cannot see a model that has stopped being able to stay on its own trajectory: it
+scores the next token of text the model is shown and never lets an error compound. The configuration
+shipped in v0.3.0-wip measured **better** on it (1.5384 / 3.2087 against 1.5705 / 3.3790) and wrote
+`<!DOCTYPE><!DOCTYPE><!DOCTYPE>` for as long as it was allowed. Every configuration in this tag is
+gated on free generation instead: five prompts (a story and an essay at temperature 0.7, a Python
+module, a single-file HTML game, a JavaScript module at temperature 0), **900 to 2,000 tokens each**,
+and the output must keep a distinct-token ratio above 0.25, repeat no line more than 30 % of the
+time, and — where the generation finished on its own — be structurally intact.
+
+Both thresholds were learned the hard way. A 300-token gate passed configurations that collapse at
+900. Repetition ratios alone pass output whose CSS has decayed into `inset - 00 1 pix - 00 1 pix`,
+so the gate checks balanced tags, closed fences and unit spelling too.
+
+### 4.2 The keep-set is a cache policy, and it must be sampled from every workload
+
+`corpus/trace_corpus.jsonl`, which ranked the experts for every earlier tag, is 50 documents whose
+only content marker is Python: no HTML, no JavaScript, no CSS, no SQL, no configuration files. The
+experts that write markup never fired while the trace was taken, ranked cold, and were dropped by
+every pruned configuration. That single fact explains the degeneration chased through v0.3.0-wip.
+
+| keep-set (all at keep 44 %, CB3, otherwise identical) | story | Python | HTML |
+|---|---|---|---|
+| original corpus | 0.27 | 0.51 | **0.03** |
+| + a 12-gram repeat ban | 0.32 | 0.51 | **0.07** |
+| `trace_corpus_v2` (web, code, config, technical prose) | 0.43 | 0.50 | 0.40 |
+| `trace_corpus_v3` (narrative fiction and dialogue) | 0.54 | 0.58 | **0.04** |
+| **union of both traces** | **0.56** | **0.47** | **0.59** |
+
+(distinct-token ratio; <= 0.15 is degenerate.) A corpus of web and code fixes markup and leaves long
+prose repeating; a corpus of fiction fixes prose and loses markup. At 44 % of the experts the two
+rankings compete for the same slots, and the answer is to rank on both: an expert trace is a
+per-token histogram, so `results/trace-union` is the concatenation of the two traces' per-layer
+arrays (190 sequences, 36,250 tokens) with the statistics rebuilt from it. No third trace run.
+
+### 4.3 Shipped configuration
+
+`PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98 TRANSIENT_SLOTS=8 KEEP_FREE_GB=6`,
+`TRACE_STATS=results/trace-union/stats/coverage.json`, `DSV41_DENSE_FP4=attn,wo_a`,
+`DSV41_HEAD_FMT=fp8`, `DSV41_FUSED_ATTN=0`, penalties 0. 6,779 experts resident = 44.1 % of all
+routed experts, expert hit rate 1.0, no NVMe traffic during decode.
+
+| workload | tok/s | DSpark acceptance |
+|---|---|---|
+| single-file HTML game | 36.6 | 5.07 |
+| SQL schema and query | 31.8 | 4.69 |
+| JavaScript module | 28.2 | 4.12 |
+| German technical writing | 25.2 | 3.68 |
+| arithmetic with working | 25.1 | 3.56 |
+| Python module | 24.3 | 3.56 |
+| thinking on, effort high | 18.6 | 2.66 |
+| explanation (temperature 0.7) | 18.1 | 2.64 |
+| long story (temperature 0.7) | 17.1 | 2.46 |
+
+Prefill on a 5,014-token prompt: **14.9 s = 337 tok/s** (the all-resident arena reads nothing from
+the SSD; the same prompt through the streaming configuration is 87 tok/s). A tool call returns
+`finish_reason: tool_calls` with well-formed arguments. The generated HTML game passes every
+structural check — doctype, balanced `<style>` and `<script>`, a 3x3 grid, a win check, a reset
+button, click handlers, no corrupted CSS units — and stops on its own at 982 tokens.
+
+The step is ~145 ms in every case; the spread is entirely how well the DSpark drafter predicts each
+kind of text, about 5 accepted tokens per step on markup against 2.5 on prose.
+
+### 4.4 What this tag fixes in the engine
+
+* The graphed decode path computed the router gate in bf16 while `Model.moe` computes it in fp32.
+  The gate picks 6 of 384 experts and its scores are dense with near-ties, so 11 % of the picks
+  differed at layer 0 — where the inputs are bit-identical — and up to 31 % deeper in. Every layer
+  after that ran a different FFN than the reference. Now fp32: routed experts agree 1.00 at layer 0,
+  logit error against the reference 0.049 -> 0.012.
+* `DSV41_FUSED_ATTN` defaults to 0: the fused decode-attention kernel returns deep-layer agreement
+  to 0.072-0.093 and routed agreement to 0.72.
+* A keep-set can now be built from `coverage.json` alone (the per-category histograms are written
+  into it), so a checkout reproduces one without the per-layer trace arrays.
+
+### What is not measured in this tag
+Sampled quality A/B at scale, long-context (8k+) generation quality, the container image end to end,
+and the tool grammar of `server/tool_grammar.py` on real weights (it is off by default).

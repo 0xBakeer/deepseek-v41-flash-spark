@@ -32,24 +32,27 @@ does not shrink anything. What runs:
 
 ## The numbers
 
-### v0.3.0-wip (2026-09-11) — the shipped configuration today
+### v0.4.0-wip (2026-09-12) — the shipped configuration today
 
-`PRUNE_KEEP=0.40 EXPERT_FORMAT=cb3 ARENA_GB=90.5`: the top 40 % of routed experts per layer (by a
-measured routing trace) stay routable and resident in a 3-bit per-row codebook format packed from
-the checkpoint's own FP4 experts; the other 60 % are never read at serving time. Everything else
-(attention, Engram, DSpark drafter, dense projections in stored FP8) is unchanged. One run each:
+`PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98`, keep-set ranked on `results/trace-union`. The top
+44 % of routed experts per layer stay routable and resident in a 3-bit per-row codebook packed from
+the checkpoint's own FP4 experts; the rest are never read at serving time. One request each through
+the server, measured with the engine's own counters:
 
-| | measured | where |
+| workload | tok/s | where |
 |---|---|---|
-| decode, 200 greedy tokens, code prompt, thinking off | **18.98 tok/s** (DSpark acceptance 3.03) | [RESULTS.md v0.3.0-wip](RESULTS.md) |
-| TTFT, 1,806-token prompt | **9.81 s** | same |
-| held-out teacher-forced loss vs the full unpruned model | **+0.032 (code) / +0.020 (prose) nats** | same, and 2.4 |
-| resident set | 6,160 experts = 89.0 GB (40.8 %) | same |
-| warm start | 183 s (GPU packing) | same |
+| single-file HTML game | **36.6** | [RESULTS.md v0.4.0-wip](RESULTS.md) |
+| SQL schema and query | **31.8** | same |
+| JavaScript module | **28.2** | same |
+| Python module | **24.3** | same |
+| long story (temperature 0.7) | **17.1** | same |
+| prefill, 5,014-token prompt | **337 tok/s** (14.9 s) | same |
+| resident set | 6,779 experts = 44.1 %, hit rate 1.0 | same |
 
-The full unpruned model with expert streaming remains available (`PRUNE_KEEP` empty) at
-3.5-4 tok/s, NVMe-bound. The intro bullets above describe that original mode; the shipped default
-since v0.2.0-wip prunes and, since this tag, re-packs the resident experts to 3 bits.
+Every one of those was produced under a generation gate: five prompts of 900-2,000 tokens that must
+stay coherent and, where they finish on their own, be structurally intact. That gate exists because
+teacher-forced loss does not see degeneration — the previous tag's default measured better on loss
+and could not write an HTML file.
 
 ### v0.1.0-wip (2026-09-10) — the original streaming mode (kept for the record)
 

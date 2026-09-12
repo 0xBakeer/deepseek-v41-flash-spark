@@ -190,3 +190,18 @@ Known remaining inexactness:
 * **Teacher-forced loss cannot gate the decode path.** It never runs the loop, so a verification,
   cache or drafter fault is invisible to it. Use `engine/test_spec_lossless.py`, which requires
   greedy decoding with and without speculation to produce identical tokens.
+
+## v0.4.0-wip (2026-09-12) — what is still not done
+
+* **Long prose runs at 17 tok/s against 37 for markup.** The step time is the same in both cases;
+  the difference is the DSpark drafter, which is accepted about 5 tokens per step on markup and 2.5
+  on prose. That is a drafter-quality axis, not a bandwidth one, and nothing here addresses it.
+* **The keep-set is only as good as the corpus it was ranked on.** Serving a workload that
+  `results/trace-union` does not represent will degrade it the way markup was degraded before this
+  tag. Re-trace with your own corpus rather than assuming this one covers you.
+* **Teacher-forced loss is not a gate** and no number in this repo should be read as one. Use the
+  generation gate (RESULTS 4.1).
+* **The tool grammar is unverified on real weights** (`DSV41_TOOL_GRAMMAR=1`, off by default): its
+  unit tests pass, the end-to-end run never happened.
+* **Not measured**: sampled quality at scale, generation quality at 8k+ context, the container image
+  end to end.

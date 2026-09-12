@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Service Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Services</h1>
+    <form class="filters" id="filters">
+      <label for="q">Search</label>
+      <input type="search" id="q" name="q" placeholder="name or owner">
+      <select id="state" name="state">
+        <option value="">All states</option>
+        <option value="healthy">Healthy</option>
+        <option value="degraded">Degraded</option>
+        <option value="down">Down</option>
+      </select>
+      <button type="submit">Apply</button>
+    </form>
+  </header>
+  <table id="grid">
+    <thead>
+      <tr><th scope="col">Service</th><th scope="col">Owner</th><th scope="col">State</th><th scope="col">p99 (ms)</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

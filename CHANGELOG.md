@@ -102,6 +102,38 @@ so there is no measured long generation and no thinking-mode figure in this repo
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
 
+## 0.4.0-wip — 2026-09-12
+
+**A configuration that writes whole files and whole stories.** v0.3.0-wip shipped a default that
+scored better on teacher-forced loss and degenerated in free generation; this tag replaces the metric
+that allowed it, rebuilds the expert keep-set on a corpus that contains the workloads, and fixes a
+real routing bug in the graphed decode path.
+
+### Fixed
+- `engine/fastdecode.py`: the router gate runs in fp32, as `Model.moe` does. In bf16 it selected
+  different experts for 11-31 % of tokens (RESULTS 4.4).
+- `DSV41_FUSED_ATTN` now defaults to 0; the kernel measurably degrades agreement with the reference.
+- The expert keep-set is ranked on `results/trace-union` (web, code, configuration, technical prose
+  and narrative fiction; 190 sequences, 36,250 tokens) instead of a 50-document Python-only corpus.
+
+### Added
+- `corpus/trace_corpus_v2.jsonl`, `corpus/trace_corpus_v3.jsonl` and their sources under
+  `corpus/sources/web` and `corpus/sources/prose`.
+- Per-category histograms in `coverage.json`, so a keep-set can be built without the raw trace.
+- `presence_penalty` / `frequency_penalty` per request and `DSV41_NO_REPEAT_NGRAM`, all defaulting
+  to 0 — a frequency penalty fixes prose repetition and corrupts CSS, so none of them ships on.
+- `engine/test_spec_lossless.py`; grammar-constrained DSML tool calls via xgrammar
+  (`server/tool_grammar.py`, `DSV41_TOOL_GRAMMAR=1`, off by default).
+- The engine refuses to start when host memory cannot hold the arena instead of squeezing.
+
+### Changed
+- Shipped defaults: `PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98 TRANSIENT_SLOTS=8 KEEP_FREE_GB=6`
+  with the union trace. 44.1 % of routed experts resident, hit rate 1.0.
+
+### Measured on it
+17-37 tok/s across nine workloads, prefill 337 tok/s on a 5,014-token prompt, every case passing a
+900-2,000-token generation gate with structural checks (RESULTS.md v0.4.0-wip).
+
 ## 0.3.0-wip — 2026-09-11
 
 **The shipped default changes: keep 40 % of the routed experts, all resident in the 3-bit CB3

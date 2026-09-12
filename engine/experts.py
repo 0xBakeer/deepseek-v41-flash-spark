@@ -443,13 +443,25 @@ class ExpertStore:
         return h / max(1, h + m)
 
 
-def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384) -> dict[int, np.ndarray]:
+def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384,
+                    n_layers: int = 40) -> dict[int, np.ndarray]:
     """Per-layer expert histogram restricted to one corpus category.
 
     `coverage.json` only carries the mixed histogram (`counts`) plus the two coverage *curves*, so a
     workload-specific hot set has to be recomputed from the raw traces the stats were made from:
     `results/<name>/trace/layer<L>.npz` with `indices` [tokens, 6] and `category` [tokens].
     """
+    # Preferred source: the per-category histogram written into coverage.json itself, so a plain
+    # checkout can build a keep-set without the raw trace arrays next to it.
+    try:
+        d = json.load(open(trace_stats_json))
+        pl = d.get("per_layer") or {}
+        got = {int(L): np.asarray(v[f"counts_{profile}"], dtype=np.float64)
+               for L, v in pl.items() if f"counts_{profile}" in v}
+        if len(got) >= n_layers:
+            return got
+    except Exception:  # noqa: BLE001 - fall through to the raw arrays
+        pass
     trace_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(trace_stats_json))), "trace")
     out: dict[int, np.ndarray] = {}
     if not os.path.isdir(trace_dir):

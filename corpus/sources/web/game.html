@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tic-Tac-Toe</title>
+  <style>
+    :root { --line: #2b2f36; --ink: #e8eaed; --accent: #4f8cff; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: #14171c; color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: 0.02em; margin-bottom: 1rem; }
+    .board { display: grid; grid-template-columns: repeat(3, 96px); grid-template-rows: repeat(3, 96px); gap: 4px; }
+    .cell {
+      display: grid; place-items: center; font-size: 2.5rem; cursor: pointer;
+      background: #1b1f26; border: 1px solid var(--line); border-radius: 8px; user-select: none;
+    }
+    .cell:hover { background: #222733; }
+    .cell.win { background: var(--accent); color: #0b0d10; }
+    #status { margin-top: 1rem; min-height: 1.5rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid var(--line);
+             background: #1b1f26; color: var(--ink); cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Tic-Tac-Toe</h1>
+    <div class="board" id="board"></div>
+    <div id="status">X to move</div>
+    <button id="reset">New game</button>
+  </main>
+  <script>
+    const LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    const board = document.getElementById('board');
+    const statusEl = document.getElementById('status');
+    let cells = Array(9).fill('');
+    let turn = 'X';
+    let over = false;
+
+    function render() {
+      board.innerHTML = '';
+      cells.forEach((value, i) => {
+        const div = document.createElement('div');
+        div.className = 'cell';
+        div.textContent = value;
+        div.addEventListener('click', () => play(i));
+        board.appendChild(div);
+      });
+    }
+
+    function winner() {
+      for (const [a, b, c] of LINES) {
+        if (cells[a] && cells[a] === cells[b] && cells[b] === cells[c]) return { mark: cells[a], line: [a, b, c] };
+      }
+      return cells.every(Boolean) ? { mark: null, line: [] } : null;
+    }
+
+    function play(i) {
+      if (over || cells[i]) return;
+      cells[i] = turn;
+      const result = winner();
+      render();
+      if (result) {
+        over = true;
+        statusEl.textContent = result.mark ? `${result.mark} wins` : 'Draw';
+        result.line.forEach(k => board.children[k].classList.add('win'));
+        return;
+      }
+      turn = turn === 'X' ? 'O' : 'X';
+      statusEl.textContent = `${turn} to move`;
+    }
+
+    document.getElementById('reset').addEventListener('click', () => {
+      cells = Array(9).fill(''); turn = 'X'; over = false;
+      statusEl.textContent = 'X to move'; render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
