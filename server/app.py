@@ -585,6 +585,17 @@ class State:
             except ValueError:
                 result.reasoning_tokens = len(result.gen_ids)
 
+        # A response whose every token was reasoning, cut off for repeating
+        # itself, reaches the caller as a valid 200 with an empty message. An
+        # agent has nothing to act on and stops without saying anything, which
+        # is how this failure presented: silence, not an error. Say what
+        # happened, in the one field the caller is certain to read.
+        if result.degenerate and not (router.content or "").strip() and not router.tool_text:
+            note = ("[stopped: the model began repeating itself and was cut off before it "
+                    "produced an answer. Lower the reasoning effort, or turn thinking off.]")
+            router.content += note
+            log.warning("degenerate generation had no content; returned a note instead of nothing")
+
         if detect_tool_calls:
             result.tool_calls = self._parse_tool_calls(router, thinking, tools)
             if result.tool_calls:
