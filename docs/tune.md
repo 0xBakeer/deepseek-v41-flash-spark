@@ -138,7 +138,23 @@ through the model. They are stored inside `coverage.json` next to the mixed hist
 composing a keep-set out of several of them is arithmetic on numbers already in the checkout —
 it needs no GPU and no new trace.
 
-To add one, tag a corpus and trace it:
+`corpus/fetch_topics.py` gathers the sources for a 35-topic catalogue — sixteen programming
+languages from a tree you point it at, eleven natural languages and eight domain registers from
+Wikipedia — and prints the `--topic` flags for the next step:
+
+```bash
+python3 corpus/fetch_topics.py --list                       # the catalogue
+python3 corpus/fetch_topics.py --out topics --code-root ~/src
+python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
+    --out corpus/trace_topics.jsonl \
+    $(python3 corpus/fetch_topics.py --out topics --print-topic-flags)
+```
+
+It asks Wikipedia for twenty article introductions at a time, one request every two seconds, and
+backs off when told to. A burst of parallel requests earns an IP-level rate limit that outlasts
+the job.
+
+To add a topic of your own, tag a corpus and trace it:
 
 ```bash
 python3 corpus/make_corpus.py --topic rust:code:~/src/some-rust-project \
