@@ -26,6 +26,15 @@ experts a token activates, and that does not change. Fewer topics reach a given
 coverage at a LOWER keep fraction, and a lower keep fraction is a smaller
 arena -- which is where the memory, and the context window, come from.
 
+Which experts a selection keeps also depends on HOW the selected topics are
+combined into one ranking -- the engine's DSV41_PRUNE_RANK. All three rules it
+accepts are reimplemented here, because a screen that ranks by `sum` while the
+engine ranks by `maxmin` reports coverage the engine will not deliver: over
+{english, html, python, reasoning, css, javascript, typescript} at keep 0.36
+that is english 0.522 by one rule and 0.676 by the other, on the same budget.
+tools/test_budget_rank.py lifts the engine's own function out and holds the two
+to the same keep-set.
+
 No torch, no CUDA, no model load. numpy if it is there, plain Python if not.
 """
 
@@ -80,6 +89,21 @@ def dense_key_from_env() -> tuple:
     the verdict wrong rather than merely imprecise."""
     groups = ",".join(sorted(g for g in os.environ.get("DSV41_DENSE_FP4", "attn,wo_a").split(",") if g))
     return (groups, os.environ.get("DSV41_HEAD_FMT", "fp8"))
+
+
+# How several topics are combined into one ranking of the same budget. The
+# engine's own three, with the engine's own default.
+RANKS = ("sum", "max", "maxmin")
+RANK_DEFAULT = "sum"
+
+
+def rank_from_env() -> str:
+    """The ranking rule the engine will use, from the variable it reads. A box
+    whose .env says maxmin must not be shown sum's coverage: the two disagree by
+    more than a tenth on the weakest topic, which is the whole number this tool
+    exists to report. Returned as written, unvalidated, so that a typo is
+    refused by the caller rather than silently served as the default."""
+    return (os.environ.get("DSV41_PRUNE_RANK") or RANK_DEFAULT).strip() or RANK_DEFAULT
 
 # The KV and indexer caches are allocated for MAX_SEQ up front (engine/model.py
 # Caches). Per token: for every kv_source_layer, one compressed-KV row of
@@ -352,6 +376,82 @@ def _cumsum_desc(counts_by_layer, order_by_layer, topic_counts):
     return curve
 
 
+def _normalised(counts):
+    """One layer's counts of one topic, as fractions of their own sum.
+
+    numpy where it is there, and not for speed: the engine divides by
+    `np.asarray(c).sum()`, whose pairwise summation can differ from a sequential
+    one in the last bit, and a keep-set that has to match the engine's expert
+    for expert is not the place to be one ulp apart."""
+    if _np is not None:
+        c = _np.asarray(counts, dtype=_np.float64)
+        tot = c.sum()
+        return c / tot if tot > 0 else c
+    s = sum(counts)
+    return [x / s for x in counts] if s > 0 else list(counts)
+
+
+def _total(values) -> float:
+    return float(values.sum()) if _np is not None and hasattr(values, "sum") else float(sum(values))
+
+
+def _desc(values) -> list:
+    """Expert ids by descending value, ordered the way the engine orders them.
+
+    `np.argsort(x)[::-1]`, because that is the call in engine/v41_engine.py and
+    two experts of exactly equal mass have to be admitted in the same order
+    here. Without numpy the tie goes to the lower id instead, which can only
+    move experts whose counts are identical."""
+    if _np is not None:
+        return [int(e) for e in _np.argsort(_np.asarray(values, dtype=_np.float64))[::-1]]
+    return sorted(range(len(values)), key=lambda e: (-values[e], e))
+
+
+def _maxmin_order(per_norm: list, n_experts: int = N_EXPERTS) -> list:
+    """One layer's experts in the order DSV41_PRUNE_RANK=maxmin admits them.
+
+    Step for step the engine's `_maxmin_counts`: each slot goes to whichever
+    selected topic currently has the least of its routing mass covered, and an
+    expert admitted for one topic counts for every topic that also routes to it,
+    so overlap is paid for once and the topics converge on a common coverage
+    instead of a spread. `per_norm` is one normalised histogram per topic, in
+    the order the topics are written into EXPERT_TOPICS -- two topics tied on
+    coverage are served in that order by both.
+
+    The whole order is returned, not a budget's worth, because the admission
+    decision never reads the budget: the keep-set at ceil(frac * 384) experts is
+    the first ceil(frac * 384) of this list, so one pass serves every point of a
+    coverage curve and the curve stays monotone in the keep fraction.
+    """
+    n_t = len(per_norm)
+    order = [_desc(p) for p in per_norm]
+    ptr = [0] * n_t
+    # A topic with no mass in this layer would otherwise be the least covered
+    # forever and hand every slot to its argsort of zeros; it has nothing to ask
+    # for, so it does not vote here.
+    got = [0.0 if _total(p) > 0 else float("inf") for p in per_norm]
+    if all(g == float("inf") for g in got):
+        return _desc([0.0] * n_experts)      # what the engine's zero score vector cuts to
+    admitted, seen = [], set()
+    while len(admitted) < n_experts:
+        t = min(range(n_t), key=lambda i: got[i])
+        while ptr[t] < n_experts and order[t][ptr[t]] in seen:
+            ptr[t] += 1
+        if ptr[t] >= n_experts:
+            # this topic has nothing left to ask for; take it out of the running
+            got[t] = float("inf")
+            if all(g == float("inf") for g in got):
+                break
+            continue
+        e = order[t][ptr[t]]
+        ptr[t] += 1
+        seen.add(e)
+        admitted.append(e)
+        for u in range(n_t):
+            got[u] += per_norm[u][e]
+    return admitted
+
+
 def topic_names(path: str) -> list:
     """The topic names in a coverage file, without loading its histograms --
     find_stats compares every candidate in the checkout and there can be many."""
@@ -393,35 +493,69 @@ class TopicIndex:
         # its coverage bar is no more trustworthy than the sample under it.
         self.tokens = {t: int(round(v / (N_LAYERS * TOPK))) for t, v in self.totals.items()}
         self._cache: dict = {}
+        # A topic's normalised histogram does not depend on what it is selected
+        # with, and the profile screen ranks ten selections over the same
+        # thirty-five topics, so it is normalised once per topic rather than
+        # once per selection. The ranking itself is the expensive part and that
+        # one cannot be shared: `maxmin` allocates the whole selection at once.
+        self._norm: dict = {}
 
     THIN = 2000              # tokens below which a ranking is mostly noise
 
     def __bool__(self) -> bool:
         return bool(self.topics)
 
-    def curves(self, selection: tuple, select: str = "uniform", only: tuple | None = None):
+    def curves(self, selection: tuple, select: str = "uniform", only: tuple | None = None,
+               rank: str = RANK_DEFAULT):
         """coverage curves for a selection: {topic: [384+1 floats]}, index n =
         keeping the top-n experts per layer. Computed once per selection, so a
-        slider move is a lookup."""
-        key = (tuple(sorted(selection)), select, only)
+        slider move is a lookup.
+
+        `rank` is DSV41_PRUNE_RANK and it decides which experts those are, so it
+        belongs in the cache key with the selection. `select` is in the key but
+        changes nothing here: these curves are the per-layer (PRUNE_SELECT=
+        uniform) cut, which is the one the engine takes for `maxmin` -- it
+        refuses `global` with it -- and a cross-layer cut would need a different
+        curve, not a different order."""
+        key = (tuple(sorted(selection)), select, only, rank)
         hit = self._cache.get(key)
         if hit is not None:
             return hit
-        sel = [t for t in selection if t in self.counts]
+        # Sorted, because that is the order tune.py writes EXPERT_TOPICS in and
+        # the order the engine then combines them in -- which `maxmin` can see,
+        # since it breaks a tie between two equally covered topics by taking the
+        # first of them.
+        sel = sorted(t for t in selection if t in self.counts)
         if not sel:
             return {}
-        # the ranking the engine builds: per-layer-normalised counts, summed
-        combined = {}
+        if rank not in RANKS:
+            raise ValueError(f"unknown rank {rank!r} ({' | '.join(RANKS)})")
+        # the ranking the engine builds, per-layer-normalised counts either way
+        for t in sel:
+            if t not in self._norm:
+                self._norm[t] = [_normalised(self.counts[t][L]) for L in range(N_LAYERS)]
+        norm = {t: self._norm[t] for t in sel}
+        combined, order = {}, {}
         for L in range(N_LAYERS):
-            acc = [0.0] * N_EXPERTS
-            for t in sel:
-                c = self.counts[t][L]
-                s = sum(c)
-                if s > 0:
-                    for e in range(N_EXPERTS):
-                        acc[e] += c[e] / s
-            combined[L] = acc
-        order = {L: sorted(range(N_EXPERTS), key=lambda e: -combined[L][e]) for L in range(N_LAYERS)}
+            if rank == "maxmin":
+                order[L] = _maxmin_order([norm[t][L] for t in sel])
+                # The admission position is the score: the engine's own score
+                # vector for this rule depends on the keep fraction (admitted
+                # experts are lifted above 1.0) and a curve does not, and all
+                # anything reads out of `combined` is the order it implies.
+                acc = [0.0] * N_EXPERTS
+                for i, e in enumerate(order[L]):
+                    acc[e] = float(N_EXPERTS - i)
+                combined[L] = acc
+                continue
+            if rank == "sum":
+                combined[L] = [sum(norm[t][L][e] for t in sel) for e in range(N_EXPERTS)]
+            else:   # "max": an expert that matters to any one topic is kept
+                combined[L] = [max(norm[t][L][e] for t in sel) for e in range(N_EXPERTS)]
+            # _desc, not a plain sort: a layer in which every selected topic is
+            # silent scores 384 zeros, and the engine cuts THAT at the top N too
+            # -- in np.argsort order, which is not the order a stable sort gives.
+            order[L] = _desc(combined[L])
         out = {}
         # every topic in the file gets a curve, so an unselected one can be read
         # off too -- that is how you see what a selection costs the rest.
@@ -434,19 +568,21 @@ class TopicIndex:
         self._cache[key] = (out, order, combined)
         return self._cache[key]
 
-    def coverage(self, selection: tuple, keep: float, select: str = "uniform") -> dict:
-        got = self.curves(selection, select)
+    def coverage(self, selection: tuple, keep: float, select: str = "uniform",
+                 rank: str = RANK_DEFAULT) -> dict:
+        got = self.curves(selection, select, rank=rank)
         if not got:
             return {}
         curves = got[0]
         n = keep_n(keep)
         return {t: c[n] for t, c in curves.items()}
 
-    def keep_for(self, selection: tuple, target: float, select: str = "uniform") -> float | None:
+    def keep_for(self, selection: tuple, target: float, select: str = "uniform",
+                 rank: str = RANK_DEFAULT) -> float | None:
         """Smallest keep fraction at which every selected topic reaches `target`.
         An empty selection means every topic, which is what the engine ranks on."""
         selection = tuple(selection) or tuple(self.topics)
-        got = self.curves(selection, select, only=tuple(sorted(selection)))
+        got = self.curves(selection, select, only=tuple(sorted(selection)), rank=rank)
         if not got:
             return None
         curves = got[0]
@@ -565,7 +701,8 @@ def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: 
          fmt: str = "cb3", select: str = "uniform", arena_gb: float | None = None,
          keep_free_gb: float = KEEP_FREE_GB_DEFAULT, dense_key=None,
          chunk: int = PREFILL_CHUNK_DEFAULT,
-         transient_slots: int = TRANSIENT_SLOTS_DEFAULT) -> Plan:
+         transient_slots: int = TRANSIENT_SLOTS_DEFAULT,
+         rank: str = RANK_DEFAULT) -> Plan:
     # the engine's own rounding: ceil(keep * 384) experts in every layer
     dense_key = dense_key or dense_key_from_env()
     kept = keep_n(keep) * N_LAYERS
@@ -575,7 +712,7 @@ def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: 
         slots = int(arena / EXPERT_BYTES[fmt])
         kept = min(kept, slots - transient_slots)
     kv = kv_bytes(max_seq)
-    cov = index.coverage(tuple(selection), keep, select) if index else {}
+    cov = index.coverage(tuple(selection), keep, select, rank=rank) if index else {}
     return Plan(
         keep=keep, n_keep=keep_n(keep), kept=kept, slots=slots, transient=transient_slots,
         fmt=fmt, max_seq=max_seq,

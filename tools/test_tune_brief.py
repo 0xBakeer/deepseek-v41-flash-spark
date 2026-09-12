@@ -37,7 +37,9 @@ def check(name, got, want):
 TMP = tempfile.mkdtemp(prefix="tune-brief-")
 os.environ["XDG_CONFIG_HOME"] = TMP          # never read the box's own profiles
 
-TOPICS = os.path.join(ROOT, "results/keepsets/topics/coverage.json")   # 35 topics
+TOPICS = os.path.join(ROOT, "results/keepsets/topics/coverage.json")
+# The catalogue grows as topics are traced, so every count below is read from the file, not typed in.
+N_TOPICS = len([k for k in json.load(open(TOPICS))["per_layer"]["0"] if k.startswith("counts_")])
 PLAIN = os.path.join(ROOT, "results/keepsets/general/coverage.json")   # two mixed ones
 NONE = os.path.join(ROOT, "results/keepsets/code/coverage.json")       # no topics at all
 host = B.Host("gb10-test", 130.6e9, 118.6e9, True)
@@ -92,12 +94,12 @@ check("the thin threshold comes from the tool", f"{B.TopicIndex.THIN:,}-token" i
 
 # --- the budget warning is this keep-set's own numbers ----------------------
 check("the cost of one more topic is measured, not asserted",
-      re.search(r"raises the coverage of the other 34 by \*\*\+0\.\d\d\d\*\*", rich) is not None, True)
-check("  in keep fraction as well as coverage", "of the experts with all 35" in rich, True)
+      re.search(rf"raises the coverage of the other {N_TOPICS - 1} by \*\*\+0\.\d\d\d\*\*", rich) is not None, True)
+check("  in keep fraction as well as coverage", f"of the experts with all {N_TOPICS}" in rich, True)
 check("  and one keep step is priced", re.search(r"is 320 more resident experts, 4\.\d GB", rich) is not None, True)
 check("  a narrow selection pays more than a broad one",
       float(re.search(r"other 2 by \*\*\+(0\.\d+)\*\*", T.brief(state(TOPICS, ("html", "css", "english")))).group(1))
-      > float(re.search(r"other 34 by \*\*\+(0\.\d+)\*\*", rich).group(1)), True)
+      > float(re.search(rf"other {N_TOPICS - 1} by \*\*\+(0\.\d+)\*\*", rich).group(1)), True)
 
 # --- a keep-set with no per-topic histograms at all -------------------------
 for label, text in (("a keep-set that carries none", none), ("no keep-set at all", empty)):

@@ -44,8 +44,8 @@ def write(name, obj):
     return p
 
 
-def state(profiles, idx=index, sel=()):
-    return T.State(host, idx, STATS, 0.39, 32768, "cb3", sel,
+def state(profiles, idx=index, sel=(), rank="sum"):
+    return T.State(host, idx, STATS, 0.39, 32768, "cb3", sel, rank=rank,
                    user_profiles=profiles, profiles_path=os.path.join(TMP, "saved.json"))
 
 
@@ -80,6 +80,8 @@ check("  the description", profs[0][1], "Arabic and English, for a bilingual ass
 check("  the topics", profs[0][2], ["arabic", "english", "translation"])
 check("  never gated, whatever the file says", [p[3] for p in profs], [False, False])
 check("  and where it came from", profs[0][4], T.short_path(good))
+check("  naming no ranking rule, so applying it leaves the one in force",
+      [p[5] for p in profs], [None, None])
 odd = write("odd.json", {"profiles": [
     {"name": "  Spaced   out ", "description": "a description\nover two lines",
      "topics": ["python", "python", "html"]}]})
@@ -101,6 +103,9 @@ check("  in place, so the order does not jump around", [m[0] for m in merged][:2
 check("  and it is the user's one that survives",
       [m[2] for m in merged if m[0] == "Frontend"], [["html", "css"]])
 check("  a new name is added at the end", merged[-1][0], "Arabic desk")
+check("  every shipped profile is budgeted maxmin",
+      sorted({m[5] for m in merged if m[4] == T.BUILT_IN}), ["maxmin"])
+check("  and the user's carries no rule of its own", merged[-1][5], None)
 
 by = {p["name"]: p for p in state(profs).profiles()}
 check("the screen shows a user profile", by["Arabic desk"]["topics"],
@@ -185,6 +190,36 @@ check("  and the profile is on the screen immediately",
 check("  saving with nothing selected says so",
       T.save_current(state([]), "Empty"), "nothing selected, so there is nothing to save")
 check("  and so does saving without a name", T.save_current(st, "  "), "a profile needs a name")
+
+# --- the ranking rule the run will use --------------------------------------
+# Written out with the rest, because the coverage on the screen was read off a
+# keep-set built with it: a .env that reproduces the keep fraction but not the
+# rule reproduces a different keep-set.
+r = run(["--stats", STATS, "--topics", "english,html,css", "--keep", "0.36",
+         "--rank", "maxmin", "--print"])
+check("--print emits the rule", "DSV41_PRUNE_RANK=maxmin" in r.stdout, True)
+check("  and it is one of the keys the tool manages", "DSV41_PRUNE_RANK" in T.MANAGED, True)
+sums = run(["--stats", STATS, "--topics", "english,html,css", "--keep", "0.36",
+            "--rank", "sum", "--print"])
+check("  sum says so instead", "DSV41_PRUNE_RANK=sum" in sums.stdout, True)
+check("a bad rule is refused rather than served as the default",
+      run(["--stats", STATS, "--topics", "", "--rank", "mxmn", "--print"]).returncode, 2)
+env_rank = subprocess.run(
+    [sys.executable, os.path.join(ROOT, "tools/tune.py"), "--stats", STATS,
+     "--topics", "english,html,css", "--keep", "0.36", "--print"],
+    capture_output=True, text=True,
+    env={**os.environ, "EXPERT_TOPICS": "", "PRUNE_KEEP": "0.39", "DSV41_PRUNE_RANK": "maxmin"})
+check("the rule defaults from the environment the engine reads",
+      "DSV41_PRUNE_RANK=maxmin" in env_rank.stdout, True)
+# and the two rules have to be telling the screen different things, or none of
+# the above is worth writing down
+mm = run(["--stats", STATS, "--topics", "english,html,css", "--keep", "0.36",
+          "--rank", "maxmin", "--list"]).stdout
+sm = run(["--stats", STATS, "--topics", "english,html,css", "--keep", "0.36",
+          "--rank", "sum", "--list"]).stdout
+check("--list ranks with the rule it was given", ("rank maxmin" in mm, "rank sum" in sm),
+      (True, True))
+check("  and the coverage it prints moves with it", mm.split("\n")[1:] != sm.split("\n")[1:], True)
 
 # --- the same thing from the command line -----------------------------------
 cli = os.path.join(TMP, "cli.json")

@@ -30,6 +30,7 @@ job, a bare `./tune.sh` behaves as `--print`.
 | `--keep F` | `PRUNE_KEEP`, else `0.39` | the fraction of each layer's 384 routed experts that stays resident |
 | `--max-seq N` | `MAX_SEQ`, else `32768` | context length the KV cache is sized for |
 | `--format cb3\|fp4` | `EXPERT_FORMAT`, else `cb3` | the arena's expert layout, which sets the slot size |
+| `--rank sum\|max\|maxmin` | `DSV41_PRUNE_RANK`, else `sum` | how several selected topics are combined into one ranking of the same budget, which decides *which* experts the keep fraction holds. Shown on both screens next to the keep fraction, and written out with it. Applying a shipped profile sets it to `maxmin`; a profile from a file names no rule and leaves it alone |
 | `--transient-slots N` | `TRANSIENT_SLOTS`, else `8` | prefill slots outside the LRU; the arena is sized to hold these too |
 | `--keep-free-gb F` | `KEEP_FREE_GB`, else `6.0` | host memory the launcher is told to leave free |
 | `--coverage-target F` | `DSV41_COVERAGE_TARGET`, else `0.85` | the coverage every selected topic should reach; sets the bar colours and what `m` fits to |
@@ -233,7 +234,7 @@ from, is in [`docs/memory-budget.md`](memory-budget.md).
 | KV cache · Nk | `max_seq x 3,200 + 180,355,072`, shown in MB below 1 GB |
 | resident | the four rows above, added |
 | free after load | `MemAvailable − resident` |
-| room to launch | `MemAvailable − (arena + pack scratch + dense + keep-free floor)`, pack scratch 3 GB for `cb3` and 1 GB for `fp4` |
+| room to launch | `MemAvailable − (arena + pack scratch + dense + max(keep-free floor, one prefill chunk + the 2.5 GB watchdog floor))`, pack scratch 3 GB for `cb3` and 1 GB for `fp4` |
 | verdict | `FITS`, `TIGHT` or `WILL NOT LOAD` |
 
 The verdict is the two gates together:
@@ -271,14 +272,16 @@ so it moves while the screen is open.
 
 `◂ NNk ▸` and one of two messages:
 
-* at or below 32,768, `run to 32k here; the cache alone has room for X` — where `X` is
+* at or below `VALIDATED_MAX_SEQ`, `run to 128k here; the cache alone has room for X` — where `X` is
   `(free after load − keep-free floor) / 3,200 bytes`, the tokens the cache could hold if nothing
   else wanted the memory;
-* above 32,768, `past the 32k run here — prefill is the limit, not the cache`, in amber.
+* above it, `past the 128k run here — prefill is the limit, not the cache`, in amber.
 
-32,768 is the longest context this engine has actually loaded and generated from. Above it the KV
-arithmetic still holds but the prefill path has not been run, so the tool marks the length rather
-than predicting it.
+That length is `tools/budget.py` `VALIDATED_MAX_SEQ`, and on 2026-09-12 it became **131,072** — the
+longest context this engine has actually loaded and prefilled from. (It read 32,768 until then; the
+messages carry whatever the constant says, so they moved with it.) Above it the KV arithmetic still
+holds but the prefill path has not been run there, so the tool marks the length rather than
+predicting it.
 
 Both messages have a short form for narrow windows.
 
@@ -337,6 +340,7 @@ captured and the summary still read. This run is off Linux, so the memory figure
 ```
 $ ./tune.sh --topics coding --print
 PRUNE_KEEP=0.39
+DSV41_PRUNE_RANK=sum
 MAX_SEQ=32768
 ARENA_GB=87
 EXPERT_FORMAT=cb3
@@ -355,6 +359,11 @@ leaves a kept expert outside the arena.
 listed above: existing lines are rewritten in place, a managed key the selection does not set is
 dropped, anything else in the file is left alone, and the previous file is kept as `.env.bak`. If
 there is no `.env` at all, `env.example` is copied first.
+
+`DSV41_PRUNE_RANK` is written under the engine's own name because that is how the engine reads it,
+straight out of the environment `.env` is sourced into. It is written every time: the coverage on
+the screen was read off a keep-set built with that rule, and a `.env` that reproduces the keep
+fraction but not the rule reproduces a different keep-set.
 
 `EXPERT_TOPICS` is written only when at least one topic is selected. `TRACE_STATS` is written as a
 path relative to the repository root and takes precedence over `EXPERT_PROFILE` in `start.sh`, so a

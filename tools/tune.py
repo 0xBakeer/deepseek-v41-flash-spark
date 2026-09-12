@@ -55,34 +55,73 @@ BLOCKS = " ▏▎▍▌▋▊▉█"
 # on a two-train arithmetic question, because no topic in the catalogue carries
 # the register thinking mode writes in. Coverage warned about nothing, because
 # there was nothing to warn about. Only a generation gate finds that.
+#
+# The fifth is the ranking rule the profile is budgeted and served with, and
+# every one of them says `maxmin` (DSV41_PRUNE_RANK). A profile is a bundle of
+# topics that ONE request spans at once -- a coding request with thinking on
+# writes prose, deliberation, HTML, CSS and JavaScript in a single generation --
+# and such a request degenerates at whichever topic in the bundle the keep-set
+# serves least. `sum` optimises the total routing mass kept, which is free to
+# let an already well-served topic go on taking slots while another starves; on
+# the box, over {english, html, python, reasoning, css, javascript, typescript}
+# at keep 0.36, that is english at 0.522 against css at 0.820. `maxmin` spends
+# the same budget on the worst-served topic instead and lands every one of the
+# seven between 0.676 and 0.699, which is the quantity a bundle is chosen for.
 PROFILES = [
-    ("Frontend", "HTML, CSS, JavaScript, TypeScript, and the English around them",
-     ["html", "css", "javascript", "typescript", "english"], False),
+    # Every profile carries `reasoning` and `reasoning_code`: a user runs any of these with
+    # thinking on, and the experts that write deliberation -- and the ones that END it and begin
+    # the answer -- live in those two topics and nowhere else. A profile without them can score
+    # well on every topic it names and still never close a think block (docs/tune-tasks.md).
+    # Under maxmin the two cost the other topics about 0.01 of coverage each.
+    ("Frontend", "HTML, CSS, JavaScript, TypeScript, config, and the English around them",
+     ["html", "css", "javascript", "typescript", "english", "technical", "config",
+      "reasoning", "reasoning_code"], False, "maxmin"),
     ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
-     ["python", "go", "java", "sql", "config", "technical", "english"], False),
-    ("Programming, broadly", "Eleven languages plus the prose that surrounds code",
-     ["python", "javascript", "typescript", "go", "rust", "cpp", "java", "php", "ruby",
-      "swift", "sql", "config", "technical", "english"], False),
+     ["python", "go", "java", "sql", "config", "technical", "english",
+      "reasoning", "reasoning_code"], False, "maxmin"),
+    # html and css were missing from a fourteen-topic "programming" bundle -- the exact register
+    # the 2026-09-12 fault was found in. php, ruby and swift make way for them: under maxmin at
+    # keep 0.36 the worst-served topic crosses below 0.68 at about sixteen topics on a GB10.
+    ("Programming, broadly", "Nine languages, markup and styles, plus the prose around code",
+     ["python", "javascript", "typescript", "html", "css", "go", "rust", "cpp", "java",
+      "sql", "config", "technical", "english", "reasoning", "reasoning_code"], False, "maxmin"),
     ("Chat and explanation", "Everyday questions, essays, summaries, technical explanation",
-     ["english", "technical", "academic", "journalism", "translation"], False),
+     ["english", "technical", "academic", "journalism", "translation",
+      "reasoning", "reasoning_code"], False, "maxmin"),
     ("Medicine", "Clinical and pharmacological register, with academic prose",
-     ["medical", "academic", "technical", "english"], False),
+     ["medical", "academic", "technical", "english", "reasoning", "reasoning_code"], False, "maxmin"),
     ("Law and finance", "Contracts, statutes, filings, financial reporting",
-     ["legal", "finance", "academic", "english"], False),
-    ("Data and research", "Python, R, SQL, LaTeX, academic writing",
-     ["python", "rlang", "sql", "latex", "academic", "technical", "english"], False),
+     ["legal", "finance", "academic", "english", "reasoning", "reasoning_code"], False, "maxmin"),
+    ("Data and research", "Python, R, SQL, LaTeX, notebooks and config, academic writing",
+     ["python", "rlang", "sql", "latex", "academic", "technical", "english", "config",
+      "reasoning", "reasoning_code"], False, "maxmin"),
+    # `translation` is the cheapest topic in the file and was missing from the one profile named
+    # for it.
     ("Many languages", "Eleven natural languages, for translation and multilingual chat",
      ["english", "german", "french", "spanish", "italian", "portuguese", "arabic",
-      "chinese", "japanese", "russian", "turkish"], False),
+      "chinese", "japanese", "russian", "turkish", "translation",
+      "reasoning", "reasoning_code"], False, "maxmin"),
     ("Writing", "Journalism, marketing copy, essays, translation",
-     ["english", "journalism", "marketing", "academic", "translation"], False),
-    ("Everything", "Every topic this keep-set carries, spread thin", None, False),
+     ["english", "journalism", "marketing", "academic", "translation",
+      "reasoning", "reasoning_code"], False, "maxmin"),
+    # At keep 0.36 every one of its topics sits between 0.58 and 0.64 -- below the line where
+    # generations hold together. It is the widest choice, not the safe one; it needs a bigger box.
+    ("Everything", "Every topic this keep-set carries, spread thin -- needs more memory than one GB10",
+     None, False, "maxmin"),
 ]
 KEEP_STEPS = [round(0.02 * i, 2) for i in range(3, 31)]          # 6 % .. 60 %
 CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
 # The coverage a selected topic should reach. There is no universal right
 # value: 0.85 is where the shipped keep-sets sit for the domains they were
 # built for, and generation starts to degrade well below 0.7.
+#
+# It was calibrated on `sum` numbers, and so were the status thresholds on the
+# profile screen. `maxmin` spends the same budget on the worst-served topic, so
+# it reads LOWER at the top of the range and higher at the bottom: a coding
+# bundle that showed 0.59 on its weakest topic and 0.82 on its strongest shows
+# 0.68-0.74 on all of them. Both numbers describe the same keep-set; only a
+# generation gate can say which side of the trade holds together, so the
+# thresholds are left where they are until one has been run on maxmin.
 COVERAGE_TARGET = float(os.environ.get("DSV41_COVERAGE_TARGET", "0.85"))
 
 
@@ -154,7 +193,9 @@ def find_stats(explicit: str | None) -> str | None:
 # A user profile is a name, one line of description and a list of topic names.
 # It is never gated. The gate is a generation run on a keep-set, not a property
 # of a name and a list, so a profile from a file reads as untested exactly as
-# the shipped ones do until somebody runs one.
+# the shipped ones do until somebody runs one. It names no ranking rule either,
+# and applying one therefore leaves the rule alone rather than resetting it:
+# whatever --rank or DSV41_PRUNE_RANK asked for is what it is budgeted with.
 
 PROFILES_BASENAME = "profiles.json"
 CONFIG_DIRNAME = "deepseek-v41-flash-spark"
@@ -233,7 +274,7 @@ def read_profiles(path: str) -> tuple:
             if t not in seen:
                 seen.add(t)
                 want.append(t)
-        out.append((" ".join(name.split()), " ".join(desc.split()), want, False, where))
+        out.append((" ".join(name.split()), " ".join(desc.split()), want, False, where, None))
     return out, problems
 
 
@@ -249,8 +290,12 @@ def load_profiles(paths) -> tuple:
 
 def merge_profiles(built_in, user) -> list:
     """The shipped profiles in their own order, with a user profile of the same
-    name replacing one in place rather than appearing twice below it."""
-    out = [(n, b, t, g, BUILT_IN) for n, b, t, g in built_in]
+    name replacing one in place rather than appearing twice below it.
+
+    (name, description, topics, gated, source, rank) either way -- the rank last
+    so that a shipped profile and one from a file are read the same way, with
+    None for "this one does not ask for a ranking rule"."""
+    out = [(n, b, t, g, BUILT_IN, r) for n, b, t, g, r in built_in]
     at = {n.lower(): i for i, n in enumerate(x[0] for x in out)}
     for pr in user:
         i = at.get(pr[0].lower())
@@ -268,7 +313,7 @@ def unknown_topics(user, index) -> list:
     a profile silently short two topics still looks like it applied."""
     have = set(index.topics) if index else set()
     out = []
-    for name, _blurb, topics, _gated, source in user:
+    for name, _blurb, topics, _gated, source, _rank in user:
         miss = [t for t in topics if t not in have]
         if miss:
             out.append(f"{source}: {name!r} names {len(miss)} topic"
@@ -321,9 +366,14 @@ def describe_selection(topics) -> str:
 class State:
     def __init__(self, host, index, stats_path, keep, max_seq, fmt, selection,
                  transient_slots=B.TRANSIENT_SLOTS_DEFAULT, keep_free_gb=B.KEEP_FREE_GB_DEFAULT,
-                 user_profiles=(), profiles_path=None):
+                 user_profiles=(), profiles_path=None, rank=B.RANK_DEFAULT):
         self.host, self.index, self.stats_path = host, index, stats_path
         self.keep, self.max_seq, self.fmt = keep, max_seq, fmt
+        # How the selected topics are combined into one ranking (DSV41_PRUNE_RANK).
+        # Every coverage number on this screen is read off a keep-set built with
+        # it, and the engine will build the keep-set with it too, or the bars
+        # describe a server nobody is going to run.
+        self.rank = rank
         # The arena has to hold the kept set PLUS the transient ring, and the
         # engine's own default ring is 400 slots, not 8. Sizing against one
         # value and running with the other is how a keep-set that reads nothing
@@ -361,7 +411,8 @@ class State:
         """Take a just-saved profile without re-reading the file, so the screen
         shows it, with its budget, on the next frame."""
         self.user_profiles = [p for p in self.user_profiles if p[0].lower() != name.lower()]
-        self.user_profiles.append((name, blurb, sorted(topics), False, short_path(self.profiles_path)))
+        self.user_profiles.append((name, blurb, sorted(topics), False,
+                                   short_path(self.profiles_path), None))
         self._profiles = None
 
     def profiles(self):
@@ -377,16 +428,19 @@ class State:
                           transient_slots=self.transient_slots,
                           keep_free_gb=self.keep_free_gb).verdict != "over"
 
+
         # The largest STEP that fits, not the continuous ceiling: keep_n rounds
         # the per-layer count up, so a plan at the continuous maximum is already
         # over it. Walk down until one actually fits.
         ceiling = next((k for k in reversed(KEEP_STEPS) if fits(k)), KEEP_STEPS[0])
 
-        for name, blurb, topics, gated, source in self.profile_defs():
+        for name, blurb, topics, gated, source, rank in self.profile_defs():
             want = list(self.index.topics) if (topics is None and self.index) else (topics or [])
             avail = [t for t in want if t in have]
             missing = [t for t in want if t not in have]
-            need = self.index.keep_for(tuple(sorted(avail)), COVERAGE_TARGET) if avail else None
+            rank = rank or self.rank
+            need = (self.index.keep_for(tuple(sorted(avail)), COVERAGE_TARGET, rank=rank)
+                    if avail else None)
             keep = ceiling
             if need is not None:
                 # smallest step that reaches the target, then clamp to what fits
@@ -394,11 +448,16 @@ class State:
                 keep = min(want_step, ceiling)
             capped = need is None or need > keep + 1e-9
             p = B.plan(self.host, self.index, tuple(sorted(avail)), keep, self.max_seq, fmt=self.fmt,
-                       transient_slots=self.transient_slots, keep_free_gb=self.keep_free_gb)
+                       transient_slots=self.transient_slots, keep_free_gb=self.keep_free_gb,
+                       rank=rank)
             # What differs between profiles is not whether they load -- most of
             # them land on the same ceiling -- but how well the budget covers
             # the weakest topic in the bundle. Say that, in words.
             worst = min((p.coverage.get(t, 0.0) for t in avail), default=0.0)
+            # The bands are the sum rule's (see COVERAGE_TARGET): under maxmin a
+            # bundle reads flatter and lower at the top, so a profile that said
+            # "good" on sum's strongest topic can say "uneven" on the same
+            # keep-set. Left as they are until a generation gate is run on it.
             if not avail:
                 status, tone = "not in this keep-set", "bad"
             elif p.verdict == "over":
@@ -416,7 +475,7 @@ class State:
                 status, tone = status + " · untested", "warn"
             out.append({"name": name, "blurb": blurb, "topics": avail, "missing": missing,
                         "keep": keep, "plan": p, "status": status, "tone": tone,
-                        "capped": capped, "worst": out_worst, "gated": gated,
+                        "capped": capped, "worst": out_worst, "gated": gated, "rank": rank,
                         "source": source, "mine": source != BUILT_IN})
         self._profiles = out
         return out
@@ -425,14 +484,19 @@ class State:
         if seq != self.max_seq:
             self.max_seq, self._profiles = seq, None   # every profile's budget moves with it
 
+    def set_rank(self, rank):
+        if rank != self.rank:
+            self.rank, self._profiles = rank, None     # and so does every profile's coverage
+
     def apply_profile(self, pr):
         self.sel = set(pr["topics"])
         self.keep = pr["keep"]
+        self.set_rank(pr["rank"])
 
     def plan(self):
         return B.plan(self.host, self.index, tuple(sorted(self.sel)), self.keep,
                       self.max_seq, fmt=self.fmt, transient_slots=self.transient_slots,
-                      keep_free_gb=self.keep_free_gb)
+                      keep_free_gb=self.keep_free_gb, rank=self.rank)
 
     def curves(self):
         """Coverage under the CURRENT selection. With nothing selected the
@@ -440,7 +504,7 @@ class State:
         if not self.index:
             return {}
         sel = tuple(sorted(self.sel)) if self.sel else tuple(self.index.topics)
-        got = self.index.curves(sel)
+        got = self.index.curves(sel, rank=self.rank)
         return got[0] if got else {}
 
 
@@ -539,7 +603,7 @@ def draw_easy(w, st: State):
         if pr["mine"] and 3 + len(pr["name"]) + 10 < W - len(st_txt) - 2:
             put(w, y, 4 + len(pr["name"]), "· yours", C["muted"])
         put(w, y, max(3, W - len(st_txt) - 2), st_txt, tone[pr["tone"]] | (curses.A_BOLD if here else 0))
-        cost = (f"{pr['keep'] * 100:.0f} % of experts · {st.max_seq // 1024}k context"
+        cost = (f"{pr['keep'] * 100:.0f} % of experts · {pr['rank']} · {st.max_seq // 1024}k context"
                 if pr["topics"] else "")
         put(w, y + 1, 3, pr["blurb"][:max(10, W - len(cost) - 6)], C["muted"])
         if cost:
@@ -733,6 +797,10 @@ def draw(w, st: State):
     put(w, sy, 1, "─" * split, C["muted"])
     kf = st.pane == 1
     put(w, sy + 1, 1, sp("RESIDENT EXPERTS"), (C["accent"] if kf else C["muted"]) | curses.A_BOLD)
+    # Which experts those are is the ranking rule's doing as much as the
+    # fraction's, and the two rules put the same budget in different places, so
+    # the rule belongs where the number it qualifies is.
+    put(w, sy + 1, max(34, split - len(st.rank) - 6), f"rank {st.rank}", C["muted"], maxw=split - 34)
     mk = p.max_keep()
     kb = max(10, split - 22)
     put(w, sy + 2, 1, f"◂ {st.keep * 100:4.0f} % ▸", (C["bright"] | curses.A_BOLD) if kf else C["muted"])
@@ -773,7 +841,8 @@ def draw(w, st: State):
         col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
         put(w, fy, 1, "weakest selected topic  ", C["muted"])
         put(w, fy, 25, f"{t} {v:.2f}", col | curses.A_BOLD)
-        need = st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET) if st.index else None
+        need = (st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET, rank=st.rank)
+                if st.index else None)
         mk = p.max_keep()
         if need and need > mk:
             # the target is out of this box's reach: say how much of the
@@ -976,7 +1045,8 @@ def loop(w, st: State) -> str | None:
             else:
                 st.asking = {"label": f"save these {len(st.sel)} topics as:", "buf": ""}
         elif k == ord("m"):                     # snap to the coverage target
-            need = st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET) if st.index else None
+            need = (st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET, rank=st.rank)
+                    if st.index else None)
             if need:
                 st.keep = step(KEEP_STEPS, need, 0)
                 if st.keep < need:
@@ -1106,7 +1176,7 @@ def brief(st: State) -> str:
     n = B.keep_n(keep)
     have = list(idx.topics) if idx else []
     sel = sorted(st.sel) if st.sel else list(have)
-    cur = idx.curves(tuple(have), only=tuple(have))[0] if have else {}
+    cur = idx.curves(tuple(have), only=tuple(have), rank=st.rank)[0] if have else {}
     L = []
 
     def line(s=""):
@@ -1123,7 +1193,7 @@ def brief(st: State) -> str:
     para(f"""
         Written by `./tune.sh --brief` from `{short_path(st.stats_path)}`, which carries
         {len(have)} topic{'' if len(have) == 1 else 's'}, at keep {keep:.0%} in the
-        `{st.fmt}` layout. Every figure below is computed from that file at the moment the
+        `{st.fmt}` layout, ranked by `{st.rank}`. Every figure below is computed from that file at the moment the
         brief was written, so re-run the command after the keep-set changes.""")
 
     line("## Why this is a task at all")
@@ -1298,6 +1368,18 @@ def brief(st: State) -> str:
     line("## What a new topic costs the topics already here")
     line()
     p = st.plan()
+    # The sentence below names the ranking rule this brief was written under,
+    # because the cost it goes on to measure is that rule's cost: `sum` pays for
+    # a new topic out of every other topic's coverage, `maxmin` out of the
+    # best-served one's.
+    rank_says = {
+        "sum": "every selected topic's per-layer histogram is normalised and summed, so each "
+               "one gets an equal vote",
+        "max": "every selected topic's per-layer histogram is normalised and the largest value "
+               "wins the expert, so one topic wanting it is enough",
+        "maxmin": "every selected topic's per-layer histogram is normalised and the layer's "
+                  "slots go one at a time to whichever selected topic is least covered so far",
+    }[st.rank]
     step_to = min(0.60, keep + 0.02)
     step_slots = (B.keep_n(step_to) - B.keep_n(keep)) * B.N_LAYERS
     step_gb = step_slots * B.EXPERT_BYTES[st.fmt] / B.GB
@@ -1305,18 +1387,17 @@ def brief(st: State) -> str:
         The budget is fixed and a new topic does not add to it. At keep {keep:.0%} this box
         holds {p.kept:,} of {B.N_ROUTED:,} routed experts, {B.keep_n(keep)} per layer, an arena
         of {p.arena:.1f} GB. Adding a topic does not add slots, it changes which experts fill
-        them: every selected topic's per-layer histogram is normalised and summed, so each one
-        gets an equal vote and one more voter moves the ranking away from all the others.""")
+        them: {rank_says}, and one more claimant moves the ranking away from all the others.""")
     if len(sel) >= 2:
-        got = idx.curves(tuple(sel), only=tuple(sel))[0]
+        got = idx.curves(tuple(sel), only=tuple(sel), rank=st.rank)[0]
         drops = _spread(sel, min(len(sel), 12))
         deltas, needs = [], []
-        base_need = idx.keep_for(tuple(sel), COVERAGE_TARGET)
+        base_need = idx.keep_for(tuple(sel), COVERAGE_TARGET, rank=st.rank)
         for d in drops:
             rest = tuple(t for t in sel if t != d)
-            cc = idx.curves(rest, only=rest)[0]
+            cc = idx.curves(rest, only=rest, rank=st.rank)[0]
             deltas.append((d, _mean(cc[t][n] for t in rest) - _mean(got[t][n] for t in rest)))
-            needs.append((d, idx.keep_for(rest, COVERAGE_TARGET)))
+            needs.append((d, idx.keep_for(rest, COVERAGE_TARGET, rank=st.rank)))
         worst = max(deltas, key=lambda x: x[1])
         avg = _mean(d for _t, d in deltas)
         best_need = min((x for x in needs if x[1] is not None), key=lambda x: x[1], default=None)
@@ -1344,12 +1425,13 @@ def brief(st: State) -> str:
         line("|---|---:|---:|---|")
         for i in range(1, len(sample) + 1):
             sub = tuple(sorted(sample[:i]))
-            need = idx.keep_for(sub, COVERAGE_TARGET)
+            need = idx.keep_for(sub, COVERAGE_TARGET, rank=st.rank)
             if need is None:
                 line(f"| {', '.join('`%s`' % t for t in sub)} | more than 100 % | | |")
                 continue
             q = B.plan(st.host, idx, sub, need, st.max_seq, fmt=st.fmt,
-                       transient_slots=st.transient_slots, keep_free_gb=st.keep_free_gb)
+                       transient_slots=st.transient_slots, keep_free_gb=st.keep_free_gb,
+                       rank=st.rank)
             verdict = {"ok": "fits", "tight": "tight", "over": "will not load"}[q.verdict]
             line(f"| {', '.join('`%s`' % t for t in sub)} | {need:.0%} | {q.arena:.0f} GB | {verdict} |")
         line()
@@ -1364,8 +1446,8 @@ def brief(st: State) -> str:
     para("""
         A topic is one per-layer histogram and nothing in the ranking depends on the topics
         having been traced together: the engine normalises each topic's counts within its own
-        layer and sums them (`engine/v41_engine.py`, and the same arithmetic in
-        `tools/budget.py`). So a new topic is a separate, small trace of its own corpus, and
+        layer before it combines them at all, whichever rule combines them
+        (`engine/v41_engine.py`, and the same arithmetic in `tools/budget.py`). So a new topic is a separate, small trace of its own corpus, and
         the result is concatenated into the existing file by copying its `counts_<topic>` keys
         across.""")
     line("```python")
@@ -1419,13 +1501,18 @@ def brief(st: State) -> str:
 # --- output -----------------------------------------------------------------
 
 MANAGED = ("EXPERT_TOPICS", "PRUNE_KEEP", "MAX_SEQ", "ARENA_GB", "TRACE_STATS", "EXPERT_FORMAT",
-           "TRANSIENT_SLOTS", "KEEP_FREE_GB")
+           "TRANSIENT_SLOTS", "KEEP_FREE_GB", "DSV41_PRUNE_RANK")
 
 
 def env_for(st: State) -> dict:
     p = st.plan()
     e = {
         "PRUNE_KEEP": f"{st.keep:.2f}",
+        # The coverage on the screen was read off a keep-set built with this
+        # rule; written out so that the run reproduces the screen. The engine
+        # reads it under its own name, straight out of the environment .env is
+        # sourced into, which is why this one key is not the bare form.
+        "DSV41_PRUNE_RANK": st.rank,
         "MAX_SEQ": str(st.max_seq),
         "ARENA_GB": f"{math.ceil(p.arena)}",
         "EXPERT_FORMAT": st.fmt,
@@ -1474,6 +1561,10 @@ def main() -> int:
     ap.add_argument("--keep", type=float, default=float(os.environ.get("PRUNE_KEEP", "0.39")))
     ap.add_argument("--max-seq", type=int, default=int(os.environ.get("MAX_SEQ", "32768")))
     ap.add_argument("--format", default=os.environ.get("EXPERT_FORMAT", "cb3"), choices=("cb3", "fp4"))
+    ap.add_argument("--rank", default=B.rank_from_env(), metavar="RULE",
+                    help="how several topics are combined into one ranking: "
+                         f"{' | '.join(B.RANKS)} (default %(default)s, from DSV41_PRUNE_RANK). "
+                         "A profile that names a rule overrides it.")
     ap.add_argument("--transient-slots", type=int,
                     default=int(os.environ.get("TRANSIENT_SLOTS") or B.TRANSIENT_SLOTS_DEFAULT),
                     help="prefill slots outside the LRU; the arena is sized to hold these too")
@@ -1504,6 +1595,12 @@ def main() -> int:
     a = ap.parse_args()
 
     COVERAGE_TARGET = a.coverage_target
+    if a.rank not in B.RANKS:
+        # Not argparse `choices`: this defaults from the environment, and a typo
+        # in .env has to be refused here rather than served as `sum` -- which is
+        # the very disagreement between screen and engine this flag exists for.
+        print(f"unknown rank {a.rank!r} (DSV41_PRUNE_RANK): {' | '.join(B.RANKS)}", file=sys.stderr)
+        return 2
     host = B.read_host()
     try:
         sp_ = find_stats(a.stats)
@@ -1538,7 +1635,7 @@ def main() -> int:
 
     st = State(host, index, sp_, a.keep, a.max_seq, a.format, sel,
                transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb,
-               user_profiles=user, profiles_path=files[-1])
+               user_profiles=user, profiles_path=files[-1], rank=a.rank)
     st.problem = problems[0] if problems else ""
     if unknown:
         st.msg = f"dropped, not in this keep-set: {', '.join(unknown)}"
@@ -1570,8 +1667,9 @@ def main() -> int:
             p = pr["plan"]
             if pr["topics"]:
                 n_t = len(pr["topics"])
-                print(f"  {'':<22} {pr['keep']:.0%} of experts · {p.arena:.0f} GB · "
-                      f"{p.free_after_load:.0f} GB free · {n_t} topic{'' if n_t == 1 else 's'}")
+                print(f"  {'':<22} {pr['keep']:.0%} of experts · rank {pr['rank']} · "
+                      f"{p.arena:.0f} GB · {p.free_after_load:.0f} GB free · "
+                      f"{n_t} topic{'' if n_t == 1 else 's'}")
             if pr["topics"] and pr["missing"]:
                 print(f"  {'':<22} not in this keep-set: {', '.join(pr['missing'])}")
             print()
@@ -1610,9 +1708,10 @@ def main() -> int:
         if not index or not index.topics:
             print(f"no per-topic histograms in {sp_ or 'any coverage.json'}")
             return 1
-        cur = index.curves(tuple(index.topics))[0]
+        cur = index.curves(tuple(index.topics), rank=st.rank)[0]
         n = B.keep_n(a.keep)
-        print(f"{short_path(sp_)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}")
+        print(f"{short_path(sp_)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}, "
+              f"rank {st.rank}")
         for t in index.topics:
             nt = index.tokens.get(t, 0)
             flag = "  thin" if nt < B.TopicIndex.THIN else ""

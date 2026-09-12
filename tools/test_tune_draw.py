@@ -198,9 +198,11 @@ for h, w in SIZES:
 # --- a profile that came out of a file --------------------------------------
 # It is drawn like the shipped ones, plus two things they never show: where it
 # came from, and which of its topics this keep-set does not carry.
+# None for the rank: a file does not name one, so such a profile is budgeted
+# with whatever rule the screen is already on.
 USER = [("Mine", "a profile read from a file, naming one topic that is not here",
          [index.topics[0] if index and index.topics else "python", "not-a-topic"], False,
-         "results/keepsets/profiles.json")]
+         "results/keepsets/profiles.json", None)]
 for h, w in SIZES:
     st = T.State(host, index, stats, 0.39, 32768, "cb3", [], user_profiles=USER)
     st.pcursor = len(T.PROFILES)          # a new name is appended after the built-ins
@@ -229,14 +231,43 @@ for h, w in SIZES:
         bad.append("a row is wider than the window")
     check(f"a user profile at {w}x{h}", not bad, "; ".join(bad))
 
-# applying a profile selects its topics and a keep fraction that fits
-st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+# applying a profile selects its topics, a keep fraction that fits, and the
+# ranking rule it was budgeted with -- the last one because the keep fraction
+# shown for it was computed under that rule and means nothing under another.
+st = T.State(host, index, stats, 0.39, 32768, "cb3", [], rank="sum")
 pr = next(p for p in st.profiles() if p["topics"])
 st.apply_profile(pr)
 check("applying a profile selects its topics", sorted(st.sel) == sorted(pr["topics"]),
       f"{sorted(st.sel)} != {sorted(pr['topics'])}")
 check("  and a keep fraction that loads", st.plan().verdict != "over", True)
+check("  and the rule it was budgeted with", st.rank == pr["rank"] == "maxmin", st.rank)
 check("  every profile resolves", all(p["status"] for p in st.profiles()), True)
+# A profile out of a file names no rule, so applying it must not change the one
+# in force -- it would silently re-budget the selection.
+st = T.State(host, index, stats, 0.39, 32768, "cb3", [], rank="sum", user_profiles=USER)
+mine = next(p for p in st.profiles() if p["name"] == "Mine")
+check("a user profile is budgeted with the rule in force", mine["rank"], "sum")
+st.apply_profile(mine)
+check("  and applying it leaves that rule alone", st.rank, "sum")
+
+# --- the rule has to be on the screen, both views ---------------------------
+# The same keep fraction under two rules is two different keep-sets, so a
+# coverage bar without the rule next to it cannot be checked against anything.
+for rank in ("sum", "maxmin"):
+    st = T.State(host, index, stats, 0.39, 32768, "cb3", sorted(index.topics)[:3] if index else [],
+                 rank=rank)
+    st.view = "advanced"
+    rows = [render(st, 40, 140).row(y) for y in range(40)]
+    check(f"the topic screen names the rule ({rank})", any(f"rank {rank}" in r for r in rows),
+          "not on screen")
+    # The profile screen shows each profile's OWN rule beside its keep fraction,
+    # which for every shipped profile is maxmin whatever the screen is set to.
+    st.view = "easy"
+    rows = [render(st, 40, 140).row(y) for y in range(40)]
+    check(f"the profile screen names each profile's rule ({rank})",
+          any("% of experts · maxmin" in r for r in rows), "not on screen")
+    # and it must not have pushed anything off the edge
+    check(f"  without overflowing a row ({rank})", all(len(r) <= 140 for r in rows))
 
 # every topic row must carry its traced-token count
 if index and index.topics:
