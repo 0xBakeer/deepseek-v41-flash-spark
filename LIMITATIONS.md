@@ -222,3 +222,37 @@ answer the question.
 The coverage numbers on the screen are measurements. The memory numbers reproduce the engine's
 own pre-flight and are checked against a real load in `tools/test_budget.py`. Only the
 speed sentence is an inference, and it is marked as one in `docs/tune.md`.
+
+## 2026-09-12 14:10 — two things the end-to-end run found
+
+**`EXPERT_TOPICS` had never worked.** `expert_topics` was read inside
+`V41Engine.__init__` and passed by the engine's own CLI, but was never a parameter of it, so
+every launch through `start.sh` raised `TypeError` — three minutes in, with the weights already
+on the GPU. Fixed. `tools/test_engine_kwargs.py` now checks that every key the launchers can put
+in `--engine-kwargs` is a parameter the constructor has; it parses the signature with `ast`, so
+it needs no GPU and no torch.
+
+**The keep 0.44 / arena 98 GB configuration in §4.3 of `RESULTS.md` does not reliably serve.**
+On 2026-09-12 at 14:07 it loaded, reported ready, and the memory watchdog killed it on the first
+request:
+
+```
+FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB floor for 3.0 s
+```
+
+The arithmetic says why. With `MemAvailable` at 111.0 GB once the dense weights are resident, a
+98 GB arena plus 7.2 GB of drafter experts leaves 5.5 GB, and one 2,048-token prefill chunk needs
+about 10 GB at this engine's activation cost. An 87 GB arena leaves 16.5 GB and serves. The
+configuration was always inside the margin; it passed its gate on a quieter box.
+
+The engine's own pre-flight accepts the 98 GB arena, because that check runs before the drafter
+experts, the KV cache and any prefill exist. `./tune.sh` now applies the stricter test and caps
+this box at 42 % of routed experts rather than 45 %.
+
+**Long generations still degenerate, and the gate does not reach them.** At keep 0.39,
+temperature 0, the HTML-game prompt is clean at 1,200 tokens (distinct-word ratio 0.527, 32.5
+tok/s, acceptance 4.51, nothing read from NVMe) and collapses by 2,400 into repeated corrupted
+CSS (`color: #c0.0.0.0.0;`), with penalties at 0. The generation gate runs to 2,000 tokens, so it
+has never seen this. Not yet attributed: the 3-bit expert format, the FP8 LM head and the FP4
+dense attention are all in the stack, and the ledger records each of them breaking generation on
+its own at some point.
