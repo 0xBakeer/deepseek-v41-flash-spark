@@ -153,9 +153,12 @@ checked against what this box has free right now, and `r` to start the server wi
 ```
 
 Fewer topics do not make a step faster — a step reads the experts the token activates either
-way. They reach a given coverage at a smaller keep fraction, and that is a smaller arena.
-[`docs/tune.md`](docs/tune.md) has the screen, the arithmetic behind every number on it, and
-how to add topics of your own.
+way. What they buy is a smaller keep fraction for the same coverage, and that is a smaller arena.
+How much smaller is the ranking rule's answer, not a constant: under the default
+`DSV41_PRUNE_RANK=sum` breadth is expensive — at `PRUNE_KEEP=0.36` the worst-served topic falls
+from 0.657 at four selected topics to 0.410 at eighteen — while under `maxmin` the same span costs
+it 0.06 (measured 2026-09-12). [`docs/tune.md`](docs/tune.md) has the screen, the arithmetic behind
+every number on it, and how to add topics of your own.
 
 ## Two ways to run it
 

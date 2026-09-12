@@ -11,6 +11,13 @@ Start from what the server will actually be sent, not from what would be nice to
 selected spends part of a fixed budget, and the cost of the ones you do not need is paid by the
 ones you do.
 
+How steep that cost is depends on `DSV41_PRUNE_RANK`. Under the default `sum`, which is also what
+the screen budgets with, breadth is expensive: at `PRUNE_KEEP=0.36` the worst-served topic falls
+0.657 -> 0.410 going from four selected topics to eighteen. Under `maxmin` the same span costs it
+0.06 (both measured 2026-09-12). Neither rule creates capacity — under `maxmin` about sixteen
+topics still lands the worst-served one at 0.671, below the 0.7 line — but which advice below
+matters most is the rule's answer, not a constant.
+
 1. `./tune.sh`, or `./tune.sh --list` first to see what the keep-set carries.
 2. Select the topics the traffic consists of with `space`. `/` filters the list, `a` selects
    everything visible, `n` clears it.
@@ -25,10 +32,18 @@ ones you do.
 Selecting nothing is a legitimate answer: the engine then ranks on every topic in the file, which is
 what the shipped profiles do. It is the right choice when the traffic is mixed or unpredictable.
 
-Selecting one topic is the cheapest and the most brittle. On the shipped keep-set, `coding` alone
-reaches 0.85 coverage at 32 % keep where both topics together need 51 % — but at that setting
-`general` covers 0.45, and a keep-set that never saw a domain does not merely get worse at it, it
-produces degenerate output in it. Check the other bars before committing to a narrow selection.
+Selecting one topic is the cheapest and the most brittle. On the shipped keep-set under the `sum`
+rule, `coding` alone reaches 0.85 coverage at 32 % keep where both topics together need 51 % — but
+at that setting `general` covers 0.45, and a keep-set that never saw a domain does not merely get
+worse at it, it produces degenerate output in it. Check the other bars before committing to a
+narrow selection.
+
+Check the bars of the registers a single request mixes, too, and not only the one it is nominally
+about. On 2026-09-12 a served selection of {english, html, python, reasoning} at `PRUNE_KEEP=0.36`
+left css at 0.518 and javascript at 0.564 — never selected, traced all along — and the model wrote
+`* { }`, then `box-sizing: inline-block`, then the same `<style>` block over and over to the token
+cap. Selecting css, javascript and typescript under `maxmin`, at the same 80.4 GB arena, produced
+114 correct declarations with custom properties and no repetition.
 
 Without a terminal, the same decisions are available one at a time:
 
@@ -92,14 +107,18 @@ In order of how much they buy, on a 121 GiB box with `cb3` experts:
 1. **Press `m`.** If the keep fraction was set by hand it is probably higher than the selection
    needs. If `m` answers that the target needs a fraction this box cannot hold, the selection is too
    broad for this box, not the keep fraction too high.
-2. **Deselect a topic.** Watch what the remaining bars do as it goes: a narrower selection reaches
-   the same coverage at a smaller keep fraction, and the keep fraction is the arena. Each 2-point
-   step of the keep slider is about 320 expert slots, which is 4.6 GB.
-3. **Lower the keep fraction** with `←`, and read the weakest-topic line as you go. This is trading
+2. **Lower the keep fraction** with `←`, and read the weakest-topic line as you go. This is trading
    coverage for memory directly; below about 0.7 on a topic that matters, expect degeneration.
-4. **Check the format.** `f` switches between `cb3` at 14.45 MB a slot and `fp4` at 18.80 MB. The
+3. **Check the format.** `f` switches between `cb3` at 14.45 MB a slot and `fp4` at 18.80 MB. The
    same arena holds about 30 % more experts in `cb3`. At keep 39 % that is an 86.8 GB arena against
    113.0 GB, which is the difference between serving and not fitting at all.
+4. **Deselect a topic.** Watch what the remaining bars do as it goes: a narrower selection reaches
+   the same coverage at a smaller keep fraction, and the keep fraction is the arena. Each 2-point
+   step of the keep slider is about 320 expert slots, which is 4.6 GB. This is a `sum`-rule lever
+   and it is listed here rather than second because of how much it buys under the other rule: at
+   `PRUNE_KEEP=0.36` dropping from eighteen selected topics to four buys the worst-served topic
+   0.247 under `sum` and 0.06 under `maxmin` (2026-09-12). It is also the lever that costs the most
+   elsewhere — a register dropped from the selection is the one a long generation then breaks in.
 5. **Shorten the context** only if the rest has been exhausted. It is the smallest term on the
    screen: the whole range from 32k to 256k is 0.73 GB, less than a sixth of one keep step.
 6. **Check that nothing else holds the pool.** See below.
@@ -117,6 +136,12 @@ roughly a minute per layer; everything after it is arithmetic.
 **1. Gather the text.** `corpus/fetch_topics.py` knows a 35-topic catalogue — sixteen programming
 languages taken from a tree you point it at, eleven natural languages from Wikipedia, and eight
 domain registers from a fixed set of English Wikipedia articles.
+
+Two topics the catalogue has gained since, `reasoning` and `reasoning_code`, are written by hand and
+are **not** in `fetch_topics.py`, so nothing below fetches them and `--print-topic-flags` does not
+emit them. `reasoning_code`'s source is `corpus/sources/reasoning_code.txt` and its kind is `think`;
+pass its flag alongside the generated ones (see [the `think` kind](#the-think-kind-for-deliberation)
+below).
 
 ```bash
 python3 corpus/fetch_topics.py --list                      # the catalogue
@@ -143,7 +168,18 @@ python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
 ```
 
 `--print-topic-flags` emits one `--topic NAME:KIND:PATH[:lang]` per file already in `topics/`, with
-`KIND` being `code` or `prose`. The same flags can be written by hand:
+`KIND` being `code` or `prose`. It only ever emits what `fetch_topics.py` itself wrote, so a
+hand-written topic — `reasoning`, `reasoning_code` — is silently absent from a corpus built from it
+alone; add those flags next to the substitution:
+
+```bash
+python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
+    --out corpus/trace_mine.jsonl \
+    --topic reasoning_code:think:corpus/sources/reasoning_code.txt \
+    $(python3 corpus/fetch_topics.py --out topics --print-topic-flags)
+```
+
+The same flags can be written by hand:
 
 ```bash
 python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
@@ -249,8 +285,20 @@ coverage bar is the fraction of a topic's *measured* routing that stays resident
 in the **selection** and never a gap in the **catalogue**: a register that was never traced has no
 histogram, therefore no bar, no number and no warning. That is not a hypothetical. A five-topic
 profile here scored 0.85 or better on every topic it had and still reasoned in circles on a
-two-train arithmetic question, because none of the 35 topics carries the register a reasoning trace
-is written in. Nothing on the screen was wrong. There was simply nothing there to be wrong.
+two-train arithmetic question. Nothing on the screen was wrong. There was simply nothing there to be
+wrong.
+
+The catalogue now carries `reasoning` and `reasoning_code` (added 2026-09-12), and tracing the
+second of them narrowed that diagnosis from "no reasoning register" to something far more specific:
+**the think-exit was never traced at all**. Every wrapper in `corpus/make_corpus.py` other than
+`wrap_think` writes `</think>` immediately after the assistant tag, so it closes an *empty* block —
+across the two shipped trace corpora, 95 sequences, 85 with `</think>` adjacent to the tag and none
+with it after real content (`corpus/make_corpus.py`, `wrap_think`'s docstring). The experts that
+fire on "the deliberation is finished, close it, begin the answer" were therefore never ranked and
+never resident, and at temperature 0 the server writes "I'll write the code now." and then repeats
+"Let me write." to the token cap with an answer of length zero. `reasoning_code` (8 hand-written
+records, 3,543 tokens) was traced on 2026-09-12 to close that gap. **Whether it closes it is not
+known** — no gate has been run on a keep-set containing it.
 
 `--brief` writes that whole task out, as Markdown, from the keep-set that is loaded:
 
@@ -278,7 +326,10 @@ generated rather than copied, so it stays true as the keep-set changes:
 The last three are the ones people get wrong. A new topic is cheap to trace and expensive to keep:
 it does not add slots, it takes a share of the ones there are, so every topic already in the
 selection covers slightly less once it is added. The brief prints that number for the selection in
-front of you.
+front of you, computed under `sum` — which is the expensive rule for this. Measured 2026-09-12 at
+`PRUNE_KEEP=0.36`, four topics to eighteen costs the worst-served topic 0.247 under `sum` and 0.06
+under `maxmin`, so a topic that is unaffordable on the screen may well be affordable on a server
+started with `DSV41_PRUNE_RANK=maxmin`.
 
 ## When the screen says something is already running
 

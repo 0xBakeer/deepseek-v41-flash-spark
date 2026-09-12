@@ -2366,6 +2366,11 @@ now off by default.
 -- keeping each workload's specialists rather than what both use moderately -- was measured worse on
 both prose and HTML at the same budget (`DSV41_PRUNE_RANK`, default `sum`).
 
+> **Scoped 2026-09-12.** That sentence is true of `max` and only of `max`, which is the rule this
+> entry tested. A third rule, `maxmin`, was added later and does change the outcome for a selection
+> that spans several registers at once -- see the 2026-09-12 20:00 entry at the end of this file.
+> It still does not create capacity.
+
 At 288.8 GB of FP4 experts and 121 GiB of memory there is no arrangement that keeps every expert
 resident. Either the experts stream on a miss (full quality, NVMe-bound) or some are dropped (fast,
 and a workload the keep-set does not cover degenerates). The recipe now ships the first.
@@ -2493,3 +2498,65 @@ the arena size: 2,048-token chunks need roughly 10 GB of headroom on top of the 
 
 Also relevant on this box: a crontab entry started a Qwen vLLM container 90 seconds after every
 boot, on the same port, holding ~85 GB. It is what collided with the expert arena twice. Disabled.
+
+### 2026-09-12 20:00 -- two faults behind the degeneration, and a third ranking rule
+
+Everything here at `PRUNE_KEEP=0.36`, 139 of 384 experts a layer, 36-topic catalogue, same box and
+checkpoint. 0.36 is not a choice: a 121 GiB GB10 pins it there, and context is not a lever out of it
+-- max keep by `MAX_SEQ` is 262144 -> 0.350, 131072 -> 0.361, 65536 -> 0.366, 8192 -> 0.371.
+
+**Fault 1: a register that was traced, never selected, and broke the generation.** The served
+selection was {english, html, python, reasoning}. css sat at 0.518 and javascript at 0.564 -- both
+histograms in the file all along, neither selected, so nothing on the screen was red. Asked for a
+styled page the model wrote `* { }`, then `box-sizing: inline-block`, then the same `<style>` block
+over and over to the token cap. Reproduced with thinking **on and off**, so it is not a think-block
+fault. Selecting css, javascript and typescript under `maxmin` at the same 80.4 GB arena: 114
+correct declarations, custom properties, no repetition. A coverage bar can only warn about a topic
+somebody selected; the catalogue had the evidence and the selection threw it away.
+
+**Fault 2: the think-exit was never traced by anything.** Every wrapper in `corpus/make_corpus.py`
+except `wrap_think` writes `</think>` immediately after the assistant tag, closing an *empty* block:
+95 sequences across trace_corpus_v2 and _v3, 85 with `</think>` adjacent to the tag, none with it
+after real content. So the experts that fire on "the deliberation is finished, close it, begin the
+answer" were never ranked, are not resident, and the model cannot stop deliberating. At temperature
+0 it writes "I'll write the code now." and then repeats "Let me write." to the cap, answer length 0.
+
+Refuted as fixes, each measured on the real server: temperature 0; `no_repeat_ngram=8`;
+`reasoning_effort=10`, which made it *worse* (59,766 characters of thinking); frequency and presence
+penalties, which broke it lexically instead. This is not a sampling problem and no sampler setting
+reaches it. The fix is a corpus one: a new `think` kind in `corpus/make_corpus.py` and a hand-written
+`reasoning_code` topic (8 records, 3,543 tokens, `corpus/sources/reasoning_code.txt`), traced
+2026-09-12. **Its gate result is not known.** Nothing below should be read as "the think-exit is
+fixed".
+
+Two further candidates refuted in `results/htmlbug/`, one variable per engine load: speculative
+decoding off (`K_nospec`) and the dense/head quantizations off (`M_nodensequant`) both degenerate
+identically to the shipped stack.
+
+**`DSV41_PRUNE_RANK=maxmin`.** Per-layer normalisation divides corpus size out, so under `sum` a
+*broad* topic spreads its mass thinly, scores low on every expert, and loses slot after slot to a
+peaky specialist. `maxmin` (`engine/v41_engine.py::_maxmin_counts`) hands each layer's slots out one
+at a time to whichever selected topic is currently least covered, water-filling; an expert admitted
+for one topic counts for every topic that routes to it, so overlap is paid for once rather than per
+topic.
+
+| | `sum` | `maxmin` |
+|---|---|---|
+| {english, html, python, reasoning, css, javascript} | english **0.556**, css 0.803, javascript 0.814 | 0.676 - 0.688 across all six |
+| worst-served topic, 4 topics -> 18 | 0.657 -> 0.410 | the same span costs 0.06 |
+| 35 of the 36 topics together | worst 0.464 (chinese) | 0.580 - 0.636 (english hardest) |
+
+Under `maxmin` on this box about sixteen topics is where the worst-served one reaches 0.671, under
+the 0.7 line. So breadth is cheap under `maxmin` and ruinous under `sum`, and neither rule creates
+capacity: about 31 % of the routing mass is displaced at 0.36 whichever rule ranks the set.
+
+`tools/budget.py` still composes and colours every selection with `sum`, so a bar read while
+planning a `maxmin` run is the wrong rule's number until that is extended.
+
+**Residual, after both faults are addressed.** A rare token corrupts (`color-scheme` ->
+`color-s-s-mode`), the one-step cycle breaker breaks up runs of U+2011, and the model enters a
+self-correction loop trying to repair what it just wrote. Not attributed.
+
+Also measured today: 131,072 context prefilled and generated from, so `tools/budget.py`
+`VALIDATED_MAX_SEQ` is 131,072 rather than 32,768, and the old 64k-watchdog anecdote that set the
+32,768 mark is superseded.

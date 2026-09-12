@@ -51,13 +51,23 @@ histograms are added, and the top *N* of that sum is the layer's keep-set
 (`engine/v41_engine.py`, and the same arithmetic in `tools/budget.py` so the screen agrees with the
 engine).
 
+That agreement holds for all three rules since 2026-09-12: `tools/budget.py` reimplements `max` and
+the `maxmin` rule below as well, defaults to whatever `DSV41_PRUNE_RANK` is set to, takes
+`./tune.sh --rank sum|max|maxmin`, shows the rule beside the keep fraction on both screens and
+writes it into `.env` with them. `tools/test_budget_rank.py` lifts the engine's own function out
+with `ast` and holds the two implementations to the same keep-set, layer by layer, as sets, at
+seven keep fractions — because a screen that ranks by one rule while the engine ranks by another
+reports coverage nothing will deliver: over the seven topics below at keep 0.36 that gap is 0.15 on
+`english` alone.
+
 Normalising before summing is the whole point. Without it a topic that contributed 20,000 tokens
 would outvote one that contributed 3,000 by a factor of seven, and "serve this workload too" would
 quietly mean "serve it if it happens to be the bigger half of the corpus". With it, every selected
 topic gets one vote per layer.
 
 The alternative combination — keeping an expert that matters to *any* selected topic, rather than
-summing — exists as `DSV41_PRUNE_RANK=max` and was measured worse, so `sum` is the default.
+summing — exists as `DSV41_PRUNE_RANK=max` and was measured worse, so `sum` remained the default
+until `maxmin`, below.
 
 ### One vote each is not the same as one outcome each
 
@@ -80,8 +90,12 @@ common coverage rather than a spread. The same budget then holds 0.676–0.688 a
 
 It also changes what adding a topic costs. Under `sum` the worst-served topic falls from 0.657 at
 four topics to 0.410 at eighteen; under `maxmin` the same span costs 0.06. Breadth is affordable
-under `maxmin` and ruinous under `sum` — but neither rule creates capacity, and past roughly twenty
-topics the shared budget is thin enough that every one of them suffers.
+under `maxmin` and ruinous under `sum` — but neither rule creates capacity, and a wide enough
+selection runs every topic down. Measured on this box at `PRUNE_KEEP=0.36`, 139 experts a layer
+(2026-09-12): under `maxmin` about **sixteen** topics is where the worst-served one lands at 0.671,
+below the 0.7 line; 35 of the catalogue's 36 topics together run 0.580–0.636, with english the
+hardest. The same full selection under `sum` puts chinese hardest at 0.464. Sixteen is this box at
+this keep fraction, not a property of the rule — the boundary moves with both.
 
 ## Coverage
 
@@ -141,7 +155,7 @@ Two limits on that reading, both recorded in [`LIMITATIONS.md`](../LIMITATIONS.m
   degenerate at the shipped keep fraction, and the cause is not yet attributed.
 * Coverage says nothing about speed. A step reads the experts the token activates either way, so
   choosing fewer topics buys a smaller keep fraction rather than a faster step; see
-  [`docs/tune.md`](tune.md#fewer-topics-are-not-faster-they-are-cheaper) for the mechanism, the one
+  [`docs/tune.md`](tune.md#fewer-topics-are-not-faster-under-sum-they-are-cheaper-under-maxmin-breadth-is-cheap-but-not-free) for the mechanism, the one
   measurement that supports it, and the A/B that has not been run.
 
 ## How many experts a step actually reads
@@ -157,7 +171,7 @@ than six.
 | `block6_unique_mean` in `coverage.json` | 22.6 mean, 18.2 to 29.5 by layer | counted on the trace, with **no** keep mask applied |
 
 The two are close but they answer different questions, and the difference is the reason the speed
-question in [`docs/tune.md`](tune.md#fewer-topics-are-not-faster-they-are-cheaper) is still open:
+question in [`docs/tune.md`](tune.md#fewer-topics-are-not-faster-under-sum-they-are-cheaper-under-maxmin-breadth-is-cheap-but-not-free) is still open:
 `block6_unique_mean` is measured without a keep-set, so it cannot say whether a keep-set matched to
 its workload concentrates routing and lowers the count. Only an A/B at a fixed keep fraction, one
 topic against many, can, and it has not been run.

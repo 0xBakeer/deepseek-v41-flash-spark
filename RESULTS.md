@@ -590,6 +590,11 @@ Both thresholds were learned the hard way. A 300-token gate passed configuration
 900. Repetition ratios alone pass output whose CSS has decayed into `inset - 00 1 pix - 00 1 pix`,
 so the gate checks balanced tags, closed fences and unit spelling too.
 
+**Added 2026-09-12: every one of those five prompts ran with thinking off.** No gate prompt in this
+tag, or in any tag before it, was run with thinking on. Nothing here measures a generation that has
+to deliberate first and then leave the think block, which is the exact register §4.5 below finds
+was never traced either.
+
 ### 4.2 The keep-set is a cache policy, and it must be sampled from every workload
 
 `corpus/trace_corpus.jsonl`, which ranked the experts for every earlier tag, is 50 documents whose
@@ -612,6 +617,13 @@ per-token histogram, so `results/trace-union` is the concatenation of the two tr
 arrays (190 sequences, 36,250 tokens) with the statistics rebuilt from it. No third trace run.
 
 ### 4.3 Shipped configuration
+
+> **Note added 2026-09-12.** This configuration does not reliably serve and is not the working
+> point any more. `LIMITATIONS.md` (2026-09-12 14:10) records it loading, reporting ready, and being
+> killed by the memory watchdog on its first request: a 98 GB arena plus 7.2 GB of drafter experts
+> left 5.5 GB where one 2,048-token prefill chunk needs about 7.5 GB at 32k. The rows below were
+> measured on a quieter box, inside that margin. The working point since is **`PRUNE_KEEP=0.36`**,
+> 139 experts a layer, arena about 80 GB.
 
 `PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98 TRANSIENT_SLOTS=8 KEEP_FREE_GB=6`,
 `TRACE_STATS=results/trace-union/stats/coverage.json`, `DSV41_DENSE_FP4=attn,wo_a`,
@@ -654,3 +666,74 @@ kind of text, about 5 accepted tokens per step on markup against 2.5 on prose.
 ### What is not measured in this tag
 Sampled quality A/B at scale, long-context (8k+) generation quality, the container image end to end,
 and the tool grammar of `server/tool_grammar.py` on real weights (it is off by default).
+
+### 4.5 Addendum 2026-09-12 — a second ranking rule (`maxmin`), and the register the `sum` rule was starving
+
+All of this at `PRUNE_KEEP=0.36`, 139 of 384 experts a layer, on the 36-topic catalogue, on the same
+box and checkpoint.
+
+**0.36 is where the memory pins it, and context is not the lever.** A 121 GiB GB10 holds 0.36 at
+256k. The whole range the tool offers moves the ceiling by two points:
+
+| `MAX_SEQ` | largest keep this box holds |
+|---|---|
+| 262,144 | 0.350 |
+| 131,072 | 0.361 |
+| 65,536 | 0.366 |
+| 8,192 | 0.371 |
+
+Shortening the context to buy experts is not a trade worth making. Separately, 131,072 was prefilled
+and measured on this box, so `tools/budget.py` `VALIDATED_MAX_SEQ` is 131,072 (it was 32,768).
+
+**The `sum` rule starves a broad topic, and `maxmin` does not.** `sum` adds the per-layer-normalised
+histograms, which divides corpus size out, so a topic that spreads its mass over many experts scores
+low on every one of them and loses slot after slot to a peaky specialist.
+`DSV41_PRUNE_RANK=maxmin` (`engine/v41_engine.py`, `_maxmin_counts`) instead hands each layer's
+slots out one at a time to whichever selected topic is currently least covered; an expert admitted
+for one topic counts for every topic that also routes to it, so overlap is paid for once.
+
+Over {english, html, python, reasoning, css, javascript}, the same budget either way:
+
+| rule | english | css | javascript | all six |
+|---|---|---|---|---|
+| `sum` | **0.556** | 0.803 | 0.814 | a spread of 0.26 |
+| `maxmin` | — | — | — | **0.676 – 0.688** |
+
+English is the broad one here — it is the prose inside every other topic — and `sum` is the rule
+that makes it the worst-served of the six while css and javascript sit 25 points above it.
+
+What breadth costs, worst-served topic, four selected topics against eighteen:
+
+| rule | 4 topics | 18 topics | the span |
+|---|---|---|---|
+| `sum` | 0.657 | **0.410** | 0.247 |
+| `maxmin` | — | — | **0.06** |
+
+(A dash is a number that was not written down, not a zero: for `maxmin` the span was recorded and
+the two endpoints were not.)
+
+Neither rule creates capacity. Under `maxmin` on this box, about **sixteen** topics puts the
+worst-served one at 0.671, already under the 0.7 line; 35 of the 36 together run **0.580–0.636**,
+english hardest. The same full selection under `sum` runs down to **0.464**, chinese hardest.
+
+**Fault 1 — a register that was traced, never selected, and broke the generation.** The served
+selection was {english, html, python, reasoning}. css sat at 0.518 and javascript at 0.564: both
+histograms were in the file the whole time and neither was selected, so nothing on the screen was
+red. Asked for a styled page the model emitted `* { }`, then `box-sizing: inline-block`, then the
+same `<style>` block repeated to the token cap. Reproduced with thinking on **and** off, so it is
+not a think-block fault. Selecting css, javascript and typescript under `maxmin`, at the same
+80.4 GB arena: **114 correct declarations**, custom properties, no repetition. The lesson is the
+selection rather than the rule — a coverage bar can only be red for a topic somebody selected.
+
+**Two candidate causes refuted** (`results/htmlbug/`, one variable per engine load): with
+speculative decoding off (`K_nospec`) and with the dense and head quantizations off
+(`M_nodensequant`) the degeneration is identical. Neither is the cause.
+
+**What neither rule fixes.** At 0.36 about **31 %** of the routing mass is displaced whichever rule
+ranks the set, and what is left is a rare-token failure that no keep-set arrangement here removed: a
+token corrupts (`color-scheme` -> `color-s-s-mode`), the one-step cycle breaker breaks up runs of
+U+2011, and the model enters a self-correction loop trying to repair it.
+
+Fault 2 — the think-exit register, which was never traced by any corpus in this repo — is recorded
+in `NOTES.md` (2026-09-12) and `LIMITATIONS.md`. It is a corpus fault, not a ranking one, and no
+gate has been run on the corpus written to close it.

@@ -134,10 +134,17 @@ bf16 for 40 layers plus 3 MTP blocks, 180,355,072 B, the same at any context len
 
 The cache is never what limits the context window on this box. Prefill is. The whole range the tool
 offers, 4k to 256k, is 0.83 GB — less than a fifth of one 2-point step of the keep slider. The tool
-therefore marks 32,768 as the longest context that has actually been loaded and generated from,
-rather than predicting a ceiling from the cache arithmetic: a 64k attempt tripped the memory
-watchdog at an arena with room for the cache many times over, because the indexer's score tiles grow
-with the compressed cache and that term is not characterised.
+therefore marks the longest context that has actually been loaded and prefilled from, rather than
+predicting a ceiling from the cache arithmetic. On 2026-09-12 that length is **131,072**
+(`tools/budget.py` `VALIDATED_MAX_SEQ`).
+
+It read 32,768 before that, on the strength of a 64k attempt that tripped the memory watchdog at an
+arena with room for the cache many times over. **That anecdote is superseded**: the watchdog was
+firing on the prefill chunk's own growth with context — 15.1 KB a token, which is why it is a term
+of the gate now — not on anything the cache arithmetic missed, and 131,072 has since been prefilled
+and measured. The indexer's score tiles do still grow with the compressed cache and that term is
+still not characterised on its own, which is why the marked length is a run that happened rather
+than a ceiling derived from the formula.
 
 ### What the panel leaves out
 
@@ -164,15 +171,18 @@ prefill chunk)`. The tool reproduces it against `MemAvailable` as it is now, bef
 loaded, so the dense term is explicit:
 
 ```
-room to launch = MemAvailable − (arena + pack scratch + dense weights + keep-free floor)
+room to launch = MemAvailable − (arena + pack scratch + dense weights
+                                 + max(keep-free floor, one prefill chunk + the 2.5 GB watchdog floor))
 ```
 
-That is the `room to launch` row. One difference is worth knowing: the row uses the keep-free floor
-alone, while the engine takes the larger of that floor and a prefill chunk, so at `KEEP_FREE_GB=6`
-the engine's own margin is 4.2 GB smaller than the number shown. It never changes the verdict,
-because gate 2 below is strictly tighter — but that is only true while `KEEP_FREE_GB` is what the
-tool writes. Pin an arena by hand and leave the engine's 20 GB default in place and gate 1 becomes
-the binding one.
+That is the `room to launch` row (`tools/budget.py`, `Plan.launch_need`). It takes the same `max()`
+the engine takes, so the row is the engine's own margin and not a more generous reading of it.
+
+**Corrected 2026-09-12.** This paragraph used to say the row took the keep-free floor alone and was
+therefore 4.2 GB more generous than the engine at `KEEP_FREE_GB=6`. That is no longer the code: the
+`max()` is mirrored exactly, and the 4.2 GB discrepancy it described does not exist. What still
+holds is the reason it mattered — pin an arena by hand and leave the engine's 20 GB default floor in
+place, and gate 1 rather than gate 2 becomes the binding check.
 
 ### Gate 2 — a prefill chunk still fits
 

@@ -22,21 +22,30 @@ repo's own history, a keep-set with no markup in its corpus wrote correct Python
 produce a valid HTML file at any keep fraction; one with no Arabic produced a collage of Polish,
 Portuguese and Romanian fragments when asked for Arabic.
 
-**Each profile therefore ships a `GATE.md` recording which domains were measured, which passed and
-which failed.** Read it before choosing. If your traffic is mixed or you cannot predict it, use
-`general`.
+**Each profile therefore ships a `GATE.md`, and the first line of it says whether a gate was ever
+run.** As of 2026-09-12 **`general` is the only gated profile**: `code`, `prose` and `topics` each
+say NOT YET GATED at the top of their own `GATE.md`, and what is written under that heading is
+inference from how their keep-sets were built, not a generation run on them. Read it before
+choosing. If your traffic is mixed, or you cannot predict it, or you are not going to run a gate
+yourself, use `general`.
 
 ## Profiles
 
-| profile | trace corpus | intended for |
-|---|---|---|
-| `general` | web + code + configuration + technical prose + narrative | mixed traffic; the default |
-| `code` | HTML, CSS, JavaScript, React, SQL, YAML, shell, Python, technical prose | programming and markup only |
-| `prose` | narrative fiction, dialogue, essays | long-form English writing only |
+| profile | trace corpus | gated | topics inside it | intended for |
+|---|---|---|---|---|
+| `general` | web + code + configuration + technical prose + narrative | yes | `coding`, `general` | mixed traffic; the default |
+| `code` | HTML, CSS, JavaScript, React, SQL, YAML, shell, Python, technical prose | no | none | programming and markup only |
+| `prose` | narrative fiction, dialogue, essays | no | none | long-form English writing only |
+| `topics` | the 35-topic catalogue | no | 35 | `EXPERT_TOPICS` and `./tune.sh` |
 
 Each directory holds `coverage.json` (the per-layer expert histograms the engine ranks from) and
 `GATE.md`. The raw per-layer trace arrays are not shipped; `coverage.json` carries the per-category
 histograms, so a keep-set can be rebuilt from it alone.
+
+The `topics inside it` column is what `EXPERT_TOPICS` can name. **`code` and `prose` carry only the
+mixed `counts` histogram and no per-topic ones at all**, so there is nothing in those files to
+select from: `EXPERT_TOPICS` cannot be used with them, and `./tune.sh` shows their budget panel with
+an empty topic list. Composing a selection needs `topics` (35 histograms) or `general` (two).
 
 ## Composing one from topics
 

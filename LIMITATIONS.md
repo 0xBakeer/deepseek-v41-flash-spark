@@ -204,7 +204,9 @@ Known remaining inexactness:
 * **The tool grammar is unverified on real weights** (`DSV41_TOOL_GRAMMAR=1`, off by default): its
   unit tests pass, the end-to-end run never happened.
 * **Not measured**: sampled quality at scale, generation quality at 8k+ context, the container image
-  end to end.
+  end to end, and — added 2026-09-12 — **generation with thinking on**: every prompt of the
+  generation gate in RESULTS 4.1 ran with thinking off, so nothing in this repo gates a generation
+  that has to deliberate and then leave the think block.
 
 ## 2026-09-12 — `./tune.sh`, and the claim on its screen
 
@@ -256,3 +258,26 @@ CSS (`color: #c0.0.0.0.0;`), with penalties at 0. The generation gate runs to 2,
 has never seen this. Not yet attributed: the 3-bit expert format, the FP8 LM head and the FP4
 dense attention are all in the stack, and the ledger records each of them breaking generation on
 its own at some point.
+
+**Added 2026-09-12 to the paragraph above.** The failing register has since been named, and it is
+not on that list of three. On the live selection {english, html, python, reasoning} at
+`PRUNE_KEEP=0.36`, **css coverage was 0.278** — traced, in the file, never selected — which outranks
+the 3-bit expert format, the FP8 LM head and the FP4 dense attention as an explanation, because two
+of those three are now refuted directly: in `results/htmlbug/`, one variable per engine load, the
+run with speculative decoding off (`K_nospec`) and the run with the dense and head quantizations off
+(`M_nodensequant`) degenerate identically to the shipped stack. What is left after the selection is
+fixed is a smaller, different fault: a rare token corrupts (`color-scheme` -> `color-s-s-mode`), the
+one-step cycle breaker breaks up runs of U+2011, and the model loops trying to correct itself. See
+RESULTS 4.5.
+
+**Added 2026-09-12 — the think-exit was never in any trace corpus.** Every wrapper in
+`corpus/make_corpus.py` except `wrap_think` writes `</think>` immediately after the assistant tag,
+so it closes an empty block: 95 sequences across the two shipped corpora, 85 with `</think>`
+adjacent to the tag, none with it after real content. The experts that end deliberation were
+therefore never ranked and are not resident, and at temperature 0 with thinking on the server writes
+"I'll write the code now." and then repeats "Let me write." to the token cap with an answer of
+length zero. Refuted as workarounds, each measured: temperature 0, `no_repeat_ngram=8`,
+`reasoning_effort=10` (59,766 characters of thinking, worse), and frequency/presence penalties
+(lexical breakdown). The fix attempted is a new `think` corpus kind and a hand-written
+`reasoning_code` topic (8 records, 3,543 tokens), traced 2026-09-12. **No gate has been run on a
+keep-set containing it, so it is not known to work.**

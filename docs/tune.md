@@ -61,6 +61,16 @@ stylesheets alone drops English coverage to 0.31, well inside the range where lo
 apart, and the prose inside an HTML page is English. Adding it back costs the markup topics about
 five points of coverage and buys English forty-five.
 
+Those two numbers were measured under `DSV41_PRUNE_RANK=sum` at `PRUNE_KEEP=0.39` (2026-09-11) and
+describe neither rule as the box is run now: the working point is 0.36, and `maxmin` equalises the
+selected topics instead of trading points between them, so it has no "costs one, buys the other"
+shape at all. The direction survives — a markup-only selection starves the English inside the
+markup — the exchange rate does not.
+
+(The render above was taken with the context selector at 32k. On 2026-09-12 the longest context
+this engine has loaded and prefilled from became **131,072**, and `./tune.sh` marks that length now
+rather than 32k — `tools/budget.py` `VALIDATED_MAX_SEQ`.)
+
 ```bash
 ./tune.sh --profiles              # the profiles, with what each one needs
 ./tune.sh --profile frontend --print
@@ -128,7 +138,7 @@ the Engram row cache, which is capped at 200,000 rows of 264 bytes per table and
 resident: 24 rows per token per table, about 13 KB a token, against zero bytes of expert
 weights.
 
-## Fewer topics are not faster. They are cheaper.
+## Fewer topics are not faster. Under `sum` they are cheaper; under `maxmin` breadth is cheap but not free.
 
 A decode step reads the experts the token activates — six of 384 per layer — and that count does
 not depend on how the keep-set was chosen. The measured behaviour agrees: across nine workloads
@@ -136,9 +146,10 @@ on one keep-set the step is ~145 ms in every case, and the 17-to-37 tok/s spread
 entirely the drafter's acceptance length (`RESULTS.md` §4.3). **So selecting fewer topics should
 not be expected to make a step faster.**
 
-What it does is reach a given coverage at a *smaller* budget, and the budget is the arena:
+What it does is reach a given coverage at a *smaller* budget, and the budget is the arena. Every
+row below is `DSV41_PRUNE_RANK=sum`, which is the default and what `./tune.sh` budgets with:
 
-| selection | keep fraction for 0.85 coverage | arena |
+| selection (`sum` rule) | keep fraction for 0.85 coverage | arena |
 |---|---|---|
 | `coding` alone | 32 % | 71 GB |
 | `coding` + `general` | 51 % | more than this box holds |
@@ -146,8 +157,16 @@ What it does is reach a given coverage at a *smaller* budget, and the budget is 
 Those are the two topics the shipped `general` keep-set carries, and the numbers are its own —
 name the topics whenever you quote a figure like this, because a different pair gives a different
 answer. On the shipped 35-topic keep-set the same comparison runs 29 % for `python` alone, 35 % adding
-`html`, 49 % adding `german`. What does not change is the direction: each topic you add costs
-keep fraction, and keep fraction is arena.
+`html`, 49 % adding `german`. Under `sum` that direction holds: each topic you add costs keep
+fraction, and keep fraction is arena.
+
+`DSV41_PRUNE_RANK=maxmin` changes the size of that cost, not its sign. Hand the slots out to
+whichever selected topic is currently least covered and the same four-to-eighteen-topic span costs
+the worst-served topic 0.06 instead of the 0.247 it costs under `sum` (`PRUNE_KEEP=0.36`, measured
+2026-09-12). Breadth is cheap there — but not free, and not unbounded: at that keep fraction about
+sixteen topics already puts the worst-served one at 0.671, under the 0.7 line. So under `maxmin`
+"deselect a topic" is a weak lever and the format, the keep fraction and the arena are the strong
+ones; under `sum` it is the second-strongest thing on the screen.
 
 That is the trade the screen is built around. Press `m` to snap the keep fraction to the
 smallest one that serves every selected topic, and read the arena off the panel. The 27 GB
@@ -199,6 +218,18 @@ python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
 It asks Wikipedia for twenty article introductions at a time, one request every two seconds, and
 backs off when told to. A burst of parallel requests earns an IP-level rate limit that outlasts
 the job.
+
+`--print-topic-flags` emits a flag for every file `fetch_topics.py` itself wrote, so it never emits
+the two hand-written topics the catalogue has gained — `reasoning`, and `reasoning_code`, whose
+source is `corpus/sources/reasoning_code.txt` and whose kind is `think` rather than `prose`. Add
+them by hand alongside the generated flags, or they are silently absent from the corpus:
+
+```bash
+python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
+    --out corpus/trace_topics.jsonl \
+    --topic reasoning_code:think:corpus/sources/reasoning_code.txt \
+    $(python3 corpus/fetch_topics.py --out topics --print-topic-flags)
+```
 
 To add a topic of your own, see [`docs/tune-tasks.md`](tune-tasks.md), which carries the complete
 commands. In outline: tag the sources with a topic name, build the corpus, fetch the Engram rows
