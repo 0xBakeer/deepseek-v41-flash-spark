@@ -330,13 +330,14 @@ def draw(w, st: State):
     elif st.index and st.index.topics:
         put(w, fy, 1, "no topic selected — the keep-set would use all of them", C["muted"])
     if st.msg:
-        put(w, fy, max(1, W - len(st.msg) - 2), st.msg, C["warn"] | curses.A_BOLD)
-
-    keys = ("↑↓ topic   space select   ←→ adjust   tab pane   a all   n none   / filter   "
-            "m fit   r RUN   q quit")
-    if len(keys) > W - 2:
-        keys = "↑↓ space ←→ tab · a all · n none · / filter · m fit · r RUN · q quit"
-    put(w, h - 1, 1, keys[:W - 2], C["muted"])
+        # transient, and worth the key line for one keypress
+        put(w, h - 1, 1, st.msg.ljust(W - 2)[:W - 2], C["warn"] | curses.A_BOLD)
+    else:
+        keys = ("↑↓ topic   space select   ←→ adjust   tab pane   a all   n none   / filter   "
+                "m fit   r RUN   q quit")
+        if len(keys) > W - 2:
+            keys = "↑↓ space ←→ tab · a all · n none · / filter · m fit · r RUN · q quit"
+        put(w, h - 1, 1, keys[:W - 2], C["muted"])
     w.noutrefresh()
     curses.doupdate()
 
@@ -365,7 +366,7 @@ def loop(w, st: State) -> str | None:
             k = w.getch()
         except KeyboardInterrupt:
             return None
-        st.msg = ""
+        st.msg = ""   # a message lasts until the next key
         vis = st.visible
         st.cursor = max(0, min(st.cursor, len(vis) - 1)) if vis else 0
 
@@ -505,15 +506,21 @@ def main() -> int:
     sp_ = find_stats(a.stats)
     index = B.TopicIndex(sp_) if sp_ else None
     sel = [t.strip() for t in a.topics.split(",") if t.strip()]
-    if index:
-        unknown = [t for t in sel if t not in index.topics]
-        if unknown:
-            print(f"not in {os.path.relpath(sp_, ROOT)}: {', '.join(unknown)}", file=sys.stderr)
-            print(f"have: {', '.join(index.topics)}", file=sys.stderr)
-            return 2
+    unknown = [t for t in sel if not index or t not in index.topics] if sel else []
+    interactive = sys.stdout.isatty() and not (a.list or a.show or a.write)
+    if unknown and not interactive:
+        # a script asked for something this keep-set cannot serve: say so and stop
+        where = os.path.relpath(sp_, ROOT) if sp_ else "any coverage.json in the checkout"
+        print(f"not in {where}: {', '.join(unknown)}", file=sys.stderr)
+        print(f"have: {', '.join(index.topics) if index else '(none)'}", file=sys.stderr)
+        return 2
+    if unknown:
+        sel = [t for t in sel if t not in unknown]   # the screen is where this gets fixed
 
     st = State(host, index, sp_, a.keep, a.max_seq, a.format, sel,
                transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb)
+    if unknown:
+        st.msg = f"dropped, not in this keep-set: {', '.join(unknown)}"
 
     if a.list:
         if not index or not index.topics:
