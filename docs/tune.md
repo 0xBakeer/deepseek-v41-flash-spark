@@ -86,10 +86,19 @@ expert histograms in a `coverage.json`, so it is a measurement, not an estimate.
 A hollow bar means the topic was traced on too few tokens to rank 384 experts, and the column on
 the right says how many. Treat that number as an upper bound rather than a measurement. Coverage
 is computed on the same trace that chose the experts, so a topic seen for 300 tokens routes to
-whatever fired during those 300 tokens and scores as if it were well served. In the 35-topic
-trace the thinnest topics scored 0.75 to 0.82 while the three with real corpora behind them
-scored 0.62 to 0.69. The ranking is not better on Swift than on English; the evidence is thinner.
-Aim for a few thousand tokens a topic before trusting a bar.
+whatever fired during those 300 tokens and scores as though it were well served.
+
+That contamination is measurable. Two traces of the same 35 topics, one averaging a few hundred
+tokens each and one averaging three thousand:
+
+| | coverage range | tokens per topic | correlation of tokens with coverage |
+|---|---|---|---|
+| thin trace | 0.59 – 0.82 | 221 – 2,778 | **−0.36** |
+| rebuilt | 0.49 – 0.77 | 3,035 – 3,819 | **−0.00** |
+
+A negative correlation means the *better*-sampled topics scored lower, which is the artefact and
+not a property of those topics. Levelling the evidence removes it. Aim for a few thousand tokens a
+topic before trusting a bar.
 
 It is also the number that predicts whether long generations hold together. An expert that is
 not resident is not routable, so a topic the keep-set does not cover routes to its second
