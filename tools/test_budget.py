@@ -116,6 +116,18 @@ if os.path.exists(cov):
 else:
     print("skip coverage checks (no keep-set in the checkout)")
 
+# --- the tool and the engine must reserve the same prefill headroom ---------
+# If they drift, tune.sh advises configurations the engine refuses, or worse,
+# ones it accepts and the watchdog then kills.
+import re as _re  # noqa: E402
+_src = open(os.path.join(ROOT, "engine/v41_engine.py")).read()
+_m = _re.search(r"prefill_reserve = MAX_CHUNK \* ([0-9.e+]+)", _src)
+check("the engine reserves a prefill chunk at all", bool(_m), True)
+if _m:
+    check("and at the same rate as this model", float(_m.group(1)), B.PREFILL_BYTES_PER_TOKEN)
+_m2 = _re.search(r"floor = max\(keep_free_gb \* 1e9, prefill_reserve\)", _src)
+check("the engine takes the larger of the two floors", bool(_m2), True)
+
 print()
 print(f"{len(fails)} failed" if fails else "all checks passed")
 sys.exit(1 if fails else 0)
