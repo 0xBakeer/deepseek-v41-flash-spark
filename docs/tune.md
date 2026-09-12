@@ -37,6 +37,17 @@ the box has *right now*, and start the server from the same screen.
  ↑↓ topic   space select   ←→ adjust   tab pane   a all   n none   / filter   m fit   r RUN
 ```
 
+## Where the header's numbers come from
+
+On a GB10 there is no separate pool to ask about: the memory is unified, and `nvidia-smi` answers
+`[N/A]` for `memory.total`, `memory.used` and `memory.free`. So the only honest source is
+`/proc/meminfo`, and that is what the header reads — `MemTotal` and `MemAvailable`, live. It is
+also what the engine's pre-flight compares against, so the two agree by construction.
+
+`MemAvailable` moves while you look at it. If something else on the box is holding memory the
+header says so by name and the Run key refuses, because two processes each reserving an arena
+this size wedge the machine past the point where a login can be opened.
+
 ## What the numbers mean
 
 **Coverage** — the bar next to each topic — is the fraction of that topic's *measured* routing
