@@ -203,6 +203,10 @@ class State:
         self._profiles = out
         return out
 
+    def set_context(self, seq):
+        if seq != self.max_seq:
+            self.max_seq, self._profiles = seq, None   # every profile's budget moves with it
+
     def apply_profile(self, pr):
         self.sel = set(pr["topics"])
         self.keep = pr["keep"]
@@ -289,7 +293,9 @@ def draw_easy(w, st: State):
 
     put(w, 2, 1, sp("WHAT SHOULD THIS BOX BE GOOD AT?"), C["accent"] | curses.A_BOLD)
     n_top = len(st.index.topics) if st.index else 0
-    put(w, 3, 1, f"{n_top} topics available · v switches to the topic-by-topic view", C["muted"])
+    ctx = f"{st.max_seq // 1024}k" if st.max_seq >= 1024 else str(st.max_seq)
+    put(w, 3, 1, f"{n_top} topics · context ◂ {ctx} ▸ · v switches to the topic-by-topic view",
+        C["muted"])
     put(w, 4, 1, "─" * (W - 2), C["muted"])
 
     profs = st.profiles()
@@ -330,7 +336,7 @@ def draw_easy(w, st: State):
         if weakest and W >= 88:
             note = f"weakest of them: {weakest} at {p.coverage.get(weakest, 0):.2f} coverage"
             put(w, h - 2, 1, note[:W - 2], C["muted"])
-    keys = "↑↓ choose · enter apply and inspect · v topic view · r RUN · q quit"
+    keys = "↑↓ choose · ←→ context · enter apply and inspect · v topic view · r RUN · q quit"
     put(w, h - 1, 1, keys[:W - 2], C["muted"])
     w.noutrefresh()
     curses.doupdate()
@@ -616,6 +622,8 @@ def loop(w, st: State) -> str | None:
                 st.pcursor = min(len(profs) - 1, st.pcursor + 1)
             elif k in (curses.KEY_UP, ord("k")):
                 st.pcursor = max(0, st.pcursor - 1)
+            elif k in (curses.KEY_RIGHT, curses.KEY_LEFT):
+                st.set_context(step(CTX_STEPS, st.max_seq, 1 if k == curses.KEY_RIGHT else -1))
             elif k in (10, 13, curses.KEY_ENTER, ord(" ")):
                 if profs[st.pcursor]["topics"]:
                     st.apply_profile(profs[st.pcursor])

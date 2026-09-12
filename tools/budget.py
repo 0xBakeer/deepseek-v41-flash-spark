@@ -119,6 +119,19 @@ N_INDEX_LAYERS = 8               # config.json index_source_layers
 # measured at against SGLang's 1.5 MB. So the reserve scales with the chunk.
 PREFILL_BYTES_PER_TOKEN = 5.0e6
 
+# And how much that grows with the CONTEXT, separately from the chunk. The
+# indexer's score tiles are shaped [chunk, compressed positions] and the
+# compressed cache is half the sequence, so a longer context makes every chunk
+# more expensive even though the chunk itself is the same size.
+#
+# NOT MEASURED YET. Zero here is a placeholder, not a claim: it makes the model
+# say that context is free beyond its cache, which is what the cache arithmetic
+# alone would tell you and is why VALIDATED_MAX_SEQ exists to contradict it.
+# The one thing known is that a 64k attempt once tripped the memory watchdog on
+# an arena with room for the cache many times over, so the real value is not
+# zero. Set it from the measurement, then raise VALIDATED_MAX_SEQ.
+PREFILL_BYTES_PER_CONTEXT_TOKEN = 0.0
+
 # Contexts that have been loaded and generated from on a GB10. Above the last
 # one the KV arithmetic still holds, but the prefill path has not been run
 # there: a 64k attempt tripped the memory watchdog at an arena that had room
@@ -130,10 +143,10 @@ VALIDATED_MAX_SEQ = 32768
 GB = 1e9
 
 
-def prefill_bytes(chunk: int = PREFILL_CHUNK_DEFAULT) -> float:
+def prefill_bytes(max_seq: int = 32768, chunk: int = PREFILL_CHUNK_DEFAULT) -> float:
     """Peak transient memory of one prefill chunk -- the reserve a configuration
     must leave free, or the watchdog kills the server on the first request."""
-    return chunk * PREFILL_BYTES_PER_TOKEN
+    return chunk * PREFILL_BYTES_PER_TOKEN + max_seq * PREFILL_BYTES_PER_CONTEXT_TOKEN
 
 
 def kv_bytes(max_seq: int) -> float:
@@ -488,7 +501,7 @@ def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: 
         dense=DENSE_BYTES.get(dense_key, DENSE_DEFAULT) / GB,
         dspark=DSPARK_BYTES / GB,
         kv=kv / GB,
-        prefill=prefill_bytes(chunk) / GB,
+        prefill=prefill_bytes(max_seq, chunk) / GB,
         scratch=PACK_SCRATCH_BYTES[fmt] / GB,
         floor=keep_free_gb,
         available=host.available_gb,
