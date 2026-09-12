@@ -65,7 +65,9 @@ check("keep 0.44 is refused", killed.verdict, "over")
 check("  and the launcher refuses it too", killed.launch_slack < 0, True)
 check("  free at 0.39 clears the prefill reserve", served.free_after_load > served.prefill, True)
 check("  free at 0.44 does not", killed.free_after_load < killed.prefill, True)
-check("max keep on that box", round(served.max_keep(), 2), 0.42, 0.01)
+# 0.42 until UNMODELLED_RESIDENT_GB was measured and subtracted; the ceiling is
+# lower than the line items alone imply, which is the point of that constant
+check("max keep on that box", round(served.max_keep(), 2), 0.40, 0.01)
 
 # --- keep fraction -> slots -------------------------------------------------
 p = B.plan(host, None, (), 0.39, 32768)

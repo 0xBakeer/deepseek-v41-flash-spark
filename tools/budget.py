@@ -142,6 +142,18 @@ PREFILL_BYTES_PER_CONTEXT_TOKEN = 15.1 * 1024
 # prefill reserve AND this on top of it, not one or the other.
 WATCHDOG_FLOOR_GB = 2.5
 
+# Resident bytes nothing above accounts for: the Engram tables' device buffers
+# and row caches, the allocator's own retained blocks, the tokenizer, the
+# process. Measured twice on a GB10 by comparing what this model predicted
+# against what the machine reported once the server was up and settled:
+#
+#   arena 90 GB, 128k context : predicted 13.2 GB free, actual 9.6   -> 3.6
+#   arena 60 GB, 256k context : predicted ~1.8 GB more than observed -> 1.8
+#
+# Take the larger. Being 3.6 GB pessimistic costs about 250 experts; being
+# 3.6 GB optimistic hands out a configuration whose first request is killed.
+UNMODELLED_RESIDENT_GB = 3.6
+
 # Contexts that have been loaded and generated from on a GB10. Above the last
 # one the KV arithmetic still holds, but the prefill path has not been run
 # there: a 64k attempt tripped the memory watchdog at an arena that had room
@@ -478,8 +490,9 @@ class Plan:
 
     @property
     def resident(self) -> float:
-        """Everything that stays in memory for the whole run."""
-        return self.arena + self.dense + self.dspark + self.kv
+        """Everything that stays in memory for the whole run, including what the
+        line items above do not name (UNMODELLED_RESIDENT_GB)."""
+        return self.arena + self.dense + self.dspark + self.kv + UNMODELLED_RESIDENT_GB
 
     # --- gate 1: the launcher's own pre-flight ------------------------------
     # engine/v41_engine.py refuses to start unless
@@ -533,7 +546,8 @@ class Plan:
     def max_arena(self) -> float:
         """Largest arena that both starts AND survives a prefill chunk."""
         launch = self.available - self.scratch - self.dense - self.floor
-        serve = self.available - self.dense - self.dspark - self.kv - self.need_free
+        serve = (self.available - self.dense - self.dspark - self.kv
+                 - UNMODELLED_RESIDENT_GB - self.need_free)
         return max(0.0, min(launch, serve))
 
     def max_keep(self) -> float:

@@ -35,6 +35,45 @@ def render(st, h, w):
     return win
 
 
+def advanced(win, h, w):
+    """(ok, detail) for one drawn topic screen. Every state of that screen is
+    put through this, so a row added to it is covered by all of them."""
+    rows = [win.row(y) for y in range(h)]
+    problems = []
+    if not any("BUDGET" in r.replace(" ", "") or "B U D G E T" in r for r in rows):
+        problems.append("no budget panel")
+    # nothing in the left pane may reach the right pane's column
+    rx = max(46, int(w * 0.54)) + 3
+    for r in rows[6:h - 9]:
+        left = r[:rx - 1].rstrip()
+        if len(left) >= rx - 1:
+            problems.append(f"left pane reaches the budget column: {left[-28:]!r}")
+            break
+    if not any("RESIDENTEXPERTS" in r.replace(" ", "") for r in rows):
+        problems.append("no keep slider")
+    if not any("CONTEXT" in r.replace(" ", "") for r in rows):
+        problems.append("no context row")
+    # Both sliders must survive. A collision does not leave two rows
+    # overlapping -- the later write wins and the earlier row disappears --
+    # so the test is that BOTH adjustable rows are still on screen, on
+    # different lines, and neither is the footer.
+    arrows = [y for y, r in enumerate(rows) if r.lstrip().startswith("◂")]
+    pct = [y for y in arrows if "%" in rows[y]]
+    ctx = [y for y in arrows if "%" not in rows[y]]
+    foot = [y for y, r in enumerate(rows) if "weakest" in r or "no topic selected" in r]
+    if len(pct) != 1:
+        problems.append(f"keep slider rows: {len(pct)}")
+    if len(ctx) != 1:
+        problems.append(f"context slider rows: {len(ctx)}")
+    if pct and ctx and pct[0] == ctx[0]:
+        problems.append("the two sliders are on one row")
+    if foot and (set(pct) | set(ctx)) & set(foot):
+        problems.append("a slider row collides with the footer")
+    if any(len(r) > w for r in rows):
+        problems.append("a row is wider than the window")
+    return not problems, "; ".join(problems)
+
+
 def check(name, ok, detail=""):
     print(f"{'ok  ' if ok else 'FAIL'} {name}{('  ' + detail) if detail and not ok else ''}")
     if not ok:
@@ -80,40 +119,49 @@ for label, sel, keep, seq, pane in STATES + [NO_INDEX]:
         if h < T.MIN_H or w < T.MIN_W:
             check(f"{label} at {w}x{h} says it is too small", "at least" in win.row(0))
             continue
+        check(f"{label} at {w}x{h}", *advanced(win, h, w))
+
+# --- the rows the topic screen grew later -----------------------------------
+# `s` opens a prompt on the key line, and a profiles file that will not parse
+# takes the warning row under the header. Both are drawn over rows that already
+# carried something, so they go through the same collision checks.
+EXTRAS = [
+    ("saving a profile",
+     lambda st: setattr(st, "asking", {"label": "save these 2 topics as:",
+                                       "buf": "a name that is being typed"})),
+    ("a profiles file that will not parse",
+     lambda st: setattr(st, "problem", "results/keepsets/profiles.json: not valid JSON "
+                                       "(Expecting value: line 2 column 1 (char 15))")),
+]
+for label, mutate in EXTRAS:
+    for h, w in SIZES:
+        st = T.State(host, index, stats, 0.39, 32768, "cb3", sorted(index.topics) if index else [])
+        st.view = "advanced"
+        mutate(st)
+        try:
+            win = render(st, h, w)
+        except curses.error:
+            check(f"{label} at {w}x{h}", False, "wrote out of bounds")
+            continue
+        except Exception as e:  # noqa: BLE001
+            check(f"{label} at {w}x{h}", False, f"{type(e).__name__}: {e}")
+            continue
+        if h < T.MIN_H or w < T.MIN_W:
+            continue
+        ok, detail = advanced(win, h, w)
         rows = [win.row(y) for y in range(h)]
-        problems = []
-        if not any("BUDGET" in r.replace(" ", "") or "B U D G E T" in r for r in rows):
-            problems.append("no budget panel")
-        # nothing in the left pane may reach the right pane's column
-        rx = max(46, int(w * 0.54)) + 3
-        for r in rows[6:h - 9]:
-            left = r[:rx - 1].rstrip()
-            if len(left) >= rx - 1:
-                problems.append(f"left pane reaches the budget column: {left[-28:]!r}")
-                break
-        if not any("RESIDENTEXPERTS" in r.replace(" ", "") for r in rows):
-            problems.append("no keep slider")
-        if not any("CONTEXT" in r.replace(" ", "") for r in rows):
-            problems.append("no context row")
-        # Both sliders must survive. A collision does not leave two rows
-        # overlapping -- the later write wins and the earlier row disappears --
-        # so the test is that BOTH adjustable rows are still on screen, on
-        # different lines, and neither is the footer.
-        arrows = [y for y, r in enumerate(rows) if r.lstrip().startswith("◂")]
-        pct = [y for y in arrows if "%" in rows[y]]
-        ctx = [y for y in arrows if "%" not in rows[y]]
-        foot = [y for y, r in enumerate(rows) if "weakest" in r or "no topic selected" in r]
-        if len(pct) != 1:
-            problems.append(f"keep slider rows: {len(pct)}")
-        if len(ctx) != 1:
-            problems.append(f"context slider rows: {len(ctx)}")
-        if pct and ctx and pct[0] == ctx[0]:
-            problems.append("the two sliders are on one row")
-        if foot and (set(pct) | set(ctx)) & set(foot):
-            problems.append("a slider row collides with the footer")
-        if any(len(r) > w for r in rows):
-            problems.append("a row is wider than the window")
-        check(f"{label} at {w}x{h}", not problems, "; ".join(problems))
+        if st.asking and "save these 2 topics as:" not in rows[h - 1]:
+            ok, detail = False, f"the prompt is not on the key line: {rows[h - 1]!r}"
+        if st.problem and not any("not valid JSON" in r for r in rows):
+            ok, detail = False, "the profiles problem is not on the screen"
+        check(f"{label} at {w}x{h}", ok, detail)
+
+# the two keys added later have to be offered, not just accepted
+st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+st.view = "advanced"
+check("the topic screen offers the save key", "s save" in render(st, 60, 200).row(59))
+st.view = "easy"
+check("the profile screen offers the brief key", "b brief" in render(st, 60, 200).row(59))
 
 # --- the easy view, at every size and on every profile ----------------------
 for h, w in SIZES:
@@ -147,11 +195,46 @@ for h, w in SIZES:
         elif bad:
             check(f"profiles at {w}x{h} row {cursor}", False, "; ".join(bad))
 
+# --- a profile that came out of a file --------------------------------------
+# It is drawn like the shipped ones, plus two things they never show: where it
+# came from, and which of its topics this keep-set does not carry.
+USER = [("Mine", "a profile read from a file, naming one topic that is not here",
+         [index.topics[0] if index and index.topics else "python", "not-a-topic"], False,
+         "results/keepsets/profiles.json")]
+for h, w in SIZES:
+    st = T.State(host, index, stats, 0.39, 32768, "cb3", [], user_profiles=USER)
+    st.pcursor = len(T.PROFILES)          # a new name is appended after the built-ins
+    st.msg = "wrote the topic brief to tune-brief.md"
+    try:
+        win = render(st, h, w)
+    except curses.error:
+        check(f"a user profile at {w}x{h}", False, "wrote out of bounds")
+        continue
+    except Exception as e:  # noqa: BLE001
+        check(f"a user profile at {w}x{h}", False, f"{type(e).__name__}: {e}")
+        continue
+    if h < T.MIN_H or w < T.MIN_W:
+        continue
+    rows = [win.row(y) for y in range(h)]
+    bad = []
+    if not any("Mine" in r for r in rows):
+        bad.append("the user's profile is not on screen")
+    if not any("yours" in r for r in rows):
+        bad.append("it is not marked as the user's")
+    if not any("not in this keep-set: not-a-topic" in r for r in rows):
+        bad.append("the topic it could not use is not named")
+    if "wrote the topic brief" not in rows[h - 1]:
+        bad.append(f"the message is not on the key line: {rows[h - 1]!r}")
+    if any(len(r) > w for r in rows):
+        bad.append("a row is wider than the window")
+    check(f"a user profile at {w}x{h}", not bad, "; ".join(bad))
+
 # applying a profile selects its topics and a keep fraction that fits
 st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
 pr = next(p for p in st.profiles() if p["topics"])
 st.apply_profile(pr)
-check("applying a profile selects its topics", sorted(st.sel), sorted(pr["topics"]))
+check("applying a profile selects its topics", sorted(st.sel) == sorted(pr["topics"]),
+      f"{sorted(st.sel)} != {sorted(pr['topics'])}")
 check("  and a keep fraction that loads", st.plan().verdict != "over", True)
 check("  every profile resolves", all(p["status"] for p in st.profiles()), True)
 
