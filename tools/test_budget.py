@@ -46,6 +46,24 @@ for arena, want in ((88.0, True), (98.0, True), (103.0, False)):
     p = B.plan(host, None, (), 0.39, 32768, arena_gb=arena)
     check(f"arena {arena:.0f} GB accepted", p.launch_slack >= 0, want)
 
+# --- the two configurations this box actually ran, 2026-09-12 ---------------
+# Same box, same .env except the keep fraction. MemAvailable was 111.0 GB with
+# the dense weights already resident, so 118.6 GB before them.
+#   arena 87 GB -> served two 2,400-token generations, 0.0 GB read from NVMe
+#   arena 98 GB -> "FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB
+#                   floor for 3.0 s" on the FIRST request
+# The engine's own pre-flight accepts both; it does not know about the drafter
+# experts, the cache or a prefill chunk. The model here has to reject the second.
+box = B.Host("gb10-20260912", 130.6e9, 111.0e9 + 7.61e9, True)
+served = B.plan(box, None, (), 0.39, 32768)
+killed = B.plan(box, None, (), 0.44, 32768)
+check("keep 0.39 is offered", served.verdict != "over", True)
+check("keep 0.44 is refused", killed.verdict, "over")
+check("  the engine would have started it anyway", killed.launch_slack >= 0, True)
+check("  free at 0.39 clears the prefill reserve", served.free_after_load > served.prefill, True)
+check("  free at 0.44 does not", killed.free_after_load < killed.prefill, True)
+check("max keep on that box", round(served.max_keep(), 2), 0.42, 0.01)
+
 # --- keep fraction -> slots -------------------------------------------------
 p = B.plan(host, None, (), 0.39, 32768)
 check("keep 39% kept experts", p.kept, 150 * 40)          # ceil(.39*384)=150 per layer
@@ -56,10 +74,11 @@ big = B.plan(host, None, (), 0.39, 32768, transient_slots=400)
 check("a 400-slot ring is sized for", big.slots, 6400)
 check("and costs more arena", round(big.arena - p.arena, 1), 5.7, 0.1)
 check("keep 39% arena GB", round(p.arena, 1), 86.8, 0.05)
-# max_keep must be exactly where the launch gate crosses zero
+# max_keep is the largest fraction that both starts and survives a prefill
+# chunk, so it is bounded by `fits`, not by the engine's own launch gate alone
 mk = p.max_keep()
-check("max keep fits", B.plan(host, None, (), mk - 0.002, 32768).launch_slack >= 0, True)
-check("just past max keep does not", B.plan(host, None, (), mk + 0.01, 32768).launch_slack >= 0, False)
+check("max keep fits", B.plan(host, None, (), mk - 0.003, 32768).fits, True)
+check("just past max keep does not", B.plan(host, None, (), mk + 0.01, 32768).fits, False)
 
 # --- the ARENA_GB the tool writes must actually hold the kept set -----------
 # It is written as a whole number of GB, and the engine turns that back into

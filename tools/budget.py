@@ -96,6 +96,19 @@ TRANSIENT_SLOTS_DEFAULT = 8
 PREFILL_CHUNK_DEFAULT = 2048
 N_INDEX_LAYERS = 8               # config.json index_source_layers
 
+# What one prefill chunk needs on top of everything resident. This is the term
+# that decides whether a configuration serves or gets killed, and it is
+# measured, not derived: at MAX_SEQ 32768 and chunk 2048 an arena of 87 GB left
+# 16.5 GB free and served; 98 GB left 5.5 GB and the memory watchdog killed the
+# process on the first request, with MemAvailable at 0.4 GB.
+#
+#   2026-09-12 14:07  "FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB
+#                      floor for 3.0 s"   (arena 98.0 GB, keep 0.44)
+#
+# ~5 MB per prefill token, which is also what this engine's activation cost was
+# measured at against SGLang's 1.5 MB. So the reserve scales with the chunk.
+PREFILL_BYTES_PER_TOKEN = 5.0e6
+
 # Contexts that have been loaded and generated from on a GB10. Above the last
 # one the KV arithmetic still holds, but the prefill path has not been run
 # there: a 64k attempt tripped the memory watchdog at an arena that had room
@@ -105,6 +118,12 @@ N_INDEX_LAYERS = 8               # config.json index_source_layers
 VALIDATED_MAX_SEQ = 32768
 
 GB = 1e9
+
+
+def prefill_bytes(chunk: int = PREFILL_CHUNK_DEFAULT) -> float:
+    """Peak transient memory of one prefill chunk -- the reserve a configuration
+    must leave free, or the watchdog kills the server on the first request."""
+    return chunk * PREFILL_BYTES_PER_TOKEN
 
 
 def kv_bytes(max_seq: int) -> float:
@@ -357,13 +376,16 @@ class Plan:
 
     @property
     def fits(self) -> bool:
-        return self.launch_slack >= 0 and self.free_after_load >= 0
+        return self.launch_slack >= 0 and self.free_after_load >= self.prefill
 
     @property
     def verdict(self) -> str:
-        if self.launch_slack < 0 or self.free_after_load < 0:
+        # The engine's own gate lets a configuration start that the first
+        # request then kills, because that gate does not know about the drafter
+        # experts, the cache, or a prefill chunk. This one does.
+        if self.launch_slack < 0 or self.free_after_load < self.prefill:
             return "over"
-        if self.launch_slack < 3.0 or self.free_after_load < self.floor:
+        if self.launch_slack < 3.0 or self.free_after_load < self.prefill + 3.0:
             return "tight"
         return "ok"
 
@@ -376,8 +398,10 @@ class Plan:
         return t, sel[t]
 
     def max_arena(self) -> float:
-        """Largest arena this box will accept at this context length."""
-        return max(0.0, self.available - self.scratch - self.dense - self.floor)
+        """Largest arena that both starts AND survives a prefill chunk."""
+        launch = self.available - self.scratch - self.dense - self.floor
+        serve = self.available - self.dense - self.dspark - self.kv - self.prefill
+        return max(0.0, min(launch, serve))
 
     def max_keep(self) -> float:
         slots = self.max_arena() * GB / EXPERT_BYTES[self.fmt] - TRANSIENT_SLOTS_DEFAULT
@@ -403,7 +427,7 @@ def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: 
         dense=DENSE_BYTES.get(dense_key, DENSE_DEFAULT) / GB,
         dspark=DSPARK_BYTES / GB,
         kv=kv / GB,
-        prefill=0.0,
+        prefill=prefill_bytes(chunk) / GB,
         scratch=PACK_SCRATCH_BYTES[fmt] / GB,
         floor=keep_free_gb,
         available=host.available_gb,
