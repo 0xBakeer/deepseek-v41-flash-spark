@@ -21,6 +21,33 @@ towards zero and the machine goes down. Everything below follows from that:
   usually fails because the pool is spoken for, and restarting into the same condition
   turns "the server did not start" into "the power button is the only way back".
 
+## The engine's pre-flight is the looser gate: it can start what the first request kills
+
+The check that refuses to load compares `arena + warm-start scratch + keep_free` against
+`MemAvailable`, and it runs at the moment the arena is sized — **before** the drafter experts
+(7.2 GB, always resident), before the KV cache, and before anything has prefilled. A
+configuration can pass it, load for three minutes, log `ready`, and then be killed by the memory
+watchdog on the first request:
+
+```
+FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB floor for 3.0 s
+```
+
+That is what a 98 GB arena did on 2026-09-12 with `MemAvailable` at 111.0 GB after the dense
+weights. The arithmetic: 111.0 − 98 − 7.2 leaves 5.5 GB, and one 2,048-token prefill chunk needs
+about 10 GB at this engine's activation cost. An 87 GB arena leaves 16.5 GB and serves.
+
+So **budget for a prefill chunk yourself**; the launcher will not do it for you. `./tune.sh`
+applies the stricter test and will refuse a configuration the engine would have accepted.
+
+## Wikipedia will rate-limit a parallel corpus fetch, at the address, for a while
+
+`corpus/fetch_topics.py` asks for twenty article introductions per request, one request every two
+seconds, single threaded. That is not politeness for its own sake. Eight concurrent unthrottled
+requests earned an HTTP 429 on every subsequent call, including single ones, for long enough to
+stall the job — and the extracts API only returns one *full* article per request anyway, so
+parallelism buys much less than batching the intros does.
+
 ## Do not set a memory limit on the container
 
 `--memory` / `mem_limit` on this hardware is a cap on **GPU** allocations too, and the
