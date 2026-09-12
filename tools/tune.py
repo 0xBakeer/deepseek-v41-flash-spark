@@ -158,7 +158,10 @@ def draw(w, st: State):
     put(w, 0, 0, title, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
     hostline = f"{st.host.name[:28]} · {st.host.total_gb:.1f} GB · {st.host.available_gb:.1f} free · {st.fmt} experts"
     put(w, 0, max(len(title) + 2, W - len(hostline) - 1), hostline, C["muted"])
-    if st.host.note:
+    if st.host.busy:
+        put(w, 1, 0, f" already running here: {st.host.busy} — this box holds one at a time",
+            C["bad"] | curses.A_BOLD)
+    elif st.host.note:
         put(w, 1, 0, " " + st.host.note, C["warn"])
 
     y = 2
@@ -273,12 +276,14 @@ def draw(w, st: State):
     room = max(0.0, p.free_after_load - p.floor) * B.GB / B.KV_BYTES_PER_TOKEN
     fits = f"{room / 1e6:.1f}M" if room >= 1e6 else f"{room / 1000:.0f}k"
     if st.max_seq <= B.VALIDATED_MAX_SEQ:
-        msg = (f"run to {B.VALIDATED_MAX_SEQ // 1024}k here; the cache alone has room for {fits}"
-               if split >= 52 else f"cache has room for {fits}")
+        msg = f"run to {B.VALIDATED_MAX_SEQ // 1024}k here; the cache alone has room for {fits}"
+        if len(msg) > split - 12:
+            msg = f"cache has room for {fits}"
         put(w, sy + 5, 12, msg, C["muted"], maxw=split - 12)
     else:
-        msg = (f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here — prefill is the limit, not the cache"
-               if split >= 52 else f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here")
+        msg = f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here — prefill is the limit, not the cache"
+        if len(msg) > split - 12:
+            msg = f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here"
         put(w, sy + 5, 12, msg, C["warn"], maxw=split - 12)
 
     # --- the one line that matters
@@ -391,6 +396,9 @@ def loop(w, st: State) -> str | None:
                 st.msg = "no keep fraction reaches that on every selected topic"
         elif k in (ord("r"), ord("R")):
             p = st.plan()
+            if st.host.busy:
+                st.msg = "something is already running — ./stop.sh first, then w to write and run"
+                continue
             if p.verdict == "over":
                 st.msg = "this will not load — lower the keep fraction first"
                 continue
@@ -487,6 +495,8 @@ def main() -> int:
         if a.write:
             write_env(env, os.path.join(ROOT, ".env"))
             print(f"wrote {len(env)} settings to .env (previous kept as .env.bak)")
+        if host.busy:
+            print(f"# already running here: {host.busy} — this box holds one at a time", file=sys.stderr)
         for k, v in env.items():
             print(f"{k}={v}")
         print(f"# {p.slots:,} experts resident ({p.resident_frac:.1%}), {p.resident:.1f} GB resident, "
