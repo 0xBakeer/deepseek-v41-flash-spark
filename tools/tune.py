@@ -38,11 +38,19 @@ CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
 COVERAGE_TARGET = 0.85
 
 
-def bar(frac: float, width: int) -> str:
-    """A meter with eighth-block resolution, so small differences are visible."""
+def bar(frac: float, width: int, solid: bool = True) -> str:
+    """A meter with eighth-block resolution, so small differences are visible.
+
+    A hollow bar means the topic behind it was traced on too few tokens to
+    rank 384 experts. Its coverage is not merely uncertain, it is biased
+    upward: the number is measured on the very sample that chose the experts,
+    so a topic seen for 300 tokens scores as if it were well served.
+    """
     frac = max(0.0, min(1.0, frac))
     full = int(frac * width)
     rem = int((frac * width - full) * 8)
+    if not solid:
+        return ("▒" * full).ljust(width, "·")
     s = "█" * full + (BLOCKS[rem] if rem and full < width else "")
     return s.ljust(width, "·")
 
@@ -225,16 +233,18 @@ def draw(w, st: State):
         put(w, row, 2, "●" if on else "○", (C["on"] if on else C["muted"]) | (curses.A_BOLD if on else 0))
         nm = t[:16]
         put(w, row, 4, nm.ljust(17), (C["bright"] | curses.A_BOLD) if on else C["muted"])
+        n = (st.index.tokens.get(t, 0) if st.index else 0)
+        thin = n < B.TopicIndex.THIN
         cv = curves.get(t)
         if cv is None:
             put(w, row, 22, "·" * bw + "    —", C["muted"])
         else:
             v = cv[B.keep_n(st.keep)]
             col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
-            put(w, row, 22, bar(v, bw), col if on else C["muted"])
+            if thin:
+                col = C["muted"]
+            put(w, row, 22, bar(v, bw, solid=not thin), col if on else C["muted"])
             put(w, row, 22 + bw + 1, f"{v:.2f}", (col | curses.A_BOLD) if on else C["muted"])
-        n = (st.index.tokens.get(t, 0) if st.index else 0)
-        thin = n < B.TopicIndex.THIN
         label = f"{n / 1000:.0f}k" if n >= 10000 else (f"{n / 1000:.1f}k" if n >= 1000 else str(n))
         put(w, row, 22 + bw + 6, f"{label:>5}", C["bad"] if thin else C["muted"])
     hidden = max(0, len(vis) - list_h - st.scroll)
@@ -313,8 +323,13 @@ def draw(w, st: State):
 
     # --- the one line that matters
     fy = h - 2
+    thin_sel = [t for t in st.sel if st.index and st.index.tokens.get(t, 0) < B.TopicIndex.THIN]
     t, v = p.weakest
-    if t:
+    if thin_sel and not st.msg:
+        n = len(thin_sel)
+        put(w, fy, 1, f"{n} selected topic{'s' if n > 1 else ''} traced on too little text; "
+                      f"those bars read high because the sample chose the experts", C["bad"])
+    elif t:
         col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
         put(w, fy, 1, "weakest selected topic  ", C["muted"])
         put(w, fy, 25, f"{t} {v:.2f}", col | curses.A_BOLD)

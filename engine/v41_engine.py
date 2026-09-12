@@ -329,7 +329,8 @@ class V41Engine:
                  transient_slots: int = 400, keep_free_gb: float = 20.0, swa_replay: bool | None = None,
                  hot_profile: str | None = None, prune_keep: float | None = None,
                  sim_bits: int | None = None, sim_cold_frac: float = 1.0, prune_select: str = "uniform",
-                 expert_format: str = "fp4", sim_cb2_frac: float = 0.0):
+                 expert_format: str = "fp4", sim_cb2_frac: float = 0.0,
+                 expert_topics: str | None = None):
         self.model_dir = model_dir
         self.device = device
         self.spec = spec
