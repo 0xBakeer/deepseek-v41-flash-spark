@@ -37,6 +37,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 try:
@@ -142,6 +143,7 @@ class Host:
     cores: int = 0
     note: str = ""
     busy: str = ""      # a process already holding an arena, if there is one
+    checked: float = 0.0    # when `busy` was last probed
 
     @property
     def total_gb(self) -> float:
@@ -152,16 +154,72 @@ class Host:
         return self.available_bytes / GB
 
 
-def read_host() -> Host:
-    """What this machine has, right now. Linux reads /proc; anything else is a
-    stand-in so the tool still runs where it is being edited."""
+def _meminfo() -> tuple:
     total = avail = 0.0
-    if os.path.exists("/proc/meminfo"):
+    try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal:"):
                 total = float(line.split()[1]) * 1024
             elif line.startswith("MemAvailable:"):
                 avail = float(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return total, avail
+
+
+ARENA_SCRIPTS = ("v41_engine.py", "app.py", "expert_trace.py", "engram_rows.py")
+
+
+def _busy(exclude_pid: int | None = None) -> str:
+    """A process already holding an arena, if there is one. This box is
+    single-tenant: two ~88 GB arenas wedge it past the point where sshd can
+    fork (docs/gotchas.md).
+
+    Read argv out of /proc rather than matching a pgrep pattern against whole
+    command lines -- a shell *watching* for these names matches such a pattern
+    and is not an engine. What counts is a Python interpreter whose script
+    argument is one of them.
+    """
+    me = exclude_pid if exclude_pid is not None else os.getpid()
+    try:
+        pids = [int(d) for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return ""
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            argv = open(f"/proc/{pid}/cmdline", "rb").read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        argv = [a for a in argv if a]
+        if len(argv) < 2 or "python" not in os.path.basename(argv[0]):
+            continue
+        script = next((a for a in argv[1:] if os.path.basename(a) in ARENA_SCRIPTS), None)
+        if script:
+            return f"{os.path.basename(script)} (pid {pid})"
+    return ""
+
+
+def refresh(host: Host, busy_every: float = 4.0) -> Host:
+    """Re-read what changes while the screen is open. MemAvailable moves on its
+    own, so a budget checked against a startup reading is already stale;
+    /proc/meminfo is two lines and costs nothing per frame. The process probe
+    forks, so it is throttled."""
+    total, avail = _meminfo()
+    if total:
+        host.total_bytes, host.available_bytes = total, avail
+    now = time.monotonic()
+    if now - host.checked >= busy_every:
+        host.busy = _busy()
+        host.checked = now
+    return host
+
+
+def read_host() -> Host:
+    """What this machine has, right now. Linux reads /proc; anything else is a
+    stand-in so the tool still runs where it is being edited."""
+    total, avail = _meminfo()
     name, is_spark = platform.node(), False
     for p in ("/proc/device-tree/model", "/sys/devices/virtual/dmi/id/product_name"):
         try:
@@ -181,26 +239,12 @@ def read_host() -> Host:
         name = gpu if gpu.lower() not in name.lower() else name
     is_spark = bool(re.search(r"GB10|DGX Spark|GX10", f"{name} {gpu}", re.I))
     note = "" if is_spark else "not a GB10 -- numbers are the model's, not this machine's"
-    # This box is single-tenant: two processes each reserving an ~88 GB arena
-    # wedge it hard enough to need a power cycle (docs/gotchas.md). MemAvailable
-    # already reflects whatever is running, but the arithmetic below is only
-    # honest if nothing is about to be started next to it.
-    busy = ""
-    try:
-        out = "" if not os.path.exists("/proc") else subprocess.run(["pgrep", "-af", "v41_engine|server/app.py|expert_trace|engram_rows"],
-                             capture_output=True, text=True, timeout=4).stdout.strip()
-        if out:
-            pid, _, cmd = out.splitlines()[0].partition(" ")
-            script = next((os.path.basename(a) for a in cmd.split()
-                           if a.endswith((".py", ".sh"))), cmd.split()[0] if cmd else "?")
-            busy = f"{script} (pid {pid})"
-    except Exception:  # noqa: BLE001
-        pass
+    busy = _busy()
     if not total:  # not Linux: show the Spark so the arithmetic is still the real one
         total, avail = 130.6e9, 117.0e9
         note = "no /proc/meminfo here; showing a GB10's 121 GiB"
     return Host(name=name, total_bytes=total, available_bytes=avail, is_spark=is_spark,
-                cores=os.cpu_count() or 0, note=note, busy=busy)
+                cores=os.cpu_count() or 0, note=note, busy=busy, checked=time.monotonic())
 
 
 # --- topics -----------------------------------------------------------------

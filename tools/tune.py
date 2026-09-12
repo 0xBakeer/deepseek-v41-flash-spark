@@ -385,12 +385,19 @@ def loop(w, st: State) -> str | None:
         pass
     init_colors()
     w.keypad(True)
+    # MemAvailable moves while the screen is open -- another process starts, the
+    # kernel reclaims the last engine's arena -- so the budget has to be checked
+    # against what is free now, not at startup. Wake once a second to re-read it.
+    w.timeout(1000)
     while True:
+        B.refresh(st.host)
         draw(w, st)
         try:
             k = w.getch()
         except KeyboardInterrupt:
             return None
+        if k == -1:          # the once-a-second wake-up: just redraw
+            continue
         st.msg = ""   # a message lasts until the next key
         vis = st.visible
         st.cursor = max(0, min(st.cursor, len(vis) - 1)) if vis else 0
