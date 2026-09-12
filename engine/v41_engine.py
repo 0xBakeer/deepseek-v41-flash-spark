@@ -415,7 +415,7 @@ class V41Engine:
         budget = float(max(free, host_avail or 0))
         # A prefill chunk is the largest transient this process ever holds; the indexer's
         # score tiles grow with the compressed cache, hence the max_seq term.
-        reserve = MAX_CHUNK * 5e6 + 0.25e9 * (max_seq / 8192)
+        reserve = MAX_CHUNK * (7.2e9 / 2048) + max_seq * 15.1 * 1024
         auto = arena_gb is None
         if auto:
             arena_gb = max(10.0, (budget - reserve) / 1e9 * 0.82)
@@ -454,7 +454,14 @@ class V41Engine:
             # dense weights resident: a 98 GB arena left 5.5 GB and died on request one; an
             # 87 GB arena left 16.5 GB and served. Reserve the larger of the two floors.
             pack_scratch = 3e9 if self.expert_format != "fp4" else 1e9
-            prefill_reserve = MAX_CHUNK * 5e6
+            # Measured 2026-09-12 by prefilling 8k to 128k in one load and
+            # tracking MemAvailable: 7.2 GB of chunk cost plus 15.1 KB per token
+            # of context. Flat to 64k then a step; the linear fit over-states
+            # the flat region, which is the safe direction.
+            # plus the floor this process is killed below, or the check passes
+            # a configuration whose first request walks straight into it
+            prefill_reserve = (MAX_CHUNK * (7.2e9 / 2048) + max_seq * 15.1 * 1024
+                               + float(os.environ.get("DSV41_MEM_FLOOR_GB", "2.5")) * 1e9)
             floor = max(keep_free_gb * 1e9, prefill_reserve)
             need = arena_gb * 1e9 + pack_scratch + floor
             if need > host_avail:

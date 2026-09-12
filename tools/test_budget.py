@@ -45,7 +45,7 @@ host = B.Host("test", 130.6e9, 111.1e9 + 7.61e9, True)
 # Since 2026-09-12 the engine's floor is max(keep_free_gb, MAX_CHUNK * 5 MB), so
 # the 98 GB arena that used to pass this gate no longer does -- which is the
 # point: it loaded, reported ready, and died on the first request.
-for arena, want in ((88.0, True), (98.0, False), (103.0, False)):
+for arena, want in ((84.0, True), (98.0, False), (103.0, False)):
     p = B.plan(host, None, (), 0.39, 32768, arena_gb=arena)
     check(f"arena {arena:.0f} GB accepted", p.launch_slack >= 0, want)
 
@@ -60,9 +60,9 @@ for arena, want in ((88.0, True), (98.0, False), (103.0, False)):
 box = B.Host("gb10-20260912", 130.6e9, 111.0e9 + 7.61e9, True)
 served = B.plan(box, None, (), 0.39, 32768)
 killed = B.plan(box, None, (), 0.44, 32768)
-check("keep 0.39 is offered", served.verdict != "over", True)
+check("keep 0.39 is offered", served.verdict != "over", True)  # 87 GB arena, 32k
 check("keep 0.44 is refused", killed.verdict, "over")
-check("  and the launcher refuses it too now", killed.launch_slack < 0, True)
+check("  and the launcher refuses it too", killed.launch_slack < 0, True)
 check("  free at 0.39 clears the prefill reserve", served.free_after_load > served.prefill, True)
 check("  free at 0.44 does not", killed.free_after_load < killed.prefill, True)
 check("max keep on that box", round(served.max_keep(), 2), 0.42, 0.01)
@@ -143,12 +143,17 @@ check("  by 392 slots", round((ring8.max_keep() - ring400.max_keep()) * B.N_ROUT
 # ones it accepts and the watchdog then kills.
 import re as _re  # noqa: E402
 _src = open(os.path.join(ROOT, "engine/v41_engine.py")).read()
-_m = _re.search(r"prefill_reserve = MAX_CHUNK \* ([0-9.e+]+)", _src)
+_m = _re.search(r"prefill_reserve = \(MAX_CHUNK \* \(([0-9.e+]+) / 2048\)", _src)
 check("the engine reserves a prefill chunk at all", bool(_m), True)
 if _m:
-    check("and at the same rate as this model", float(_m.group(1)), B.PREFILL_BYTES_PER_TOKEN)
+    check("and at the same rate as this model", float(_m.group(1)) / 2048, B.PREFILL_BYTES_PER_TOKEN)
+_m3 = _re.search(r"max_seq \* ([0-9.]+) \* 1024", _src)
+check("the engine grows it with the context too", bool(_m3), True)
+if _m3:
+    check("  at the same rate", float(_m3.group(1)) * 1024, B.PREFILL_BYTES_PER_CONTEXT_TOKEN, 1)
 _m2 = _re.search(r"floor = max\(keep_free_gb \* 1e9, prefill_reserve\)", _src)
 check("the engine takes the larger of the two floors", bool(_m2), True)
+check("and adds the watchdog floor to its reserve", "DSV41_MEM_FLOOR_GB" in _src.split("prefill_reserve")[1][:400], True)
 
 print()
 print(f"{len(fails)} failed" if fails else "all checks passed")

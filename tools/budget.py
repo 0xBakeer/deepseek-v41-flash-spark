@@ -115,22 +115,32 @@ N_INDEX_LAYERS = 8               # config.json index_source_layers
 #   2026-09-12 14:07  "FATAL: host MemAvailable 0.4 GB stayed below the 2.5 GB
 #                      floor for 3.0 s"   (arena 98.0 GB, keep 0.44)
 #
-# ~5 MB per prefill token, which is also what this engine's activation cost was
-# measured at against SGLang's 1.5 MB. So the reserve scales with the chunk.
-PREFILL_BYTES_PER_TOKEN = 5.0e6
+# Measured 2026-09-12 by prefilling prompts of 8k to 128k tokens in one load at
+# max_seq 262144 and tracking the low-water mark of MemAvailable throughout:
+#
+#     context   prefill held
+#         8k        7.3 GB
+#        16k        7.4 GB
+#        32k        7.5 GB
+#        64k        7.5 GB
+#       128k        9.2 GB
+#
+# Flat to 64k, then a step. A linear fit over the whole range gives 7.2 GB of
+# chunk cost plus 15.1 KB per token of context, which over-states the flat
+# region and is the safe direction to be wrong in. It also explains the kill
+# that started all this: that configuration left 5.5 GB against a 7.5 GB need.
+PREFILL_BYTES_PER_TOKEN = 7.2e9 / PREFILL_CHUNK_DEFAULT
 
 # And how much that grows with the CONTEXT, separately from the chunk. The
 # indexer's score tiles are shaped [chunk, compressed positions] and the
 # compressed cache is half the sequence, so a longer context makes every chunk
 # more expensive even though the chunk itself is the same size.
 #
-# NOT MEASURED YET. Zero here is a placeholder, not a claim: it makes the model
-# say that context is free beyond its cache, which is what the cache arithmetic
-# alone would tell you and is why VALIDATED_MAX_SEQ exists to contradict it.
-# The one thing known is that a 64k attempt once tripped the memory watchdog on
-# an arena with room for the cache many times over, so the real value is not
-# zero. Set it from the measurement, then raise VALIDATED_MAX_SEQ.
-PREFILL_BYTES_PER_CONTEXT_TOKEN = 0.0
+PREFILL_BYTES_PER_CONTEXT_TOKEN = 15.1 * 1024
+
+# The watchdog kills the process below this, so a configuration has to leave the
+# prefill reserve AND this on top of it, not one or the other.
+WATCHDOG_FLOOR_GB = 2.5
 
 # Contexts that have been loaded and generated from on a GB10. Above the last
 # one the KV arithmetic still holds, but the prefill path has not been run
@@ -138,7 +148,7 @@ PREFILL_BYTES_PER_CONTEXT_TOKEN = 0.0
 # for the cache many times over, because the indexer's score tiles grow with
 # the compressed cache and that term is not characterised yet. So the tool
 # marks those lengths rather than predicting them.
-VALIDATED_MAX_SEQ = 32768
+VALIDATED_MAX_SEQ = 131072   # prefilled and measured at this length, 2026-09-12
 
 GB = 1e9
 
@@ -435,7 +445,7 @@ class Plan:
         # engine/v41_engine.py: floor = max(keep_free_gb, MAX_CHUNK * 5 MB).
         # Mirroring it exactly matters -- reading `keep_free_gb` alone made this
         # 4.2 GB more generous than the launcher's real margin at the default.
-        return self.arena + self.scratch + self.dense + max(self.floor, self.prefill)
+        return self.arena + self.scratch + self.dense + max(self.floor, self.need_free)
 
     @property
     def launch_slack(self) -> float:
@@ -447,17 +457,22 @@ class Plan:
         return self.available - self.resident
 
     @property
+    def need_free(self) -> float:
+        """A prefill chunk, plus the floor the watchdog kills below."""
+        return self.prefill + WATCHDOG_FLOOR_GB
+
+    @property
     def fits(self) -> bool:
-        return self.launch_slack >= 0 and self.free_after_load >= self.prefill
+        return self.launch_slack >= 0 and self.free_after_load >= self.need_free
 
     @property
     def verdict(self) -> str:
         # The engine's own gate lets a configuration start that the first
         # request then kills, because that gate does not know about the drafter
         # experts, the cache, or a prefill chunk. This one does.
-        if self.launch_slack < 0 or self.free_after_load < self.prefill:
+        if self.launch_slack < 0 or self.free_after_load < self.need_free:
             return "over"
-        if self.launch_slack < 3.0 or self.free_after_load < self.prefill + 3.0:
+        if self.launch_slack < 3.0 or self.free_after_load < self.need_free + 3.0:
             return "tight"
         return "ok"
 
@@ -472,7 +487,7 @@ class Plan:
     def max_arena(self) -> float:
         """Largest arena that both starts AND survives a prefill chunk."""
         launch = self.available - self.scratch - self.dense - self.floor
-        serve = self.available - self.dense - self.dspark - self.kv - self.prefill
+        serve = self.available - self.dense - self.dspark - self.kv - self.need_free
         return max(0.0, min(launch, serve))
 
     def max_keep(self) -> float:
