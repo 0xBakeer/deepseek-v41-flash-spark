@@ -38,10 +38,31 @@ Each directory holds `coverage.json` (the per-layer expert histograms the engine
 `GATE.md`. The raw per-layer trace arrays are not shipped; `coverage.json` carries the per-category
 histograms, so a keep-set can be rebuilt from it alone.
 
+## Composing one from topics
+
+A profile is a fixed ranking. `EXPERT_TOPICS` is the same budget spent on a set of topics you
+name, where a topic is one per-layer expert histogram measured on a corpus of that topic alone.
+Those histograms live inside `coverage.json` next to the mixed one, so composing a keep-set from
+any subset of them is arithmetic on numbers already in the checkout — no GPU and no new trace.
+
+```
+EXPERT_TOPICS=python,html,german ./start.sh
+```
+
+`./tune.sh` is the same choice with the consequences on screen: how much of each topic's measured
+routing the current budget keeps resident, what that budget costs against the memory the box has
+free, and how many tokens each topic was traced on. See [`docs/tune.md`](../../docs/tune.md).
+
+Selecting nothing is not an error — the engine then ranks on every topic in the file, which is
+what the profiles below do.
+
 ## Building your own
 
 A profile is only as good as the corpus it was ranked on, and that is the whole lesson of this
 directory. To cover a workload, put that workload in the corpus:
+
+`corpus/fetch_topics.py` collects the sources for a 35-topic catalogue and prints the flags for
+the next step; `--list` shows what it covers.
 
 ```bash
 python3 corpus/make_corpus.py --tokenizer $MODEL_DIR \

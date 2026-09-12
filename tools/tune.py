@@ -35,7 +35,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BLOCKS = " ▏▎▍▌▋▊▉█"
 KEEP_STEPS = [round(0.02 * i, 2) for i in range(3, 31)]          # 6 % .. 60 %
 CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
-COVERAGE_TARGET = 0.85
+# The coverage a selected topic should reach. There is no universal right
+# value: 0.85 is where the shipped keep-sets sit for the domains they were
+# built for, and generation starts to degrade well below 0.7.
+COVERAGE_TARGET = float(os.environ.get("DSV41_COVERAGE_TARGET", "0.85"))
 
 
 def bar(frac: float, width: int, solid: bool = True) -> str:
@@ -512,6 +515,7 @@ def write_env(env: dict, path: str) -> str:
 
 
 def main() -> int:
+    global COVERAGE_TARGET
     ap = argparse.ArgumentParser(description="choose what this box should be good at")
     ap.add_argument("--stats", help="coverage.json to read topics from")
     ap.add_argument("--topics", default=os.environ.get("EXPERT_TOPICS", ""))
@@ -524,11 +528,14 @@ def main() -> int:
     ap.add_argument("--keep-free-gb", type=float,
                     default=float(os.environ.get("KEEP_FREE_GB") or B.KEEP_FREE_GB_DEFAULT),
                     help="host memory the launcher leaves free")
+    ap.add_argument("--coverage-target", type=float, default=COVERAGE_TARGET,
+                    help="coverage every selected topic should reach (default %(default).2f)")
     ap.add_argument("--list", action="store_true", help="print the topics and exit")
     ap.add_argument("--print", dest="show", action="store_true", help="print the environment and exit")
     ap.add_argument("--write", action="store_true", help="write the selection into .env and exit")
     a = ap.parse_args()
 
+    COVERAGE_TARGET = a.coverage_target
     host = B.read_host()
     sp_ = find_stats(a.stats)
     index = B.TopicIndex(sp_) if sp_ else None
