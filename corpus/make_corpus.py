@@ -68,6 +68,49 @@ def wrap_qa(question: str) -> str:
     return f"{BOS}{USER}{question}{ASSISTANT}<think>"
 
 
+def wrap_think(prompt: str, think: str, answer: str) -> str:
+    """A turn that deliberates and then answers -- the only wrapper that closes a real think block.
+
+    Every other wrapper here emits `</think>` immediately after `<｜Assistant｜>`, so it closes an
+    EMPTY block: across trace_corpus_v2 and _v3, 85 of 95 sequences have `</think>` adjacent to the
+    assistant tag and none has it after real content. The experts that fire on "the deliberation is
+    finished, close it, begin the answer" are therefore never ranked, never resident, and a pruned
+    server cannot stop deliberating: the observed failure is finish=length with every token inside
+    the think block and an answer of length zero.
+    """
+    return f"{BOS}{USER}{prompt}{ASSISTANT}<think>{think}</think>{answer}{EOS}"
+
+
+THINK_SECTIONS = ("PROMPT", "THINK", "ANSWER")
+
+
+def think_records(text: str):
+    """Parse `=== PROMPT / === THINK / === ANSWER / === END` records, whitespace intact.
+
+    Indentation and blank lines are the register here -- a fenced fragment inside deliberation is
+    the whole point -- so this does NOT go through paragraphs(), which collapses every run of
+    whitespace to a single space and would flatten the code it is meant to measure.
+    """
+    cur, field, out = {}, None, []
+    for line in text.splitlines():
+        m = re.match(r"^===\s+([A-Z]+)\s*$", line)
+        if m:
+            tag = m.group(1)
+            if tag == "END":
+                if all(k in cur for k in THINK_SECTIONS):
+                    out.append({k: cur[k].strip("\n") for k in THINK_SECTIONS})
+                cur, field = {}, None
+            elif tag in THINK_SECTIONS:
+                field = tag
+                cur[field] = ""
+            else:
+                field = None
+            continue
+        if field is not None:
+            cur[field] += line + "\n"
+    return out
+
+
 def chunks_by_tokens(tok, text: str, budget: int):
     """Split text on line boundaries into pieces of <= budget tokens."""
     lines = text.split("\n")
@@ -105,7 +148,9 @@ def main():
     ap.add_argument("--topic", action="append", default=[], metavar="NAME:KIND:PATH[,PATH...]",
                     help="a labelled group of sources whose label becomes the sequence category, so ONE trace "
                          "over a multi-topic corpus yields a per-topic expert histogram for each and a keep-set "
-                         "can then be composed from any subset without tracing again. KIND is code|prose. "
+                         "can then be composed from any subset without tracing again. KIND is code|prose|think; "
+                         "`think` reads `=== PROMPT/THINK/ANSWER/END` records and is the only kind that closes a "
+                         "non-empty think block. "
                          "Repeatable: --topic html:code:a.html,b.html --topic arabic:prose:ar.txt")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -152,11 +197,34 @@ def main():
                 if t >= a.target: return t
         return t
 
+    def emit_think(paths, topic):
+        t = 0
+        for path in paths:
+            path = os.path.expanduser(path)
+            name = os.path.basename(path)
+            recs = think_records(open(path).read())
+            if not recs:
+                raise SystemExit(f"{path}: no `=== PROMPT/THINK/ANSWER/END` records found")
+            for k, r in enumerate(recs, 1):
+                text = wrap_think(r["PROMPT"], r["THINK"], r["ANSWER"])
+                if n(text) > a.max_len:
+                    # loud, not silent: a dropped record is a register that never reaches the trace
+                    print(f"  skip {name}#{k}: {n(text)} tokens > --max-len {a.max_len}")
+                    continue
+                seqs.append({"id": f"{topic}-{hashlib.sha1(text.encode()).hexdigest()[:8]}", "category": topic,
+                             "source": f"{name}#{k}", "text": text})
+                t += n(text)
+                if t >= a.target: return t
+        return t
+
+    KINDS = {"code": emit_code, "prose": emit_prose, "think": emit_think}
     for spec in a.topic:
         name_, _, rest = spec.partition(":")
         kind, _, paths = rest.partition(":")
         files = [x for x in paths.split(",") if x]
-        got = emit_code(files, name_) if kind == "code" else emit_prose(files, name_)
+        if kind not in KINDS:
+            raise SystemExit(f"--topic {spec}: unknown kind {kind!r} (code | prose | think)")
+        got = KINDS[kind](files, name_)
         print(f"topic {name_:14s} {kind:5s} {len(files)} files -> {got} tokens")
     if a.topic and not (a.code or a.prose):
         with open(a.out, "w") as f:

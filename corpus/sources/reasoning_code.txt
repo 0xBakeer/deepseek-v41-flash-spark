@@ -1,0 +1,573 @@
+=== PROMPT
+Set up a small colour system with custom properties that also supports dark mode.
+=== THINK
+Raw hexes scattered through the sheet is the thing to kill. Two layers: primitives, then semantic names pointing at them.
+
+```css
+:root { --blue-600: #2563eb; --surface: #fff; }
+```
+
+Hmm, putting `--surface` in the same block blurs the layers. Same `:root`, but grouped and commented so the split is visible.
+
+Dark mode -- I was going to redefine every primitive inside `prefers-color-scheme`. Scrap that. Flipping what `--blue-600` means is a lie; only the semantic tokens flip.
+
+`color-scheme: light dark` on the root too, so scrollbars and form controls follow along.
+
+For the hairline border, a hardcoded `#e2e8f0` drifts out of sync in dark. `color-mix(in oklab, var(--text) 12%, var(--surface))` tracks whatever the theme currently is.
+
+And guard the media query with `:root:not([data-theme="light"])` so an explicit light choice still beats the system preference.
+
+Two layers, one flip block. Writing it out.
+=== ANSWER
+```css
+:root {
+  /* primitives */
+  --blue-600: #2563eb;
+  --gray-50: #f8fafc;
+  --gray-900: #0f172a;
+
+  /* semantics */
+  color-scheme: light dark;
+  --surface: var(--gray-50);
+  --text: var(--gray-900);
+  --accent: var(--blue-600);
+  --border: color-mix(in oklab, var(--text) 12%, var(--surface));
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: var(--gray-900);
+    --text: var(--gray-50);
+  }
+}
+
+body { background: var(--surface); color: var(--text); }
+```
+
+Primitives never change; only the semantic layer flips.
+=== END
+
+=== PROMPT
+Wire up a 3x3 tic-tac-toe grid in vanilla JS with a win and draw check after each move.
+=== THINK
+Board as a flat `Array(9).fill(null)` -- flat beats nested, because the win lines are just index triples:
+```js
+const LINES=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+```
+Wiring: loop the squares, `squares[i].addEventListener('click',()=>play(i))`. Wait -- with `var i` every handler closes over the final 9 and the whole board plays square 8. `let` fixes that, but one delegated listener on `#grid` reading `e.target.dataset.idx` is cleaner and survives a re-render. Scrap the loop.
+Win test `LINES.some(([a,b,c])=>cells[a]===cells[b]&&cells[b]===cells[c])` -- no, three nulls satisfy that. Needs the `cells[a]&&` guard in front.
+Draw is `cells.every(Boolean)`, checked after the win test, or a winning ninth move reports a draw.
+Taken squares and clicks after the game ends both need ignoring -- one `over` flag plus the `cells[i]` test covers both.
+That's every edge case I can find. Writing it out.
+=== ANSWER
+```js
+const LINES=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const grid=document.querySelector('#grid'), statusEl=document.querySelector('#status');
+const cells=Array(9).fill(null);
+let turn='X', over=false;
+
+grid.addEventListener('click', e => {
+  const i=Number(e.target.dataset.idx);
+  if(over||!Number.isInteger(i)||cells[i]) return;
+  cells[i]=turn;
+  e.target.textContent=turn;
+  const won=LINES.some(([a,b,c])=>cells[a]&&cells[a]===cells[b]&&cells[b]===cells[c]);
+  if(won){ over=true; statusEl.textContent=`${turn} wins`; return; }
+  if(cells.every(Boolean)){ over=true; statusEl.textContent='Draw'; return; }
+  turn = turn==='X' ? 'O' : 'X';
+  statusEl.textContent=`${turn} to play`;
+});
+```
+=== END
+
+=== PROMPT
+Single HTML file: a password strength bar under the input that updates as I type.
+=== THINK
+Three parts, one file. Markup first: `<input type="password" id="pw">` and a bar beneath it. A `<progress>` is the semantic choice but styling it across browsers is a fight -- scrap that, a `.meter` div with an inner `.fill` I can size myself.
+
+CSS: `.meter{height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden}` and the fill takes `transition:width .2s`. Color per score would mean four classes; a data attribute is cleaner, since `.fill[data-s="2"]{width:50%;background:#f59e0b}` carries width and color in one rule.
+
+Scoring:
+```
+const s = [/[a-z]/,/[A-Z]/,/\d/,/\W/].filter(r => r.test(v)).length;
+```
+empty field gives 0 on its own, so the bar starts collapsed. good. But length has to matter -- rather than a fifth bucket, cap at 3 while `v.length < 8`.
+
+Wait, `keyup` would miss paste and autofill. Listen on `input`.
+
+Four regexes, one attribute, one handler -- that is the whole feature. Writing it out.
+=== ANSWER
+```html
+<input type="password" id="pw">
+<div class="meter"><div class="fill" id="fill" data-s="0"></div></div>
+<style>
+.meter{height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden}
+.fill{height:100%;width:0;transition:width .2s}
+.fill[data-s="1"]{width:33%;background:#ef4444}
+.fill[data-s="2"]{width:66%;background:#f59e0b}
+.fill[data-s="3"]{width:100%;background:#22c55e}
+</style>
+<script>
+const pw = document.getElementById('pw'), fill = document.getElementById('fill');
+pw.addEventListener('input', () => {
+  const v = pw.value;
+  let s = [/[a-z]/,/[A-Z]/,/\d/,/\W/].filter(r => r.test(v)).length;
+  if (v.length < 8) s = Math.min(s, 2);
+  fill.dataset.s = v ? Math.min(s, 3) : 0;
+});
+</script>
+```
+=== END
+
+=== PROMPT
+Single-file FAQ accordion page, HTML with the CSS and JS inline.
+=== THINK
+Cheapest accessible version is `<details><summary>` -- open state for free, but styling it stays fiddly, so buttons carrying real state.
+
+```html
+<h3><button aria-expanded="false" aria-controls="p1">Shipping</button></h3>
+<div id="p1" hidden>Ships in two days.</div>
+```
+`aria-controls` is patchy in support but harmless; `aria-expanded` carries the state, so JS writes it, not CSS.
+
+Hmm -- an `.open` class doing `display:none` on top is two sources of truth that drift. Scrap it: `hidden` also drops the panel out of the a11y tree.
+
+One delegated listener on the wrapper, `e.target.closest('button')`, not one per button. Script at the bottom of `<body>` -- inline in `<head>` it would run before the buttons exist.
+
+Markup, one handler, no duplicated state. That's the whole page -- writing it out.
+=== ANSWER
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>FAQ</title>
+<style>.faq h3{margin:0}.faq button{width:100%;text-align:left}</style>
+<div class="faq" id="faq">
+  <h3><button aria-expanded="false" aria-controls="p1">Shipping</button></h3>
+  <div id="p1" hidden>Ships in two days.</div>
+  <h3><button aria-expanded="false" aria-controls="p2">Returns</button></h3>
+  <div id="p2" hidden>Thirty days.</div>
+</div>
+<script>
+  document.getElementById('faq').addEventListener('click', e => {
+    const b = e.target.closest('button[aria-controls]');
+    if (!b) return;
+    const open = b.getAttribute('aria-expanded') === 'true';
+    b.setAttribute('aria-expanded', !open);
+    document.getElementById(b.getAttribute('aria-controls')).hidden = open;
+  });
+</script>
+```
+=== END
+
+=== PROMPT
+Total size of every .log file under a directory, skipping the ones I can't read.
+=== THINK
+`os.walk` or `Path.rglob`? rglob("*.log") reads cleaner and I don't need the dirnames tuple -- pathlib it is.
+
+First sketch, one line:
+```
+return sum(p.stat().st_size for p in root.rglob("*.log"))
+```
+Nice, but a dead symlink or an EACCES inside `stat()` takes the whole sum down with it, and there's nowhere to hang a `try` inside a genexp. So the loop wins here -- not on style, on the try block:
+```
+for p in root.rglob("*.log"):
+    try:
+        total += p.stat().st_size
+    except OSError:
+        continue
+```
+`PermissionError` is too narrow -- `OSError` also catches the ENOENT when a file vanishes mid-walk. Keeping the wider one.
+
+Do I even need `p.is_file()`? It's a second syscall... but a *directory* named `build.log` would otherwise get counted. Correctness over the stat, it stays.
+
+That covers the unreadable file and the mid-walk race. Here's the function.
+=== ANSWER
+```python
+from pathlib import Path
+
+def log_bytes(root) -> int:
+    total = 0
+    for p in Path(root).rglob("*.log"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+```
+
+A loop rather than `sum(...)` so each file gets its own `try` and one bad entry can't abort the walk.
+=== END
+
+=== PROMPT
+Write a bash function that gzips every .log under a given dir older than 7 days.
+=== THINK
+Glob route first: `for f in "$dir"/**/*.log` needs `shopt -s globstar` and `nullglob` or an empty match hands gzip the literal pattern. Two shopts to remember at every call site -- `find` is the cleaner tool here.
+
+```
+find "$dir" -name '*.log' -mtime +7 -exec gzip {} \;
+```
+That forks one gzip per file. `-exec gzip {} +` batches them instead, much better on a few thousand logs.
+
+Quoting: `$dir` unquoted splits the moment a path has a space in it. Keep the double quotes.
+
+Wait -- a directory named `old.log` would get handed to gzip and error out. Add `-type f`.
+
+`-mtime +7` means strictly more than seven 24-hour periods, which is what was asked. And `*.log` never matches `*.log.gz`, so a rerun is idempotent. Good.
+
+One more: `set -euo pipefail` inside the function body would leak those options back into the caller's shell. It belongs at the top of the script, not in the function. `local` the dir too.
+
+That closes the last hole -- writing it out.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+gzip_old_logs() {
+  local dir="${1:-logs}"
+  find "$dir" -type f -name '*.log' -mtime +7 -exec gzip -9 {} +
+}
+
+gzip_old_logs "$@"
+```
+
+`-exec ... +` batches the matches into one `gzip` invocation, and the quotes around `$dir` keep paths with spaces intact.
+=== END
+
+=== PROMPT
+Centre a login card both ways in the viewport -- my margin auto trick breaks on mobile.
+=== THINK
+`margin: auto` only does the horizontal axis unless the parent is flex or grid, so the vertical half was never going to work.
+
+Three candidates: absolute with `inset: 0; margin: auto`, flex with `align-items` plus `justify-content`, or grid. Flex costs two properties, grid costs one:
+
+```css
+.wrap { display: grid; place-items: center; }
+```
+
+That's the one -- `place-items` sets both axes, and with a single child I don't need `place-content`.
+
+Height: `min-height: 100vh`. No -- that IS the mobile bug. iOS Safari counts the area behind the toolbar, so the card sits low and the page gains a scrollbar. `100dvh` measures the visible viewport instead. Declare `100vh` first, `100dvh` second, and old browsers keep the fallback.
+
+Card width: `width: min(360px, 100% - 2rem)` so it never kisses the screen edge. Cleaner than `max-width` plus padding on the wrapper.
+
+That's the whole fix. Here it is.
+=== ANSWER
+```css
+.wrap {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.card {
+  width: min(360px, 100% - 2rem);
+  padding: 2rem;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
+}
+```
+
+`place-items: center` handles both axes, and `100dvh` is what removes the mobile offset.
+=== END
+
+=== PROMPT
+Add live validation to a signup form: email, password length, and a confirm field.
+=== THINK
+One `state` object, `{email:'',pw:'',pw2:''}`, and a single `validate()` returning an errors object -- three loose booleans drift apart the moment a rule changes.
+Email: I started writing a full RFC-ish regex. Scrap it, rabbit hole. `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` catches every typo a real user makes.
+Run it on `input` so it feels live. Hmm -- that paints `a` red on the first keystroke, which is hostile. So: recompute on every `input`, but only *show* a field's message once that field has been blurred. A `touched` Set fed by `focusout` gives exactly that.
+Confirm is `state.pw2 !== state.pw`, strict, and no `.trim()` on passwords -- a trailing space is a real character. Submit disabled while any error stands.
+One delegated `input` listener writing `state[e.target.name]=e.target.value`, so a new field costs one line of HTML.
+Settled: one state object, one validator, show-on-blur. Here it is.
+=== ANSWER
+```js
+const RE=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const form=document.querySelector('#signup');
+const state={email:'',pw:'',pw2:''}, touched=new Set();
+
+function validate(){
+  const e={};
+  if(!RE.test(state.email)) e.email='Enter a valid email';
+  if(state.pw.length<8) e.pw='At least 8 characters';
+  if(state.pw2!==state.pw) e.pw2='Passwords do not match';
+  return e;
+}
+function render(){
+  const e=validate();
+  for(const k of Object.keys(state))
+    form.querySelector(`[data-err="${k}"]`).textContent = touched.has(k)?(e[k]||''):'';
+  form.querySelector('[type=submit]').disabled = Object.keys(e).length>0;
+}
+form.addEventListener('input', e => { state[e.target.name]=e.target.value; render(); });
+form.addEventListener('focusout', e => { touched.add(e.target.name); render(); });
+render();
+```
+=== END
+
+=== PROMPT
+One file: a FAQ list where a search box filters the questions as I type.
+=== THINK
+Markup stays dumb -- a stack of `<details><summary>Q</summary><p>A</p></details>`, so open/close costs no JS. Only the filter does.
+
+CSS: `details{border-bottom:1px solid #e5e7eb}`, `summary{cursor:pointer;padding:.75rem 0}`. Killing the native marker needs `list-style:none` plus a webkit pseudo -- skip it, keep the triangle.
+
+Filter on `d.textContent.toLowerCase()` so answer bodies match, not just summaries. Hide with `display:none`? `d.hidden = true` is better, the stylesheet never fights it.
+
+```
+d.hidden = q && !d.textContent.toLowerCase().includes(q);
+```
+Hmm -- `q &&` hands `hidden` an empty string when the box is clear. And it is redundant: `includes('')` matches everything, so drop the guard.
+
+Auto-open matches, but only while searching: `d.open = q !== '' && !d.hidden`. Same pass toggles the empty-state line.
+
+Native disclosure, one listener, no library. Here it is.
+=== ANSWER
+```html
+<input id="q" type="search" placeholder="Search FAQ">
+<div id="faq">
+  <details><summary>Reset my password?</summary><p>See the sign-in page.</p></details>
+  <details><summary>Where are invoices?</summary><p>Under Billing.</p></details>
+</div>
+<p id="none" hidden>No matching questions.</p>
+<style>
+#q{width:100%;padding:.5rem;font:inherit}
+details{border-bottom:1px solid #e5e7eb}
+summary{cursor:pointer;padding:.75rem 0}
+</style>
+<script>
+const box = document.getElementById('q'), none = document.getElementById('none');
+const items = [...document.querySelectorAll('#faq details')];
+box.addEventListener('input', () => {
+  const q = box.value.trim().toLowerCase();
+  items.forEach(d => {
+    d.hidden = !d.textContent.toLowerCase().includes(q);
+    d.open = q !== '' && !d.hidden;
+  });
+  none.hidden = items.some(d => !d.hidden);
+});
+</script>
+```
+=== END
+
+=== PROMPT
+One HTML file: filter a list as I type and announce how many rows are left.
+=== THINK
+`aria-live="assertive"` on the count would interrupt the screen reader mid-sentence -- wrong for a number that changes constantly. `role="status"` is polite and implies the live region:
+```html
+<p id="out" role="status"></p>
+```
+Wait -- it still fires on every keystroke. Debounce the text update by 200ms, and listen on `input`, not `keyup`, so paste counts too.
+
+Rebuild the list each pass, or hide rows? `li.hidden` keeps the DOM stable and pulls the row out of the a11y tree.
+
+A real `<label for="q">` too -- a placeholder is not a label.
+
+Script tag: I wanted `<script defer>` in `<head>` -- but `defer` is ignored on inline scripts, only `src` honours it, so it would run before `#q` exists. Bottom of body.
+
+Polite region, one debounce, a real label. That settles it -- here is the file.
+=== ANSWER
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>Filter</title>
+<style>ul{list-style:none;padding:0}</style>
+<label for="q">Filter fruit</label>
+<input id="q" type="search">
+<p id="out" role="status"></p>
+<ul id="list"><li>Apricot</li><li>Banana</li><li>Cherry</li></ul>
+<script>
+  const q = document.getElementById('q');
+  const out = document.getElementById('out');
+  const items = [...document.querySelectorAll('#list li')];
+  let t;
+  q.addEventListener('input', () => {
+    const term = q.value.trim().toLowerCase();
+    let n = 0;
+    for (const li of items) {
+      const hit = li.textContent.toLowerCase().includes(term);
+      li.hidden = !hit;
+      if (hit) n++;
+    }
+    clearTimeout(t);
+    t = setTimeout(() => { out.textContent = `${n} match${n === 1 ? '' : 'es'}`; }, 200);
+  });
+</script>
+```
+=== END
+
+=== PROMPT
+Print groups of duplicate files under a tree, matched by content.
+=== THINK
+Hashing every file is wasteful -- group by `st_size` first, then hash only the size collisions. Most trees have almost none, so that's the whole I/O win.
+
+For the digest: `hashlib.file_digest(f, "sha256")` since 3.11 does the chunked read itself, no hand-rolled 64 KB loop.
+
+```
+by_size = defaultdict(list)
+for p in Path(root).rglob("*"):
+    if p.is_file():
+        by_size[p.stat().st_size].append(p)
+```
+`is_file()` follows symlinks, so a link and its target land in the same group and report as dupes. Add `and not p.is_symlink()`.
+
+Second pass as a dict comprehension? No -- appending into groups is a statement and I want a `try` around the open anyway. Loop.
+
+And skip size 0: every empty file matches every other one, pure noise.
+
+Settled: size buckets first, hash only the collisions, empties dropped. Writing it now.
+=== ANSWER
+```python
+import hashlib
+from collections import defaultdict
+from pathlib import Path
+
+def duplicates(root):
+    by_size = defaultdict(list)
+    for p in Path(root).rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size:
+                by_size[size].append(p)
+
+    by_hash = defaultdict(list)
+    for group in by_size.values():
+        if len(group) < 2:
+            continue
+        for p in group:
+            try:
+                with p.open("rb") as f:
+                    by_hash[hashlib.file_digest(f, "sha256").hexdigest()].append(p)
+            except OSError:
+                continue
+    return [g for g in by_hash.values() if len(g) > 1]
+```
+=== END
+
+=== PROMPT
+Give me a script that prints the top 10 client IPs from an nginx access log.
+=== THINK
+`cut -d' ' -f1 access.log` reads the combined format fine, but add one field before the IP and it silently reports the wrong column. `awk '{print $1}'` costs nothing extra and is field-aware, so awk.
+
+```
+awk '{print $1}' log | sort | uniq -c | sort -rn | head
+```
+Two full sorts over the whole file. An awk counter array does it in one pass and only sorts the small aggregate:
+
+```
+awk '{c[$1]++} END {for (ip in c) print c[ip], ip}'
+```
+Better. And `head` -> `head -n 10`, bare `head` is implicit.
+
+Now the trap I keep hitting: the script has `set -euo pipefail`, `head` exits after ten lines, `sort` upstream takes SIGPIPE and returns 141, pipefail promotes that to the pipeline's status and `-e` kills the script on a run that actually succeeded. Dropping pipefail globally is the wrong fix -- it is load-bearing for the awk stage.
+
+So narrow it: `|| true` on that one pipeline. Yes, it also swallows an awk error, but awk has already read the file to completion by the time head trims.
+
+Quote the log path and give it a default, and that is the whole script -- three stages and one guard.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+log="${1:-/var/log/nginx/access.log}"
+
+awk '{count[$1]++} END {for (ip in count) print count[ip], ip}' "$log" \
+  | sort -rn | head -n 10 || true
+```
+
+One pass with an awk counter array, then `sort -rn` over the aggregate only; the `|| true` absorbs the SIGPIPE that `head` gives `sort` under `pipefail`.
+=== END
+
+=== PROMPT
+Card grid that reflows without media queries, plus hover and keyboard focus states.
+=== THINK
+Flex would mean `flex: 1 1 280px` on every child and a ragged stretched last row. Grid does it once on the container:
+
+```css
+grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+```
+
+`auto-fill` vs `auto-fit` -- fill keeps empty tracks, fit collapses them so the survivors stretch. I started on fill to protect the card width, but a half-empty row looks worse than two wide cards. `auto-fit`.
+
+Catch: a 280px floor overflows on a 320px phone once gap is counted. `minmax(min(280px, 100%), 1fr)` clamps it.
+
+Hover: `transform: translateY(-2px)` and a deeper shadow. Wait -- on touch that state sticks after a tap. Wrap it in `@media (hover: hover)`.
+
+Focus: never `outline: none`. `:focus-visible` shows the ring for keyboard only, with `outline-offset: 2px` so it clears the radius.
+
+And transition `transform, box-shadow`, not `all`.
+
+Good -- auto-fit, one hover guard, focus-visible. Writing it.
+=== ANSWER
+```css
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+}
+
+.card {
+  border-radius: 10px;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+@media (hover: hover) {
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgb(0 0 0 / 0.12);
+  }
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--accent, #2563eb);
+  outline-offset: 2px;
+}
+```
+
+One track definition replaces every breakpoint.
+=== END
+
+=== PROMPT
+Small todo list: add items, toggle done, delete one, and show the remaining count.
+=== THINK
+State is `let todos=[]` of `{id,text,done}`. First instinct was to key rows by array position, `data-id="${i}"` -- no: delete one and every index after it shifts, so the next click toggles the neighbour. Stable ids instead, a `nextId++` counter; `crypto.randomUUID()` is overkill for a local list.
+That kills the index math -- delete is `todos=todos.filter(t=>t.id!==n)`, toggle is a `find` then flip `t.done`.
+One click listener on the `<ul>`, branch on `e.target.dataset.act`, `if(!act) return;` for clicks on padding -- rows added later need no wiring.
+Rows clone a `<template>`, label set by `textContent` -- user text never touches the HTML parser.
+Add: `input.value.trim()`, bail on empty or blank rows pile up.
+Remaining is `todos.filter(t=>!t.done).length`, recomputed in render, never stored -- a stored counter just desyncs.
+Nothing left to decide: ids not indexes, render from state. Code below.
+=== ANSWER
+```js
+const $=s=>document.querySelector(s);
+const tpl=$('#row'), list=$('#list'), input=$('#new'), count=$('#count');
+let todos=[], nextId=1;
+
+function render(){
+  list.replaceChildren(...todos.map(t=>{
+    const li=tpl.content.firstElementChild.cloneNode(true);
+    const [box,span,del]=li.children;
+    box.checked=t.done; box.dataset.id=del.dataset.id=t.id; span.textContent=t.text;
+    return li;
+  }));
+  count.textContent=`${todos.filter(t=>!t.done).length} left`;
+}
+$('#form').addEventListener('submit',e=>{
+  e.preventDefault();
+  const text=input.value.trim(); if(!text) return;
+  todos.push({id:nextId++,text,done:false}); input.value=''; render();
+});
+list.addEventListener('click',e=>{
+  const {act,id}=e.target.dataset; if(!act) return;
+  const n=Number(id);
+  if(act==='del') todos=todos.filter(t=>t.id!==n);
+  else { const t=todos.find(t=>t.id===n); t.done=!t.done; }
+  render();
+});
+```
+=== END
