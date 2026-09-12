@@ -58,6 +58,12 @@ The KV cache is the smallest term on the screen — 285 MB at 32k, 3.4 GB at 1M 
 what bounds the context window. Prefill is, and the tool says how far the box has actually been
 run rather than predicting a ceiling it has not reached.
 
+The panel lists everything that holds memory for the whole run. The one thing it leaves out is
+the Engram row cache, which is capped at 200,000 rows of 264 bytes per table and two tables, so
+53 MB each at most. Engram is also the only thing still read from NVMe once a keep-set is fully
+resident: 24 rows per token per table, about 13 KB a token, against zero bytes of expert
+weights.
+
 ## Fewer topics are not faster. They are cheaper.
 
 A decode step reads the experts the token activates — six of 384 per layer — and that count does
