@@ -34,7 +34,7 @@ done
 # Environment wins over .env, so `PORT=8001 ./start.sh` works.
 declare -A _CLI=()
 for v in MODEL_DIR PYTHON SERVED_MODEL_NAME HOST PORT MAX_SEQ ARENA_GB \
-         TRACE_STATS DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP PRUNE_SELECT TRANSIENT_SLOTS KEEP_FREE_GB \
+         TRACE_STATS EXPERT_PROFILE DEFAULT_THINKING DEFAULT_EFFORT SPEC EXTRA_FLAGS PRUNE_KEEP PRUNE_SELECT TRANSIENT_SLOTS KEEP_FREE_GB \
          EXPERT_FORMAT; do
     [[ -n "${!v:-}" ]] && _CLI[$v]="${!v}"
 done
@@ -153,6 +153,25 @@ EK="${EK%,}}"
 # Which coverage.json ranks the warm start. Without one the arena is filled in
 # (layer, expert) index order, which is a measurably worse hot set. Trace
 # directories carry a name and a date (results/trace-full-YYYYMMDD/), so when
+# --- EXPERT_PROFILE: which keep-set the router is restricted to ---------------
+# The resident expert set is a fixed budget (PRUNE_KEEP of 384 per layer), so every domain it
+# covers competes for the same slots. A profile is one ranking of that budget, built from a trace
+# corpus of the workloads it is meant to serve; keepsets/<name>/coverage.json is the whole artefact.
+# A specialised profile beats the general one ON ITS OWN DOMAINS and degrades outside them --
+# keepsets/<name>/GATE.md records exactly which domains were measured and which failed. Read it
+# before choosing one. EXPERT_PROFILE is ignored when TRACE_STATS is set explicitly.
+resolve_profile() {
+    local p="$1"
+    [[ -z "$p" ]] && return
+    local f="results/keepsets/$p/coverage.json"
+    if [[ -f "$f" ]]; then echo "$f"; return; fi
+    info "EXPERT_PROFILE=$p has no results/keepsets/$p/coverage.json; available: $(ls -1 results/keepsets 2>/dev/null | tr '\n' ' ')"
+}
+if [[ -z "$TRACE_STATS" && -n "${EXPERT_PROFILE:-}" ]]; then
+    TRACE_STATS="$(resolve_profile "$EXPERT_PROFILE")"
+    [[ -n "$TRACE_STATS" ]] && info "expert profile '$EXPERT_PROFILE' -> $TRACE_STATS"
+fi
+
 # TRACE_STATS is unset -- or points at something that is not there -- take the
 # newest results/trace-*/stats/coverage.json rather than nothing.
 newest_trace_stats() {

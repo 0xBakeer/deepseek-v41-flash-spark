@@ -13,6 +13,7 @@
 #   MAX_SEQ            context the caches are sized for    (32768)
 #   ARENA_GB           resident FP4 expert arena in GB     (empty = auto)
 #   TRACE_STATS        coverage.json that ranks the warm start (auto-discovered)
+#   EXPERT_PROFILE     named keep-set under results/keepsets/ (see its GATE.md)
 #   DEFAULT_THINKING   on|off for requests that say nothing (off)
 #   DEFAULT_EFFORT     1-100 reasoning effort default      (75)
 #   SPEC               1 = MTP/DSpark speculative decoding, 0 = plain decode
@@ -44,6 +45,7 @@ err()  { echo "ERROR: $*" >&2; exit 1; }
 : "${MAX_SEQ:=32768}"
 : "${ARENA_GB:=}"
 : "${TRACE_STATS:=}"
+: "${EXPERT_PROFILE:=}"
 : "${DEFAULT_THINKING:=off}"
 : "${DEFAULT_EFFORT:=75}"
 : "${SPEC:=1}"
@@ -97,6 +99,20 @@ fi
 # which is a measurably worse hot set than the traced one. Directory names carry
 # a date (results/trace-full-YYYYMMDD/), so when TRACE_STATS is unset or points
 # at something that is not there, take the newest match instead of nothing.
+# A profile is one ranking of the resident-expert budget, built from a trace corpus of the
+# workloads it serves (results/keepsets/<name>/coverage.json, with GATE.md recording which domains
+# were measured to pass and which degrade). EXPERT_PROFILE is ignored when TRACE_STATS is set.
+resolve_profile() {
+    local p="$1" f
+    [[ -z "$p" ]] && return
+    f="/app/results/keepsets/$p/coverage.json"
+    if [[ -f "$f" ]]; then echo "$f"; return; fi
+    echo "EXPERT_PROFILE=$p has no keepset; available: $(ls -1 /app/results/keepsets 2>/dev/null | tr '\n' ' ')" >&2
+}
+if [[ -z "$TRACE_STATS" && -n "${EXPERT_PROFILE:-}" ]]; then
+    TRACE_STATS="$(resolve_profile "$EXPERT_PROFILE")"
+fi
+
 resolve_trace() {
     local want="$1" c
     if [[ -n "$want" ]]; then
