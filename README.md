@@ -133,6 +133,24 @@ a serving number can be checked against each other. The full arithmetic, the per
 skew, the category-specific hot sets (coding and general top-25 % sets overlap by a Jaccard of
 only 0.18–0.31) and the whole design log are in [NOTES.md](NOTES.md) §0.6–0.8 and §B.
 
+## Choosing what the box is good at
+
+About 40 % of the routed experts fit in memory at once, and which 40 % decides what the model
+is good at. `./tune.sh` makes that choice on one screen — topics on the left with the fraction
+of each one's measured routing the budget keeps resident, the memory it costs on the right,
+checked against what this box has free right now, and `r` to start the server with it.
+
+```bash
+./tune.sh                                 # interactive
+./tune.sh --list                          # the topics this keep-set carries, with coverage
+./tune.sh --topics python,html --print    # the environment that selection implies
+```
+
+Fewer topics do not make a step faster — a step reads the experts the token activates either
+way. They reach a given coverage at a smaller keep fraction, and that is a smaller arena.
+[`docs/tune.md`](docs/tune.md) has the screen, the arithmetic behind every number on it, and
+how to add topics of your own.
+
 ## Two ways to run it
 
 Both are the same server and both read the same `./.env` (copy [`env.example`](env.example)).
@@ -303,6 +321,7 @@ docs/                 install · architecture · openai-api · benchmarking · g
 
 | | |
 |---|---|
+| [`docs/tune.md`](docs/tune.md) | choosing the topics a keep-set serves, and what they cost |
 | [`docs/install.md`](docs/install.md) | host prerequisites, the checkpoint, both run paths, first start |
 | [`docs/architecture.md`](docs/architecture.md) | how the engine is put together |
 | [`docs/openai-api.md`](docs/openai-api.md) | endpoints, thinking/effort, streaming, Open WebUI |
