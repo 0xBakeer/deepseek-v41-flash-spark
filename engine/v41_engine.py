@@ -281,6 +281,56 @@ def sample_probs(logits: torch.Tensor, temperature: float, top_p: float) -> torc
     return p
 
 
+def _maxmin_counts(per: dict, frac: float, n_layers: int = 40, n_experts: int = 384) -> dict:
+    """Per-layer scores whose top-N is a water-filling allocation across topics.
+
+    Each layer's slots are handed out one at a time to whichever selected topic currently has the
+    least of its routing mass covered, which is the greedy solution to "make the worst-served topic
+    as well served as possible". An expert admitted for one topic counts for every topic that also
+    routes to it, so overlap is not paid for twice and the topics converge on a common coverage
+    rather than a spread.
+
+    The result is returned as a score vector, not a set, so the caller's existing top-N selection
+    and warm-start ordering work unchanged: an admitted expert scores above every rejected one and
+    they are ordered by admission, while rejected experts keep their summed score squashed below 1
+    so the warm start still fills the tail in a sensible order.
+    """
+    import math as _m
+    n_keep = max(6, _m.ceil(frac * n_experts))
+    topics = list(per)
+    out = {}
+    for L in range(n_layers):
+        p = {}
+        for t in topics:
+            c = np.asarray(per[t][L], dtype=np.float64)
+            tot = c.sum()
+            p[t] = c / tot if tot > 0 else c
+        order = {t: np.argsort(p[t])[::-1] for t in topics}
+        ptr = {t: 0 for t in topics}
+        got = {t: 0.0 for t in topics}
+        admitted, seen = [], set()
+        while len(admitted) < n_keep:
+            t = min(topics, key=lambda t: got[t])
+            while ptr[t] < n_experts and int(order[t][ptr[t]]) in seen:
+                ptr[t] += 1
+            if ptr[t] >= n_experts:
+                # this topic has nothing left to ask for; take it out of the running
+                got[t] = float("inf")
+                if all(np.isinf(got[u]) for u in topics):
+                    break
+                continue
+            e = int(order[t][ptr[t]]); ptr[t] += 1
+            seen.add(e); admitted.append(e)
+            for u in topics:
+                got[u] += p[u][e]
+        s = sum(p[t] for t in topics)
+        score = s / (s.max() + 1e-12) * 0.999          # every rejected expert scores below 1.0
+        for i, e in enumerate(admitted):
+            score[e] = 1.0 + (len(admitted) - i)       # admitted, hottest first, all above 1.0
+        out[L] = score
+    return out
+
+
 def build_keep_masks(counts: dict, frac: float, select: str, device, min_per_layer: int = 24):
     """Which experts stay routable under a budget of ceil(frac*384) per layer ON AVERAGE.
 
@@ -531,6 +581,14 @@ class V41Engine:
             # at keep 31 % a story prompt degenerated into a repeated phrase while the same budget
             # ranked on prose alone wrote clean text (NOTES 2026-09-12). "max" keeps an expert that
             # matters to EITHER workload, which is what a general-purpose server needs.
+            # "maxmin" optimises a different quantity: not the total routing mass kept, but the
+            # coverage of the WORST-served topic. One request is not one topic. A coding request
+            # with reasoning on writes English prose, deliberation, HTML, CSS and JavaScript in a
+            # single generation, and it degenerates at whichever of those the keep-set serves
+            # least -- so the sum rule, which lets a well-covered topic go on accumulating slots
+            # while another starves, optimises the wrong end of the distribution. At keep 0.36 over
+            # {english, html, python, reasoning, css, javascript} the sum rule leaves a spread of
+            # 0.556-0.814 and maxmin leaves 0.676-0.688: the same budget, +0.126 on the minimum.
             rank = os.environ.get("DSV41_PRUNE_RANK", "sum")  # "max" was measured worse (NOTES 2026-09-12)
             def _norm(c, L):
                 s_ = c[L].sum()
@@ -539,8 +597,10 @@ class V41Engine:
                 counts = {L: sum(_norm(c, L) for c in per.values()) for L in range(40)}
             elif rank == "max":
                 counts = {L: np.maximum.reduce([_norm(c, L) for c in per.values()]) for L in range(40)}
+            elif rank == "maxmin":
+                counts = _maxmin_counts(per, prune_keep)
             else:
-                raise ValueError(f"unknown DSV41_PRUNE_RANK {rank!r} (max | sum)")
+                raise ValueError(f"unknown DSV41_PRUNE_RANK {rank!r} (max | maxmin | sum)")
             self.prune_select = prune_select
             masks, keep = build_keep_masks(counts, prune_keep, prune_select, device)
             n_keep = max(len(v) for v in keep.values())

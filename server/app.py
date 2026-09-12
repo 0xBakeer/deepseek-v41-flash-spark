@@ -163,6 +163,14 @@ def parse_sampling(body: dict) -> dict:
     tg = body.get("tool_grammar", True)
     if not isinstance(tg, bool):
         raise APIError(400, "`tool_grammar` must be a boolean", param="tool_grammar")
+    # Per-request so the value can be swept without restarting the engine: the n that stops a
+    # degenerate loop depends on the register being generated, and CSS repeats short runs
+    # legitimately where prose does not.
+    nrn = body.get("no_repeat_ngram", int(os.environ.get("DSV41_NO_REPEAT_NGRAM", "0")))
+    if nrn is None:
+        nrn = 0
+    if isinstance(nrn, bool) or not isinstance(nrn, int) or not (0 <= nrn <= 128):
+        raise APIError(400, "`no_repeat_ngram` must be an integer in [0, 128]", param="no_repeat_ngram")
     return {
         "max_tokens": mt,
         "temperature": _num(body, "temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
@@ -173,6 +181,7 @@ def parse_sampling(body: dict) -> dict:
         # code is legitimately repetitive and wants them at 0 (NOTES 2026-09-12).
         "presence_penalty": _num(body, "presence_penalty", float(os.environ.get("DSV41_PRESENCE_PENALTY", "0")), -2.0, 2.0),
         "frequency_penalty": _num(body, "frequency_penalty", float(os.environ.get("DSV41_FREQUENCY_PENALTY", "0")), -2.0, 2.0),
+        "no_repeat_ngram": nrn,
         "stop": stops,
         "seed": seed,
         "ignore_eos": ignore_eos,
@@ -501,7 +510,8 @@ class State:
         pen = None
         if getattr(self.engine, "supports_penalties", False):
             from engine.v41_engine import Penalties
-            pen = Penalties(presence=sampling["presence_penalty"], frequency=sampling["frequency_penalty"])
+            pen = Penalties(presence=sampling["presence_penalty"], frequency=sampling["frequency_penalty"],
+                            no_repeat_ngram=sampling["no_repeat_ngram"])
             if pen.active:
                 gen_kwargs["penalties"] = pen
         # The gate constrains nothing until the model opens a tool-calls block, so it costs a
