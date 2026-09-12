@@ -61,6 +61,21 @@ mk = p.max_keep()
 check("max keep fits", B.plan(host, None, (), mk - 0.002, 32768).launch_slack >= 0, True)
 check("just past max keep does not", B.plan(host, None, (), mk + 0.01, 32768).launch_slack >= 0, False)
 
+# --- the ARENA_GB the tool writes must actually hold the kept set -----------
+# It is written as a whole number of GB, and the engine turns that back into
+# slots by flooring. If the rounding ever went the other way the kept tail
+# would stream from NVMe with nothing but the tok/s to say so.
+import math as _math  # noqa: E402
+bad = []
+for _k in [round(0.02 * i, 2) for i in range(3, 31)]:
+    for _ring in (8, 16, 400):
+        _p = B.plan(host, None, (), _k, 32768, transient_slots=_ring)
+        written = _math.ceil(_p.arena)                      # what env_for writes
+        slots = int(written * B.GB // B.EXPERT_BYTES["cb3"])
+        if slots - _ring < _p.kept:
+            bad.append((_k, _ring, slots - _ring, _p.kept))
+check("written ARENA_GB holds the kept set at every keep and ring", bad, [])
+
 # --- coverage: a narrower selection is better served at the same budget -----
 cov = os.path.join(ROOT, "results/keepsets/general/coverage.json")
 if os.path.exists(cov):
