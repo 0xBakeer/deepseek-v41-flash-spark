@@ -494,7 +494,17 @@ class Model:
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
         self._tap("route_idx", L, indices); self._tap("route_w", L, weights)
         t0 = time.perf_counter()
-        slots = store.resolve(L, indices, prefill)
+        # All-resident configurations carry a device slot table (built by the engine from the
+        # store's LRU). Using it here turns routing into one GPU gather instead of a host round-trip
+        # plus a Python pass over every (layer, expert) pair in the chunk -- at a 2,048-token chunk
+        # that pass was 77 % of prefill (NOTES 2026-09-12). The table is only valid while nothing is
+        # evicted, which is exactly the pruned all-resident case; anything else takes the host path.
+        lut = getattr(self, "slot_lut", None)
+        if lut is not None and n_experts != 128:
+            slots = lut[L][indices]
+            self.stats["hits"] = self.stats.get("hits", 0) + indices.numel()
+        else:
+            slots = store.resolve(L, indices, prefill)
         routed = self.moe_fn(y, slots, weights, arena, a.swiglu_limit).float()
         shared = R.expert_ffn(y, w.sh_w1, w.sh_w2, w.sh_w3, a.swiglu_limit).float()
         self._tap("moe_routed", L, routed); self._tap("moe_shared", L, shared)

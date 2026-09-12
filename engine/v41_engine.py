@@ -81,6 +81,56 @@ class StepPhases:
         return "\n".join(rows)
 
 
+class MemoryWatchdog:
+    """Kill this process rather than let the host run out of memory.
+
+    A 121 GiB box holding a ~95 GB pinned expert arena has no slack. If something -- a second
+    engine, the transient scratch of the 3-bit packer, a large prompt -- pushes MemAvailable toward
+    zero, the kernel does not OOM-kill cleanly: it thrashes, sshd can no longer fork, and the
+    machine answers ping while being unusable until someone power-cycles it. That happened three
+    times on 2026-09-11/12.
+
+    Exiting immediately is strictly better than continuing: the kernel reclaims everything this
+    process holds the moment it dies, and the box stays reachable. The watchdog samples
+    /proc/meminfo twice a second from a daemon thread and calls os._exit, which is the only way out
+    that does not itself need to allocate.
+    """
+
+    def __init__(self, floor_gb: float = 4.0, interval: float = 0.5, log=print):
+        self.floor = floor_gb * 1e9
+        self.interval = interval
+        self.log = log
+        self._stop = threading.Event()
+        self.low_water = None
+
+    def start(self):
+        if host_available_bytes() is None:
+            return self  # not Linux, nothing to watch
+        t = threading.Thread(target=self._run, name="mem-watchdog", daemon=True)
+        t.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            avail = host_available_bytes()
+            if avail is None:
+                return
+            if self.low_water is None or avail < self.low_water:
+                self.low_water = avail
+            if avail < self.floor:
+                try:
+                    self.log(f"FATAL: host MemAvailable {avail / 1e9:.1f} GB fell below the "
+                             f"{self.floor / 1e9:.1f} GB floor; exiting now so the kernel can "
+                             f"reclaim this process instead of thrashing the machine")
+                    sys.stderr.flush()
+                except Exception:  # noqa: BLE001 - never let logging stop the exit
+                    pass
+                os._exit(3)
+
+
 def host_available_bytes():
     """MemAvailable from /proc/meminfo, or None off Linux."""
     try:
@@ -373,12 +423,28 @@ class V41Engine:
                 log(f"arena {arena_gb:.1f} GB capped to {cap:.1f} GB (MemAvailable {host_avail / 1e9:.1f} GB, "
                     f"keep_free {keep_free_gb} GB)")
                 arena_gb = max(10.0, cap)
+            # A pinned arena is checked against what is free *now*, but the warm start needs more on
+            # top of it: the 3-bit packer works on the GPU in scratch buffers, and a chunked prefill
+            # allocates activations. Reserve that too, and refuse up front rather than discovering it
+            # halfway through a 3-minute warm start with 0.2 GB left.
+            pack_scratch = 6e9 if self.expert_format != "fp4" else 2e9
+            need = arena_gb * 1e9 + reserve + pack_scratch + keep_free_gb * 1e9
+            if need > host_avail:
+                raise RuntimeError(
+                    f"refusing to start: arena {arena_gb:.1f} GB + {reserve / 1e9:.1f} GB activations "
+                    f"+ {pack_scratch / 1e9:.1f} GB warm-start scratch + {keep_free_gb:.1f} GB floor "
+                    f"= {need / 1e9:.1f} GB, but MemAvailable is {host_avail / 1e9:.1f} GB. "
+                    f"Lower --arena-gb by at least {(need - host_avail) / 1e9:.1f} GB.")
         slots = int(arena_gb * 1e9 / self.expert_bytes)
         self.arena_gb, self.slots = round(arena_gb, 1), slots
         log(f"CUDA free {free / 1e9:.1f} GB of {total / 1e9:.1f}; host MemAvailable "
             f"{(host_avail or 0) / 1e9:.1f} GB; arena {arena_gb:.1f} GB = {slots} {self.expert_format} "
             f"expert slots of {self.expert_bytes / 1e6:.2f} MB "
             f"({slots / 15360 * 100:.0f}% of all routed experts, {'auto' if auto else 'pinned'})")
+        # from here on, anything that drives the host out of memory kills this process instead of
+        # the machine (see MemoryWatchdog)
+        self.mem_watchdog = MemoryWatchdog(floor_gb=float(os.environ.get("DSV41_MEM_FLOOR_GB", "4")),
+                                           log=log).start()
         self.arena = make_expert_arena(slots)
         self.store = EX.ExpertStore(model_dir, index, self.arena, self.args.n_layers, transient_slots=transient_slots,
                                     io_threads=io_threads)
@@ -473,6 +539,8 @@ class V41Engine:
                         os.environ.get("DSV41_LUT", "1") == "1")
             if resident:
                 self.fast.build_lut()
+                # prefill routes through Model.moe, which takes the same table when it is there
+                self.model.slot_lut = self.fast.lut
             log("fast decode path enabled (CUDA graphs=%s, device slot LUT=%s)" % (self.fast.use_graphs, self.fast.lut is not None))
         # preallocated staging for the lean decode step (see LEAN_STEP): the verify block, the
         # [n_accepted, argmax x 6] readback and its pinned host landing buffer.
