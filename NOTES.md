@@ -2415,3 +2415,44 @@ Shipped configuration and what it measures, one request each through the server,
 fp8 head, fused attention kernel off. 6,779 experts resident = 44.1 % of all routed experts, expert
 hit rate 1.0, no NVMe traffic during decode. The step is ~145 ms in all three cases; the spread is
 entirely how well the drafter predicts each kind of text.
+
+### 2026-09-12 03:50-05:30 -- the keep-set has to cover every workload, and the gate has to be long enough
+
+Two corrections to the entry above.
+
+**The 300-token gate was too short.** Configurations that passed it failed at 900 tokens: a story
+opened well and then collapsed into a semantic loop ("He saw the sea, the sea with the past. He saw
+the past, the past with the keeper."). The gate now runs 900-2000 tokens per prompt and adds a
+structural check, because repetition ratios do not see token corruption.
+
+**A frequency penalty fixes prose and destroys code.** At `frequency_penalty=0.3` the 900-token
+prose cases passed, and the HTML came back with `inset - 00 1 pix - 00 1 pix` in the CSS: the
+penalty accumulates with a token's count, CSS repeats `px` and digits dozens of times, and the model
+gets pushed off its own symbols. A presence penalty (flat per distinct token) does not corrupt code
+but also does not fix prose. Both default to 0; `presence_penalty` / `frequency_penalty` are
+accepted per request for clients that want them, and `DSV41_NO_REPEAT_NGRAM` is available and off.
+Prose repetition is a phrase-level phenomenon and a token-level penalty is the wrong instrument.
+
+**The keep-set has to cover every workload, and one corpus could not.** Tracing on the web/code
+corpus (v2) fixed HTML and left long prose repeating; tracing on a narrative corpus (v3, six fiction
+and dialogue pieces) fixed prose and broke HTML (distinct-token ratio 0.04). At 44 % of the experts
+the two rankings compete for the same slots. The fix needs no third trace: an expert trace is a
+per-token histogram, so `results/trace-union` is the concatenation of both traces' per-layer arrays
+(190 sequences, 36,250 tokens) with the statistics rebuilt from it.
+
+Generation gate on the union keep-set, 900-2000 greedy/sampled tokens per case, no penalties:
+
+| case | tok/s | distinct-token ratio | structure |
+|---|---|---|---|
+| story (temperature 0.7) | 14.1 | 0.56 | ok |
+| essay (temperature 0.7) | 14.3 | 0.50 | ok |
+| Python module | 30.7 | 0.47 | ok |
+| single-file HTML game | 37.6 | 0.59 | ok |
+| JavaScript module | 31.5 | 0.46 | ok |
+
+Eight-workload suite on the same configuration, one request each through the gateway: Python 24.3,
+HTML 36.6, JavaScript 28.2, SQL 31.8, explanation 18.1, German 25.2, arithmetic 25.1, long prose
+17.1 tok/s; thinking on 18.6; a 5,014-token prompt prefills in 14.9 s (**337 tok/s**) and decodes at
+19.4; a tool call returns `finish_reason: tool_calls` with well-formed arguments. The generated HTML
+game passes every structural check (doctype, balanced style and script tags, 3x3 grid, win check,
+reset button, click handlers, no corrupted CSS units) and stops on its own at 982 tokens.

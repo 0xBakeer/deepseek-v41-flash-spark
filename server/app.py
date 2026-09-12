@@ -167,6 +167,12 @@ def parse_sampling(body: dict) -> dict:
         "max_tokens": mt,
         "temperature": _num(body, "temperature", DEFAULT_TEMPERATURE, 0.0, 2.0),
         "top_p": _num(body, "top_p", DEFAULT_TOP_P, 0.0, 1.0),
+        # OpenAI's two repetition controls, plus the no-repeat-ngram guard. Defaults come from the
+        # environment so an operator can set them per deployment: long prose on a pruned expert set
+        # drifts into repeated rhetorical structure, which is what a frequency penalty is for, while
+        # code is legitimately repetitive and wants them at 0 (NOTES 2026-09-12).
+        "presence_penalty": _num(body, "presence_penalty", float(os.environ.get("DSV41_PRESENCE_PENALTY", "0")), -2.0, 2.0),
+        "frequency_penalty": _num(body, "frequency_penalty", float(os.environ.get("DSV41_FREQUENCY_PENALTY", "0")), -2.0, 2.0),
         "stop": stops,
         "seed": seed,
         "ignore_eos": ignore_eos,
@@ -491,6 +497,12 @@ class State:
 
         gen_kwargs = dict(max_tokens=max_tokens, temperature=sampling["temperature"],
                           top_p=sampling["top_p"], stop_token_ids=stop_ids, seed=sampling["seed"])
+        pen = None
+        if getattr(self.engine, "supports_penalties", False):
+            from engine.v41_engine import Penalties
+            pen = Penalties(presence=sampling["presence_penalty"], frequency=sampling["frequency_penalty"])
+            if pen.active:
+                gen_kwargs["penalties"] = pen
         # The gate constrains nothing until the model opens a tool-calls block, so it costs a
         # dictionary lookup per step on a request that never calls a tool.
         gate = None

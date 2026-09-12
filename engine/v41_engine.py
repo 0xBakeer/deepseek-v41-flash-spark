@@ -811,6 +811,8 @@ class V41Engine:
         out_st.update(n_out=n_out, steps=steps)
 
     # ------------------------------------------------------------------ introspection
+    supports_penalties = True
+
     def config(self):
         """Static engine configuration -- everything a measured number has to be quoted with."""
         return {
