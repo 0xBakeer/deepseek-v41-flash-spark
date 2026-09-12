@@ -102,6 +102,63 @@ so there is no measured long generation and no thinking-mode figure in this repo
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
 
+## 0.5.0-wip — 2026-09-12 (unreleased)
+
+**Choosing what the box is good at becomes a thing you can see.** About 40 % of the routed experts
+fit in memory at once, and which 40 % decides both what the model is good at and whether it loads.
+Until now that was two numbers in a file and a three-minute wait to find out.
+
+### Added
+- **`./tune.sh`** — pick topics, watch what they cost against the memory the box has free right
+  now, and start the server from the same screen. Coverage per topic (the fraction of its measured
+  routing the budget keeps resident) with the number of tokens each was traced on; the memory
+  the selection costs, line by line; the largest keep fraction this box will take.
+  `--list`, `--print` and `--write` need no terminal. [`docs/tune.md`](docs/tune.md).
+- **`tools/budget.py`** — the cost model behind it, with no torch dependency: slot sizes from the
+  kernel's own constant, the KV cache from the checkpoint's shapes, the launch gate from
+  `engine/v41_engine.py`.
+- **`EXPERT_TOPICS`** composes a keep-set from named topics instead of one of three fixed profiles.
+  Each topic is a per-layer expert histogram measured on a corpus of that topic alone, stored in
+  `coverage.json`, so composing is arithmetic on numbers already in the checkout.
+- **`corpus/fetch_topics.py`** gathers the sources a 35-topic catalogue needs — sixteen programming
+  languages from a tree you name, eleven natural languages and eight domain registers from
+  Wikipedia — and prints the flags `make_corpus.py` wants.
+- **Four checks that need no GPU, no checkpoint and no torch**: `tools/test_budget.py`,
+  `tools/test_engine_kwargs.py`, `tools/test_tune_draw.py` and the existing `server/test_server.py`.
+
+### Fixed
+- **`EXPERT_TOPICS` had never worked.** `expert_topics` was read inside `V41Engine.__init__` and
+  passed by the engine's own CLI, but was never a parameter of it, so every launch through
+  `start.sh` raised `TypeError` three minutes in, with the weights already on the GPU.
+  `tools/test_engine_kwargs.py` now checks every launcher kwarg against the signature.
+- **`VERSION` had said `0.1.0-wip` since the day it was written**, through four tags. The container
+  is tagged from that file, so every image built from 0.2.0 onward carried the wrong version.
+
+### Changed
+- The recommended keep fraction on a 121 GiB box drops to **42 %**. One prefill chunk needs about
+  10 GB on top of everything resident, and the engine's own pre-flight does not know that — it runs
+  before the drafter experts, the KV cache and any prefill exist. A 98 GB arena passes it, reports
+  ready, and is killed by the memory watchdog on the first request. See
+  [`LIMITATIONS.md`](LIMITATIONS.md).
+
+### Known, unfixed
+- Long generations still degenerate past the gate's reach: clean at 1,200 tokens, collapsed into
+  repeated corrupted CSS by 2,400, with penalties at 0. Not attributed to a layer of the stack yet.
+
+## 0.4.1-wip — 2026-09-12
+
+**Guard rails, after the box had to be power-cycled three times.**
+
+### Added
+- A pre-flight that refuses to start when the arena plus its warm-start scratch plus the free-memory
+  floor exceeds `MemAvailable`, and a watchdog thread that kills this process rather than let the
+  machine thrash when host memory runs out.
+- A device-side slot table for the chunked prefill path.
+
+### Fixed
+- A published routing-timer reading was wrong and is corrected: `route_s` is nested inside `moe_s`,
+  so removing it changed wall-clock time by nothing.
+
 ## 0.4.0-wip — 2026-09-12
 
 **A configuration that writes whole files and whole stories.** v0.3.0-wip shipped a default that
