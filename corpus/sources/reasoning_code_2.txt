@@ -1,0 +1,1602 @@
+=== PROMPT
+Throttle a scroll handler so it runs at most once per animation frame.
+=== THINK
+`setTimeout` at 16ms drifts against the compositor. `requestAnimationFrame` is the right clock, and it also parks itself in a background tab.
+
+One pending id, not a queue:
+```js
+let rafId = null;
+const onScroll = () => {
+  if (rafId !== null) return;
+  rafId = requestAnimationFrame(run);
+};
+```
+`rafId` stays non-null until `run` clears it, so every extra scroll in the same frame is dropped.
+
+I first wrote `cancelAnimationFrame(rafId)` and rescheduled -- that is last-wins, and it starves `run` during a continuous scroll. Drop the cancel, keep the first-wins guard.
+
+Teardown with `removeEventListener` needs the identical function reference, easy to get wrong. An `AbortController` is tidier: pass its `signal` to `addEventListener`, and one `AbortController` abort unhooks everything.
+
+`{ passive: true }` too, so the listener never blocks scrolling.
+
+Frame-clocked, first-wins, one signal for teardown -- that is the whole shape.
+=== ANSWER
+```js
+function onFrameScroll(handler) {
+  const ctrl = new AbortController();
+  let rafId = null;
+  addEventListener('scroll', () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      handler();
+    });
+  }, { passive: true, signal: ctrl.signal });
+  return () => ctrl.abort();
+}
+```
+=== END
+
+=== PROMPT
+Load a JSON config file, falling back to defaults when it is missing or corrupt.
+=== THINK
+`json.load(open(p))` leaks the handle when the parse raises. `Path.read_text` then `json.loads` keeps the file closed and splits the two failure kinds apart.
+
+```python
+try:
+    raw = Path(path).read_text(encoding="utf-8")
+except OSError:
+    return dict(DEFAULTS)
+```
+`FileNotFoundError` alone is too narrow: a directory in the way raises `IsADirectoryError`, a bad mode raises `PermissionError`, and `OSError` is the parent of all three.
+
+Second guard for the parse. `json.JSONDecodeError` covers truncated bytes and `UnicodeDecodeError` a file that is not UTF-8 at all; since `json.JSONDecodeError` subclasses `ValueError`, one `except (ValueError, UnicodeDecodeError)` catches both.
+
+Merge, do not replace: a file usually sets `maxRetries` and leaves `baseUrl` alone, so `{**DEFAULTS, **loaded}` keeps `baseUrl` default while `maxRetries` wins from disk.
+
+Reject a non-dict top level too -- a bare list would sail through and explode later.
+
+Two guards, one merge, defaults intact.
+=== ANSWER
+```python
+import json
+from pathlib import Path
+
+DEFAULTS = {"baseUrl": "http://127.0.0.1:8080", "maxRetries": 3}
+
+def load_config(path):
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return dict(DEFAULTS)
+    try:
+        loaded = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return dict(DEFAULTS)
+    if not isinstance(loaded, dict):
+        return dict(DEFAULTS)
+    return {**DEFAULTS, **loaded}
+```
+=== END
+
+=== PROMPT
+Fetch JSON with a 5 second timeout that actually cancels the in-flight request.
+=== THINK
+`Promise.race` against a timer rejects the caller but leaves the socket open. Cancellation has to reach `fetch` itself, so `AbortController`.
+
+```js
+const ctrl = new AbortController();
+const timeoutId = setTimeout(() => ctrl.abort(), ms);
+const res = await fetch(url, { signal: ctrl.signal });
+clearTimeout(timeoutId);
+```
+`clearTimeout(timeoutId)` on the success path only is a leak on the throw path: the timer still fires and aborts a controller nobody watches. It belongs in `finally`.
+
+`AbortSignal.timeout(ms)` does this in one call but ignores an outer signal, so a caller who wants to cancel early loses. The explicit `AbortController` stays.
+
+`fetch` rejects only on network failure, so `res.ok` needs checking by hand before `res.json()`.
+
+On abort the error name is `AbortError`, which says nothing about five seconds -- rethrow something readable.
+
+Cancellation reaches the socket and the timer is cleared on both paths.
+=== ANSWER
+```js
+async function fetchJson(url, ms = 5000) {
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Timed out after ${ms}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+```
+=== END
+
+=== PROMPT
+Type a `pick` helper in TypeScript that copies a subset of keys off an object.
+=== THINK
+Return type first. `Record<string, unknown>` throws every key away and hands the caller `unknown`. `Pick<T, K>` is the built-in for exactly this, and `K extends keyof T` rejects a typo at the call site.
+
+```ts
+function pick<T extends object, K extends keyof T>(
+  obj: T, keys: K[]
+): Pick<T, K>
+```
+`keys: K[]` widens `K` to the union of whatever was passed, which is what `Pick<T, K>` wants. `readonly K[]` is friendlier: a caller with `as const` keys should not need a mutable array.
+
+Body: `Object.fromEntries(keys.map(k => [k, obj[k]]))` reads well, but `Object.fromEntries` is typed as an index signature, so the result needs a cast anyway. A loop needs the same single cast and keeps the key types, so take the loop.
+
+Filtering absent keys with `hasOwnProperty` would make the output not actually a `Pick<T, K>`. Copy them straight.
+
+The signature carries the meaning and the one cast stays contained.
+=== ANSWER
+```ts
+export function pick<T extends object, K extends keyof T>(
+  obj: T,
+  keys: readonly K[],
+): Pick<T, K> {
+  const out = {} as Pick<T, K>;
+  for (const k of keys) out[k] = obj[k];
+  return out;
+}
+```
+=== END
+
+=== PROMPT
+Walk a source tree for .py files, skipping .git, node_modules and hidden dirs.
+=== THINK
+`Path.rglob("*.py")` descends into `.git` and `node_modules` and filters afterwards, so on a big repo most of the walk is wasted. `os.walk` can be pruned in place.
+
+The prune must mutate `dirnames`, not rebind it:
+```python
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames
+                   if not d.startswith(".") and d not in SKIP]
+```
+`dirnames = [...]` would rebind the local name and `os.walk` would keep descending; the slice assignment is what it reads back.
+
+`onerror` defaults to swallowing failures, so an unreadable directory vanishes without a trace. Hand the `OSError` to `logging.getLogger(__name__)` instead -- `PermissionError` subclasses `OSError`, so one callback covers both, and a module-level `getLogger` keeps the caller in charge of formatting.
+
+Yield `Path(dirpath) / name` rather than strings, so callers get `Path.suffix` and `Path.stat` for free.
+
+Pruned at the directory level and loud about what it could not read.
+=== ANSWER
+```python
+import logging, os
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+SKIP = {"node_modules", "__pycache__", "venv"}
+
+def py_files(root):
+    def on_error(err: OSError) -> None:
+        log.warning("skipped %s: %s", err.filename, err.strerror)
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d not in SKIP]
+        for name in filenames:
+            if name.endswith(".py"):
+                yield Path(dirpath) / name
+```
+=== END
+
+=== PROMPT
+Summarise a list of orders: revenue per currency, sorted, formatted for display.
+=== THINK
+`reduce` into a plain object keys everything by string, so a currency code like `constructor` collides with a prototype key. A `Map` has no prototype keys and keeps insertion order.
+
+```js
+const byCurrency = new Map();
+for (const o of orders) {
+  byCurrency.set(o.currency, (byCurrency.get(o.currency) ?? 0) + o.amountCents);
+}
+```
+`o.amountCents` in integers throughout -- summing floats and rounding at the end drifts by a cent on long lists, and `byCurrency` then holds exact totals.
+
+`Object.groupBy` would build the groups for me, but I would still reduce each array: two passes for one sum. The `Map` pass stays.
+
+Sorting: `Array.from(byCurrency)` then `sort` descending. `toSorted` would avoid mutating, but `Array.from` already produced a fresh array.
+
+`Intl.NumberFormat` constructed per row is a formatter per iteration; one `Intl.NumberFormat` per currency instead.
+
+One pass to sum, one to sort, formatter hoisted.
+=== ANSWER
+```js
+function revenueByCurrency(orders) {
+  const byCurrency = new Map();
+  for (const o of orders) {
+    byCurrency.set(o.currency, (byCurrency.get(o.currency) ?? 0) + o.amountCents);
+  }
+  return Array.from(byCurrency, ([currency, cents]) => ({
+    currency,
+    cents,
+    label: new Intl.NumberFormat('en', { style: 'currency', currency })
+      .format(cents / 100),
+  })).sort((a, b) => b.cents - a.cents);
+}
+```
+=== END
+
+=== PROMPT
+Poll a service health endpoint until it reports ready, giving up after 60 seconds.
+=== THINK
+For a container I would read `docker inspect -f '{{.State.Running}}'`, but `.State.Health` only exists when the image declares a HEALTHCHECK, and this is a plain HTTP service. So `curl` plus `jq`.
+
+```bash
+until curl -fsS "$url" | jq -e '.status == "ready"' >/dev/null; do
+  sleep 2
+done
+```
+`curl` without `-f` returns 0 on a 503 and hands `jq` an error page, so `-f` is load-bearing.
+
+That loop is unbounded. A deadline computed once from `SECONDS` beats counting iterations, and `--max-time 5` stops a hung probe stretching each turn.
+
+`jq -e` sets exit status from the result, which is the whole point; without `-e` it prints `false` and exits 0. The field here is `.status`, not the `.data.jobStatus` the old API used -- a `.data.jobStatus` probe would read null forever.
+
+`set -euo pipefail` at the top, and the probe sits inside the loop condition, where `-e` does not apply.
+
+Bounded by a deadline, exit status carried by `jq -e`.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+url="${1:?usage: wait-ready URL}"
+limit="${2:-60}"
+deadline=$(( SECONDS + limit ))
+
+while (( SECONDS < deadline )); do
+  if curl -fsS --max-time 5 "$url" | jq -e '.status == "ready"' >/dev/null 2>&1; then
+    echo "ready after ${SECONDS}s"
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "not ready after ${limit}s" >&2
+exit 1
+```
+=== END
+
+=== PROMPT
+Run a CLI command from Python with a timeout and return a JSON-friendly result.
+=== THINK
+`subprocess.run` with a list argv, never `shell=True` -- a path with a space or a semicolon would otherwise become shell syntax.
+
+```python
+proc = subprocess.run(
+    argv, capture_output=True, text=True, timeout=timeout,
+)
+```
+`capture_output=True` plus `text=True` gives decoded `proc.stdout`; without `text` both streams come back as bytes and the JSON dump fails.
+
+`check=True` raises `CalledProcessError` on a non-zero exit, but the caller wants the code reported, not an exception -- drop `check` and read `proc.returncode`.
+
+The timeout still raises `subprocess.TimeoutExpired`. Catch it, report `exitCode` as -1, and pass through the partial output `TimeoutExpired` carries, so every path returns the same shape and `exitCode` is always present.
+
+`errors="replace"` as well, or odd bytes raise `UnicodeDecodeError` after the process already ran.
+
+One shape on every path, timeout included.
+=== ANSWER
+```python
+import subprocess
+
+def run_cmd(argv, timeout=30):
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return {"exitCode": -1, "timedOut": True,
+                "stdout": exc.stdout or "", "stderr": exc.stderr or ""}
+    return {"exitCode": proc.returncode, "timedOut": False,
+            "stdout": proc.stdout, "stderr": proc.stderr}
+```
+=== END
+
+=== PROMPT
+Make a long table's header row stay put while the body scrolls.
+=== THINK
+The JS route is a scroll listener reading `getBoundingClientRect` and toggling a class -- and `getBoundingClientRect` is exactly the call that forces synchronous layout, once per frame. `position: sticky` does it in the compositor.
+
+```css
+thead th {
+  position: sticky;
+  top: 0;
+}
+```
+Nothing sticks yet: the default `border-collapse: collapse` drops `th` borders once sticky, and an ancestor with `overflow: hidden` kills the effect outright.
+
+So `border-collapse: separate` with `border-spacing: 0`, and draw the rule with `box-shadow: inset 0 -1px` instead of `border-bottom`.
+
+Sticky positions against the nearest scrolling ancestor, so the wrapper takes `overflow: auto` and the page does not scroll instead.
+
+An `IntersectionObserver` on a sentinel row could add a shadow when pinned; `IntersectionObserver` is fine for that flourish, but the pinning itself needs no script.
+
+`z-index` on the header so body cells with backgrounds cannot paint over it, and it holds.
+=== ANSWER
+```css
+.table-wrap {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.table-wrap table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface, #fff);
+  box-shadow: inset 0 -1px 0 var(--border, #e2e8f0);
+}
+```
+=== END
+
+=== PROMPT
+A copy button next to a code block that confirms the copy, single HTML file.
+=== THINK
+`document.execCommand('copy')` is deprecated and needs a selection. `navigator.clipboard.writeText` returns a promise and needs no hidden textarea.
+
+```js
+btn.addEventListener('click', async () => {
+  await navigator.clipboard.writeText(pre.textContent);
+  msg.textContent = 'Copied';
+});
+```
+Two holes: `writeText` rejects when the document is unfocused or permission is denied, and an unhandled rejection leaves the label lying.
+
+The label never resets either. A `setTimeout` restores it, but rapid clicks stack timers, so keep one `timerId` and `clearTimeout(timerId)` before each new one.
+
+`pre.textContent`, not `innerText`: `innerText` is layout-aware and collapses indentation.
+
+An image would need a `ClipboardItem` holding a blob; for text a `ClipboardItem` is ceremony.
+
+Promise handled both ways, one timer id, indentation preserved.
+=== ANSWER
+```html
+<pre id="snippet">npm install --save-dev vitest</pre>
+<button id="copy" type="button">Copy</button>
+<p id="msg" role="status"></p>
+<script>
+  const btn = document.getElementById('copy');
+  const pre = document.getElementById('snippet');
+  const msg = document.getElementById('msg');
+  let timerId = null;
+  btn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(pre.textContent);
+      msg.textContent = 'Copied to clipboard';
+    } catch {
+      msg.textContent = 'Copy failed, select and press Ctrl+C';
+    }
+    clearTimeout(timerId);
+    timerId = setTimeout(() => { msg.textContent = ''; }, 1500);
+  });
+</script>
+```
+=== END
+
+=== PROMPT
+Write a debounce helper with a cancel method for a search input.
+=== THINK
+One timer id in the closure, reset on every call:
+```js
+let timerId = null;
+return (...args) => {
+  clearTimeout(timerId);
+  timerId = setTimeout(() => fn(...args), wait);
+};
+```
+`clearTimeout(timerId)` with `timerId` still null is harmless, so no guard before it.
+
+Arrow function on purpose: a `function` expression rebinds `this`, and `input.addEventListener('input', debounce(handler, 200))` wants `this` to stay the element. With the arrow the event rides in `args` instead.
+
+The caller needs `cancel` for unmount, so hang it off the returned function; it clears the timer and nulls `timerId` so a later `pending()` reads false.
+
+In Node `setTimeout` returns a `Timeout` object, not a number, and a `Timeout` is always truthy -- hence comparing against null rather than testing truthiness.
+
+I nearly added a leading-edge option. Not here: for a search box the trailing call is the whole point.
+
+Closure over one `timerId`, cancel attached, `this` sidestepped.
+=== ANSWER
+```js
+export function debounce(fn, wait = 200) {
+  let timerId = null;
+  const debounced = (...args) => {
+    clearTimeout(timerId);
+    timerId = setTimeout(() => {
+      timerId = null;
+      fn(...args);
+    }, wait);
+  };
+  debounced.cancel = () => {
+    clearTimeout(timerId);
+    timerId = null;
+  };
+  debounced.pending = () => timerId !== null;
+  return debounced;
+}
+```
+=== END
+
+=== PROMPT
+Model a parsed log line as a dataclass with a computed field and a stable sort key.
+=== THINK
+A dict loses every name at the call site. `dataclasses.dataclass` gives `__init__`, `__repr__` and `__eq__` from the annotations alone.
+
+```python
+@dataclass(frozen=True, slots=True)
+class LogLine:
+    ts: datetime
+    level: str
+```
+`frozen=True` so a `LogLine` can key a dict; mutating one then raises `FrozenInstanceError`, which is the point.
+
+A mutable default raises `ValueError` at class creation, so `field(default_factory=list)` -- except a frozen `LogLine` holding a list is only shallowly immutable and unhashable. `tuple[str, ...] = ()` and the problem disappears.
+
+`order=True` would sort by every field in declaration order, message included. Narrower: `field(compare=False)` on the text so ordering is timestamp then level.
+
+The JSON lines carry `requestId`, which belongs in the record but not in the ordering, so `requestId` gets `compare=False` too.
+
+`is_error` is a `@property`, not a field -- `__init__` should not take it, and `dataclasses.asdict` still serialises cleanly.
+=== ANSWER
+```python
+from dataclasses import dataclass, field
+from datetime import datetime
+
+@dataclass(frozen=True, slots=True, order=True)
+class LogLine:
+    ts: datetime
+    level: str
+    message: str = field(compare=False)
+    requestId: str = field(default="", compare=False)
+    tags: tuple[str, ...] = field(default=(), compare=False)
+
+    @property
+    def is_error(self) -> bool:
+        return self.level in {"ERROR", "FATAL"}
+```
+=== END
+
+=== PROMPT
+Memoise an expensive pure function, with the cache keyed on the argument.
+=== THINK
+`JSON.stringify(args)` as the key is wrong twice: key order in an object is the caller's business, and `JSON.stringify` throws on a cycle. For object arguments a `WeakMap` is identity-keyed and lets the collector reclaim entries.
+
+```js
+const cache = isObj ? weak : strong;
+if (cache.has(arg)) return cache.get(arg);
+const value = fn.call(this, arg);
+cache.set(arg, value);
+```
+So: `WeakMap` for objects, `Map` with a primitive key otherwise. Two stores, one lookup path.
+
+`cache.has(arg)` then `cache.get(arg)` is two probes, and `cache.get(arg)` alone cannot tell a cached `undefined` from a miss -- correctness wins, keep `has`.
+
+Unbounded growth is the real risk on the primitive side. A `maxSize` with oldest-out eviction: `Map` preserves insertion order, so `strong.keys().next().value` is the oldest key and the `maxSize` check costs nothing per call.
+
+Two stores by argument kind, `has` before `get`, bounded by insertion order.
+=== ANSWER
+```js
+export function memoize(fn, maxSize = 500) {
+  const weak = new WeakMap();
+  const strong = new Map();
+  return function (arg) {
+    const isObj = arg !== null && typeof arg === 'object';
+    const cache = isObj ? weak : strong;
+    if (cache.has(arg)) return cache.get(arg);
+    const value = fn.call(this, arg);
+    cache.set(arg, value);
+    if (!isObj && strong.size > maxSize) {
+      strong.delete(strong.keys().next().value);
+    }
+    return value;
+  };
+}
+```
+=== END
+
+=== PROMPT
+Give me a Result type in TypeScript that narrows properly in an if statement.
+=== THINK
+One interface with optional `value` and optional `error` never narrows: after checking `res.error`, `res.value` is still `T | undefined`. A discriminated union on a literal field is what the checker can follow.
+
+```ts
+type Ok<T> = { readonly ok: true; readonly value: T };
+type Err<E> = { readonly ok: false; readonly error: E };
+export type Result<T, E = Error> = Ok<T> | Err<E>;
+```
+`ok: true` as a literal, not `boolean` -- with `boolean` both arms stay live and `Result` narrows to nothing.
+
+Constructors so nobody writes the shape by hand, and their return type must be the wide `Result<T, E>`; annotating them `Ok<T>` makes a ternary over both infer a union that fights the declaration.
+
+An `unwrap` that throws on `Err` defeats the purpose. A `match` taking two callbacks keeps the caller exhaustive, and a `mapErr` covers the common "translate the error" case -- `mapErr` first, the rest later.
+
+Literal discriminant, two constructors, narrowing the compiler does for free.
+=== ANSWER
+```ts
+type Ok<T> = { readonly ok: true; readonly value: T };
+type Err<E> = { readonly ok: false; readonly error: E };
+export type Result<T, E = Error> = Ok<T> | Err<E>;
+
+export const ok = <T, E = Error>(value: T): Result<T, E> => ({ ok: true, value });
+export const err = <E, T = never>(error: E): Result<T, E> => ({ ok: false, error });
+
+export function match<T, E, R>(
+  r: Result<T, E>,
+  on: { ok: (v: T) => R; err: (e: E) => R },
+): R {
+  return r.ok ? on.ok(r.value) : on.err(r.error);
+}
+```
+=== END
+
+=== PROMPT
+Count requests per endpoint from a log file and report the slowest average.
+=== THINK
+`itertools.groupby` is tempting, but it groups only adjacent equal keys, so the whole file would have to be sorted first. A `collections.Counter` plus a totals dict accumulates in one pass with no sort at all.
+
+```python
+for line in fh:
+    endpoint, durationMs = parse(line)
+    counts[endpoint] += 1
+    totals[endpoint] += durationMs
+```
+`Counter` rather than a plain dict, because `Counter.most_common` is the report and the missing key is already handled -- no `defaultdict` needed on that side, and `durationMs` sums into a `defaultdict(float)`.
+
+Stream the handle line by line, not `readlines`: a multi-gigabyte log should never be resident.
+
+Unparseable lines exist, so a `ValueError` from the float conversion has to `continue` rather than abort the run.
+
+The average is `totals[k] / counts[k]`, and `counts[k]` cannot be zero because a key only appears when it is incremented.
+
+One pass, `Counter` for frequency, bad lines skipped not fatal.
+=== ANSWER
+```python
+from collections import Counter, defaultdict
+
+def endpoint_stats(lines):
+    counts = Counter()
+    totals = defaultdict(float)
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            ms = float(parts[1])
+        except ValueError:
+            continue
+        counts[parts[0]] += 1
+        totals[parts[0]] += ms
+    return sorted(((e, counts[e], totals[e] / counts[e]) for e in counts),
+                  key=lambda row: row[2], reverse=True)
+```
+=== END
+
+=== PROMPT
+Persist a small UI state object to localStorage and restore it on load.
+=== THINK
+`localStorage.getItem` returns null for a missing key, so `JSON.parse` would be handed null and return null rather than throw -- but a half-written value raises `SyntaxError`, and one bad entry then breaks boot forever.
+
+```js
+try {
+  const raw = localStorage.getItem(KEY);
+  return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
+} catch { return { ...DEFAULTS }; }
+```
+The spread merge matters: a key added in a later release is absent from stored JSON and would come back `undefined` without `DEFAULTS` underneath.
+
+Writes throw too -- private mode and a full quota both raise, `QuotaExceededError` being the usual one -- so `localStorage.setItem` is wrapped as well. A `QuotaExceededError` may cost persistence, never the app.
+
+`localStorage` is synchronous, so writing on every keystroke stalls the main thread. Coalesce through `requestIdleCallback`, with `setTimeout` where it is missing.
+
+Guarded both directions, merged over defaults, writes coalesced.
+=== ANSWER
+```js
+const KEY = 'ui.state.v1';
+const DEFAULTS = { theme: 'system', sidebarOpen: true };
+
+export function readState() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+let queued = false;
+export function writeState(state) {
+  if (queued) return;
+  queued = true;
+  const flush = () => {
+    queued = false;
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
+  };
+  (window.requestIdleCallback ?? setTimeout)(flush, 0);
+}
+```
+=== END
+
+=== PROMPT
+Rename every .jpeg under a directory to .jpg without breaking on spaces in names.
+=== THINK
+The Node version with `fs.readdirSync` is tempting, but `fs.readdirSync` needs `withFileTypes: true` and a manual recursion over each `Dirent`, and then `Dirent.isDirectory` checks -- the shell already has `find`.
+
+```bash
+find "$dir" -type f -name '*.jpeg' -print0 |
+  while IFS= read -r -d '' f; do
+    mv -n -- "$f" "${f%.jpeg}.jpg"
+  done
+```
+`IFS=` stops whitespace being stripped, `-r` stops backslash mangling, and `-d ''` matches the NUL from `-print0`. All three, not two of three.
+
+`--` before the filename so a name starting with a dash is not read as an option, and `-n` so an existing `.jpg` is never clobbered.
+
+A plain glob would have needed `shopt -s nullglob`, or an empty directory hands `mv` the literal `*.jpeg`.
+
+The pipeline puts the loop in a subshell, so a counter incremented inside is lost afterwards -- process substitution instead, and the count survives.
+
+NUL-delimited end to end, no clobber, counter in the parent shell.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+dir="${1:-.}"
+n=0
+
+while IFS= read -r -d '' f; do
+  mv -n -- "$f" "${f%.jpeg}.jpg" && n=$(( n + 1 ))
+done < <(find "$dir" -type f -name '*.jpeg' -print0)
+
+printf 'renamed %d file(s)\n' "$n"
+```
+=== END
+
+=== PROMPT
+Validate that parsed JSON matches an expected shape, in TypeScript, without a library.
+=== THINK
+`JSON.parse` returns `any`, which silently poisons everything downstream. Type the boundary as `unknown` and force a narrowing before use.
+
+```ts
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+```
+`typeof null === 'object'` is the classic hole, hence the explicit null check, and `Array.isArray` excludes arrays that `typeof` happily calls objects.
+
+The predicate signature `v is Record<string, unknown>` is what makes the narrowing stick -- a plain `boolean` return type-checks but narrows nothing.
+
+Then one field guard per type: `isUser` reads `v.id` and `v.createdAt`, both `unknown` until `typeof v.createdAt === 'string'` narrows them.
+
+I started returning `User | null` from the guard. Wrong shape -- a `v is User` predicate composes with `filter`, a nullable return does not.
+
+Boundary typed `unknown`, one `isRecord` gate, predicates that actually narrow.
+=== ANSWER
+```ts
+export type User = { id: number; name: string; createdAt: string };
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+export function isUser(v: unknown): v is User {
+  return isRecord(v)
+    && typeof v.id === 'number'
+    && typeof v.name === 'string'
+    && typeof v.createdAt === 'string';
+}
+
+export function parseUsers(text: string): User[] {
+  const data: unknown = JSON.parse(text);
+  return Array.isArray(data) ? data.filter(isUser) : [];
+}
+```
+=== END
+
+=== PROMPT
+Set up a fluid type scale so headings shrink on phones without media queries.
+=== THINK
+The scripted version watches width with a `ResizeObserver` and writes a size onto `documentElement`: a `ResizeObserver` callback plus a `documentElement` style write per tick, for something the engine interpolates itself.
+
+```css
+:root {
+  --step-0: clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+  --step-2: clamp(1.5rem, 1.2rem + 1.5vw, 2.25rem);
+}
+```
+Pure `vw` in the middle term is the trap: the heading collapses at 320px, and text zoom does nothing because `vw` ignores it. The `rem` part is what keeps zoom working.
+
+Line height cannot be a fixed `rem` across the scale -- large text wants a tighter ratio, so unitless numbers per step.
+
+I considered `font-size: 62.5%` on the root to make the maths tidy. No: that overrides the user's browser default, the one setting to respect.
+
+Interpolated by the engine, zoom preserved, no breakpoints to maintain.
+=== ANSWER
+```css
+:root {
+  --step-0: clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+  --step-1: clamp(1.2rem, 1.1rem + 0.6vw, 1.5rem);
+  --step-2: clamp(1.5rem, 1.2rem + 1.5vw, 2.25rem);
+  --step-3: clamp(1.8rem, 1.3rem + 2.6vw, 3rem);
+}
+
+body { font-size: var(--step-0); line-height: 1.55; }
+h3 { font-size: var(--step-1); line-height: 1.35; }
+h2 { font-size: var(--step-2); line-height: 1.25; }
+h1 { font-size: var(--step-3); line-height: 1.15; }
+```
+=== END
+
+=== PROMPT
+A confirm dialog in one HTML file that traps focus and closes on Escape.
+=== THINK
+Hand-rolled, this needs a backdrop, a focus trap, `aria-modal` and inert background content. `HTMLDialogElement` gives all four: `showModal` uses the top layer, traps focus and wires Escape.
+
+```js
+dlg.showModal();
+dlg.addEventListener('close', () => {
+  out.textContent = dlg.returnValue;
+});
+```
+`dlg.show()` opens it non-modally, no trap and no backdrop, so `showModal` is the one that matters.
+
+Escape fires `cancel` then `close`, and `HTMLDialogElement` leaves `returnValue` empty on that path, so `close` alone cannot tell cancel from confirm. Set `returnValue` in the `cancel` handler and one branch covers all three exits.
+
+A form with `method="dialog"` sets `returnValue` from the submitting button, so no per-button handler.
+
+Native top layer, one `close` handler, `returnValue` defined on every path.
+=== ANSWER
+```html
+<button id="open" type="button">Delete account</button>
+<p id="out" role="status"></p>
+<dialog id="confirm">
+  <form method="dialog">
+    <p>Delete this account permanently?</p>
+    <button value="cancel">Cancel</button>
+    <button value="confirm">Delete</button>
+  </form>
+</dialog>
+<script>
+  const dlg = document.getElementById('confirm');
+  const out = document.getElementById('out');
+  document.getElementById('open').addEventListener('click', () => dlg.showModal());
+  dlg.addEventListener('cancel', () => { dlg.returnValue = 'cancel'; });
+  dlg.addEventListener('close', () => {
+    out.textContent = dlg.returnValue === 'confirm' ? 'Deleted' : 'Kept';
+  });
+</script>
+```
+=== END
+
+=== PROMPT
+Retry a failing API call three times with exponential backoff and jitter.
+=== THINK
+A `for` loop with `await` beats recursion: the attempt counter stays local and the stack stays flat.
+
+```js
+for (let attempt = 0; attempt < retries; attempt++) {
+  try { return await fetch(url, { signal }); }
+  catch (err) { lastError = err; }
+  await sleep(baseDelay * 2 ** attempt);
+}
+```
+Retrying every error is wrong. A `TypeError` from `fetch` is a network failure worth retrying, as is a 500 or a 429; an `AbortError` means the caller cancelled, so an `AbortError` skips `lastError` and rethrows.
+
+Flat `baseDelay * 2 ** attempt` synchronises every client onto one instant after an outage -- scale `baseDelay` by `Math.random()` for jitter.
+
+`sleep` wraps `setTimeout` in a promise and must honour the signal, or an abort waits out the delay.
+
+Retryable errors only, jittered delays, abort honoured mid-sleep.
+=== ANSWER
+```js
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const id = setTimeout(resolve, ms);
+  signal?.addEventListener('abort',
+    () => { clearTimeout(id); reject(signal.reason); }, { once: true });
+});
+
+export async function retryFetch(url, { retries = 3, baseDelay = 300, signal } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(url, { signal });
+      if (res.status < 500 && res.status !== 429) return res;
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      lastError = err;
+    }
+    await sleep(baseDelay * 2 ** attempt * (0.5 + Math.random()), signal);
+  }
+  throw lastError;
+}
+```
+=== END
+
+=== PROMPT
+Write a file atomically so a crash never leaves a half-written config behind.
+=== THINK
+`Path.write_text` truncates the target first, so a crash mid-write loses the old contents as well as the new. Write a temp file, then rename.
+
+```python
+tmp.write_text(data, encoding="utf-8")
+os.replace(tmp, target)
+```
+`os.replace` is atomic within a filesystem and overwrites everywhere; `Path.rename` refuses an existing target on Windows, so `os.replace` it is.
+
+The temp file must sit in the target's directory, or the rename crosses devices and raises `OSError`. `tempfile.NamedTemporaryFile(dir=...)` with `delete=False` handles naming and collisions.
+
+Atomic is not durable -- the bytes can sit in the page cache -- so `os.fsync` the file before closing and `os.fsync` the directory after the rename.
+
+This file carries `lastSyncedAt`, and a truncated `lastSyncedAt` is worse than a stale one.
+
+`NamedTemporaryFile` creates 0600, so carry the old mode across.
+=== ANSWER
+```python
+import os, tempfile
+from pathlib import Path
+
+def write_atomic(path, data: str) -> None:
+    target = Path(path)
+    mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent,
+                                     suffix=".tmp", delete=False) as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+        tmp = fh.name
+    os.chmod(tmp, mode)
+    os.replace(tmp, target)
+    fd = os.open(target.parent, os.O_RDONLY)
+    os.fsync(fd)
+    os.close(fd)
+```
+=== END
+
+=== PROMPT
+Load images only when they scroll near the viewport.
+=== THINK
+The scroll-listener version calls `getBoundingClientRect` per candidate per event, a forced layout every frame. `IntersectionObserver` reports the same crossings off the main thread, batched.
+
+```js
+const io = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) load(entry.target);
+  }
+}, { rootMargin: '200px' });
+```
+`rootMargin: '200px'` starts the fetch before the image is visible, otherwise the user watches it decode.
+
+`isIntersecting` fires again when the image scrolls back in, so each element must be unobserved once loaded -- `observer.unobserve` inside the branch, not a flag checked later.
+
+The URL lives in `dataset.src` and moves to `src` on load, so `querySelectorAll('img[data-src]')` gives the initial set and the same selector picks up nodes added afterwards.
+
+Native `loading="lazy"` covers most of this with no script, but offers no `rootMargin` control -- keep it as the no-JS fallback.
+
+Layout reads gone, each element observed exactly once.
+=== ANSWER
+```js
+const io = new IntersectionObserver((entries, observer) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const img = entry.target;
+    img.src = img.dataset.src;
+    delete img.dataset.src;
+    observer.unobserve(img);
+  }
+}, { rootMargin: '200px 0px', threshold: 0 });
+
+export function observeLazyImages(root = document) {
+  for (const img of root.querySelectorAll('img[data-src]')) io.observe(img);
+}
+```
+=== END
+
+=== PROMPT
+A generic groupBy in TypeScript that keys by a function and returns typed buckets.
+=== THINK
+`Record<string, T[]>` as the return type loses which keys exist. Parameterise it: `K extends PropertyKey`, with the selector typed `(item: T) => K`.
+
+```ts
+export function groupBy<T, K extends PropertyKey>(
+  items: readonly T[],
+  keyOf: (item: T) => K,
+): Record<K, T[]>
+```
+`Record<K, T[]>` claims every `K` is present, which is a lie for a union key whose bucket ends up empty. `Partial<Record<K, T[]>>` is honest, and the caller then handles `T[] | undefined`.
+
+`Object.create(null)` for the accumulator, not `{}`: a `__proto__` key from user data would otherwise mutate the prototype instead of making a bucket.
+
+Inside the loop `acc[key] ??= []` then push -- `??=` where `||=` would rebuild a bucket that is legitimately empty.
+
+Typing `keyOf` as returning `K` lets `K` be inferred from the callback, so no explicit type argument at the call site and a wrong `keyOf` is caught there.
+
+Honest `Partial` result, null-prototype accumulator, `K` inferred.
+=== ANSWER
+```ts
+export function groupBy<T, K extends PropertyKey>(
+  items: readonly T[],
+  keyOf: (item: T) => K,
+): Partial<Record<K, T[]>> {
+  const acc = Object.create(null) as Partial<Record<K, T[]>>;
+  for (const item of items) {
+    const key = keyOf(item);
+    (acc[key] ??= []).push(item);
+  }
+  return acc;
+}
+```
+=== END
+
+=== PROMPT
+A retry decorator in Python that preserves the wrapped function's name and docstring.
+=== THINK
+Without `functools.wraps` the wrapper reports its own `__name__`, so every traceback and any `assertRaises` message names `wrapper` instead of the real function. `assertRaises` output is where this bites first in a test suite.
+
+```python
+def decorate(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        ...
+    return wrapper
+```
+Three levels, because the decorator takes arguments. A version usable bare as `@retry` needs a `callable(fn)` sniff at the top, and that ambiguity is worse than one pair of parentheses.
+
+Catching bare `Exception` would retry a `TypeError` that can never succeed. Default to `(OSError,)`, since an `OSError` is the transient case, and let the caller widen it.
+
+Re-raise on the last attempt rather than returning `None`: a bare `raise` inside the `except` keeps the original traceback.
+
+`functools.wraps` also sets `__wrapped__`, so `inspect.signature` still reports the real parameters.
+
+Identity preserved, exceptions narrow by default, last failure propagates untouched.
+=== ANSWER
+```python
+import functools, time
+
+def retry(times=3, delay=0.5, exceptions=(OSError,)):
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            for attempt in range(times):
+                try:
+                    return fn(*args, **kwargs)
+                except exceptions:
+                    if attempt == times - 1:
+                        raise
+                    time.sleep(delay * 2 ** attempt)
+        return wrapper
+    return decorate
+```
+=== END
+
+=== PROMPT
+Submit a form over fetch without a page reload and show server-side field errors.
+=== THINK
+`new FormData(form)` reads every named control, files included, and `fetch` sets the multipart boundary itself. Setting `Content-Type` by hand is the classic bug -- the boundary goes missing and the server sees garbage.
+
+```js
+e.preventDefault();
+const res = await fetch(form.action, {
+  method: 'POST',
+  body: new FormData(form),
+});
+```
+Double submit is real: disable the button before awaiting and re-enable in `finally`.
+
+Errors come back as field name to message. Write each into its `[data-err]` node with `textContent`, clearing every `textContent` first, or a fixed field keeps stale text.
+
+`res.ok` before `res.json()`, and a network rejection needs its own catch or the button stays disabled.
+
+Body untouched by headers, button gated, both failure paths land somewhere.
+=== ANSWER
+```js
+const form = document.querySelector('#signup');
+const submitBtn = form.querySelector('[type=submit]');
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  submitBtn.disabled = true;
+  for (const el of form.querySelectorAll('[data-err]')) el.textContent = '';
+  try {
+    const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
+    if (res.ok) { form.reset(); return; }
+    const { errors = {} } = await res.json();
+    for (const [name, msg] of Object.entries(errors)) {
+      const slot = form.querySelector(`[data-err="${name}"]`);
+      if (slot) slot.textContent = msg;
+    }
+  } catch {
+    form.querySelector('[data-err="form"]').textContent = 'Network error';
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+```
+=== END
+
+=== PROMPT
+Back up a directory to a tarball in a temp workdir that is always cleaned up.
+=== THINK
+`mktemp -d` for the workdir, and the cleanup belongs in a `trap` on `EXIT` so it runs on the error path under `set -e` too.
+
+```bash
+workdir="$(mktemp -d)"
+trap 'rm -rf -- "$workdir"' EXIT
+```
+`trap ... EXIT INT TERM` looks more thorough and is wrong: after the `INT` handler the shell still exits, so `EXIT` fires and cleanup runs twice. `EXIT` alone covers every path.
+
+Python's `tempfile.TemporaryDirectory` does the same job in `__exit__`; Node's `fs.mkdtempSync` does not, and `mkdtempSync` leaves the directory behind. `TemporaryDirectory` is the behaviour `trap` buys here.
+
+`tar -czf` straight to the destination leaves a truncated archive if the disk fills, so build inside `$workdir` and `mv` into place -- same filesystem, hence the temp dir next to the destination.
+
+`tar` exits 1 when a file changes while being read, routine on a live tree, so tolerate 1 and fail above it.
+
+Trap after the assignment, archive published by a rename.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+src="${1:?usage: backup SRC DEST.tar.gz}"
+dest="${2:?usage: backup SRC DEST.tar.gz}"
+
+workdir="$(mktemp -d "$(dirname -- "$dest")/.backup.XXXXXX")"
+trap 'rm -rf -- "$workdir"' EXIT
+
+rc=0
+tar -czf "$workdir/a.tar.gz" -C "$(dirname -- "$src")" "$(basename -- "$src")" || rc=$?
+(( rc <= 1 )) || exit "$rc"
+
+mv -- "$workdir/a.tar.gz" "$dest"
+printf 'wrote %s\n' "$dest"
+```
+=== END
+
+=== PROMPT
+Read a CSV of sales rows and print the top five products by units.
+=== THINK
+`line.split(",")` breaks the first time a product name contains a comma inside quotes. `csv.DictReader` handles the quoting and gives named access.
+
+```python
+with open(path, newline="", encoding="utf-8") as fh:
+    for row in csv.DictReader(fh):
+        counts[row["productName"]] += int(row["units"])
+```
+`newline=""` is not optional: without it the module's newline handling fights the file object on quoted fields that contain line breaks.
+
+`collections.Counter` rather than a dict, because `Counter.most_common(5)` is exactly the report and it sorts once at the end.
+
+`int(row["units"])` raises `ValueError` on a blank cell, and a misspelled `productName` header raises `KeyError` -- catch both per row and count the skips, so a malformed export is visible rather than silently short.
+
+`Counter.update` would be neater than `+=`, but `+=` on a `Counter` already handles the missing key, so no `defaultdict` and no `setdefault`.
+
+Quoting handled by the reader, ranking by `most_common`, bad rows counted not hidden.
+=== ANSWER
+```python
+import csv
+from collections import Counter
+
+def top_products(path, n=5):
+    counts = Counter()
+    skipped = 0
+    with open(path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                counts[row["productName"]] += int(row["units"])
+            except (KeyError, ValueError, TypeError):
+                skipped += 1
+    return counts.most_common(n), skipped
+```
+=== END
+
+=== PROMPT
+Style a form so keyboard users see a focus ring but mouse users do not.
+=== THINK
+`outline: none` on `:focus` is how this gets broken -- it removes the ring for everyone, keyboard included. `:focus-visible` already encodes the heuristic.
+
+```css
+:where(button, input, select):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+```
+`:where()` keeps specificity at zero, so a component can override without an `!important` arms race.
+
+The old trick was a `mousedown` listener writing a class onto `documentElement` and a `keydown` listener taking it off -- two listeners and a `documentElement` write per Tab press to reproduce what the engine already knows, and a `KeyboardEvent` never fires for focus moved by script, so the `KeyboardEvent` path is wrong twice over.
+
+Support: an unknown pseudo-class invalidates the whole selector list, so `:focus` and `:focus-visible` cannot share a rule. Separate blocks, fallback first.
+
+`outline-offset` rather than a `box-shadow` ring, since outline follows `border-radius` now and never affects layout.
+
+Zero-specificity ring, no script, fallback kept separate.
+=== ANSWER
+```css
+:root { --focus: #2563eb; }
+
+/* fallback for engines without :focus-visible */
+:where(button, [href], input, select, textarea):focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+:where(button, [href], input, select, textarea):focus:not(:focus-visible) {
+  outline: none;
+}
+
+:where(button, [href], input, select, textarea):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+```
+=== END
+
+=== PROMPT
+A theme toggle: light, dark, or follow the system, remembered across reloads.
+=== THINK
+Three states, not a boolean: `light`, `dark` or `system`, and the stored string is the mode.
+
+```js
+const stored = localStorage.getItem('theme');
+if (stored) document.documentElement.dataset.theme = stored;
+```
+`documentElement` rather than `body`, so that `documentElement` write lands before first layout and prevents the flash.
+
+I first guarded a `prefers-color-scheme` block with `:root:not([data-theme="light"])`. Resolving it in script is simpler: `matchMedia(...)` gives a `MediaQueryList`, `MediaQueryList.matches` says where system points, and CSS needs one attribute rule; a `change` listener re-resolves in system mode.
+
+Three states, one attribute rule, system changes still heard.
+=== ANSWER
+```html
+<button id="theme" type="button">Theme: system</button>
+<style>
+  :root { --bg: #fff; --fg: #111; }
+  :root[data-theme="dark"] { --bg: #111; --fg: #eee; }
+  body { background: var(--bg); color: var(--fg); }
+</style>
+<script>
+  const root = document.documentElement, btn = document.getElementById('theme');
+  const mql = matchMedia('(prefers-color-scheme: dark)');
+  const ORDER = ['system', 'light', 'dark'];
+  let mode = localStorage.getItem('theme') ?? 'system';
+  const apply = () => {
+    const dark = mode === 'dark' || (mode === 'system' && mql.matches);
+    root.dataset.theme = dark ? 'dark' : 'light';
+    localStorage.setItem('theme', mode);
+    btn.textContent = `Theme: ${mode}`;
+  };
+  btn.onclick = () => { mode = ORDER[(ORDER.indexOf(mode) + 1) % ORDER.length]; apply(); };
+  mql.addEventListener('change', apply);
+  apply();
+</script>
+```
+=== END
+
+=== PROMPT
+Sort a table by clicking a column header, alternating ascending and descending.
+=== THINK
+Rebuilding from a data array would be cleaner, but this table is server-rendered, so sort the `<tr>` nodes and re-append them.
+
+```js
+const rows = Array.from(tbody.rows);
+rows.sort((a, b) => collator.compare(key(a), key(b)));
+tbody.append(...rows);
+```
+`tbody.append(...rows)` moves the nodes rather than cloning, so listeners and checkbox state survive.
+
+`localeCompare` per comparison builds a collator every time. Hoist one `Intl.Collator` with `numeric: true`, and that `Collator` puts `item2` before `item10`.
+
+Numeric columns should not reach the `Collator` at all -- read `dataset.sortValue` when the cell has one, and a `sortValue` sorts dates by ISO string too.
+
+Direction lives on `th.dataset.dir`, not a module variable, which would break with two tables on one page.
+
+Nodes moved not rebuilt, one hoisted collator, state on the header.
+=== ANSWER
+```js
+const collator = new Intl.Collator(undefined, { numeric: true });
+
+function makeSortable(table) {
+  const tbody = table.tBodies[0];
+  table.tHead.addEventListener('click', e => {
+    const th = e.target.closest('th');
+    if (!th) return;
+    const dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+    th.dataset.dir = dir;
+    const key = r => r.cells[th.cellIndex].dataset.sortValue
+      ?? r.cells[th.cellIndex].textContent.trim();
+    const rows = Array.from(tbody.rows).sort((a, b) => {
+      const n = Number(key(a)) - Number(key(b));
+      const c = Number.isNaN(n) ? collator.compare(key(a), key(b)) : n;
+      return dir === 'asc' ? c : -c;
+    });
+    tbody.append(...rows);
+  });
+}
+```
+=== END
+
+=== PROMPT
+Rename a batch of dated files into year/month subfolders.
+=== THINK
+`os.rename` with `os.path.join` string work is noisy. `pathlib.Path` carries `Path.stem` and `Path.suffix`, so the destination is built by joining.
+
+```python
+stamp = datetime.strptime(src.stem[:10], "%Y-%m-%d")
+dest = root / f"{stamp:%Y}" / f"{stamp:%m}" / src.name
+dest.parent.mkdir(parents=True, exist_ok=True)
+```
+`Path.glob`, not `Path.rglob`, or the second run walks the folders it just created.
+
+`strptime` raises `ValueError` on a name without a leading date. Skip and count those through `logging.getLogger(__name__)`; a module-level `getLogger` leaves formatting to the caller.
+
+`Path.rename` silently overwrites on POSIX, so a collision loses data: check `dest.exists()` and suffix a counter with `Path.with_stem`.
+
+Dates parsed defensively, collisions renamed rather than clobbered.
+=== ANSWER
+```python
+import logging
+from datetime import datetime
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+def file_by_month(root, pattern="*.jpg"):
+    root = Path(root)
+    moved = skipped = 0
+    for src in root.glob(pattern):
+        try:
+            stamp = datetime.strptime(src.stem[:10], "%Y-%m-%d")
+        except ValueError:
+            skipped += 1
+            continue
+        dest = root / f"{stamp:%Y}" / f"{stamp:%m}" / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while dest.exists():
+            dest = dest.with_stem(f"{src.stem}-{n}")
+            n += 1
+        src.rename(dest)
+        moved += 1
+    log.info("moved %d, skipped %d", moved, skipped)
+    return moved
+```
+=== END
+
+=== PROMPT
+Poll an endpoint from the browser until a job finishes, without stacking requests.
+=== THINK
+`setInterval` is the wrong primitive: a poll slower than the interval stacks requests and they land out of order. An `async` loop with an awaited sleep schedules the next poll only after the previous settles.
+
+```js
+const res = await fetch(`/jobs/${encodeURIComponent(jobId)}`, { signal });
+const job = await res.json();
+if (job.state !== 'running') return job;
+await sleep(interval);
+```
+`jobId` goes through `encodeURIComponent`, since an id from user input can carry a slash.
+
+Unbounded looping on a stuck job is the obvious hole: take `Date.now()` once for the deadline and compare `Date.now()` each turn, then throw.
+
+Backoff -- a flat second over a ten-minute job is 600 requests, so grow the interval with `Math.min(interval * 1.5, 15000)`.
+
+Sequential by construction, deadline enforced, interval grows to a ceiling.
+=== ANSWER
+```js
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+export async function waitForJob(jobId, { signal, timeoutMs = 600000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let interval = 1000;
+  while (Date.now() < deadline) {
+    const res = await fetch(`/jobs/${encodeURIComponent(jobId)}`, { signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const job = await res.json();
+    if (job.state !== 'running') return job;
+    await sleep(interval);
+    interval = Math.min(interval * 1.5, 15000);
+  }
+  throw new Error(`Job ${jobId} still running after ${timeoutMs}ms`);
+}
+```
+=== END
+
+=== PROMPT
+Type a settings object so a partial override merges over defaults in TypeScript.
+=== THINK
+`Partial<Settings>` for the override and `Settings` for the result, since the merge always fills the gaps.
+
+```ts
+function withDefaults(over: Partial<Settings> = {}): Settings {
+  return { ...DEFAULTS, ...over };
+}
+```
+That compiles and lies about nesting: `Partial<Settings>` only makes the top level optional, so `{ editor: { fontSize: 14 } }` is rejected for missing the other `editor` fields.
+
+A recursive `DeepPartial<T>` fixes the type and breaks the implementation instead -- the spread replaces `editor` wholesale, so `fontSize` arrives and `tabSize` disappears. Type and code have to change together.
+
+So `DeepPartial<T>` mapped recursively over `T[K] extends object`, plus a merge that recurses on plain objects and assigns everything else.
+
+Arrays must not merge element-wise: `excludePaths: ['dist']` means that list, not the defaults plus one. `Array.isArray` makes them leaves.
+
+Recursive type, matching recursive merge, arrays treated as leaves.
+=== ANSWER
+```ts
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends readonly unknown[] ? T[K]
+    : T[K] extends object ? DeepPartial<T[K]>
+    : T[K];
+};
+
+const isPlain = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+export function merge<T extends object>(base: T, over: DeepPartial<T>): T {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(over)) {
+    const prev = out[k];
+    out[k] = isPlain(prev) && isPlain(v) ? merge(prev, v as never) : v;
+  }
+  return out as T;
+}
+```
+=== END
+
+=== PROMPT
+Check a list of URLs in parallel from Python and report each status code.
+=== THINK
+A sequential loop over `urllib.request.urlopen` just waits on sockets. I/O bound, so `ThreadPoolExecutor`, not `ProcessPoolExecutor`: processes would pay pickling for nothing.
+
+```python
+with ThreadPoolExecutor(max_workers=8) as pool:
+    futures = {pool.submit(probe, u): u for u in urls}
+    for fut in as_completed(futures):
+        out[futures[fut]] = fut.result()
+```
+`pool.map` is shorter but yields in submission order and raises on the first failure; `as_completed` over a future-to-url dict keeps every outcome.
+
+`fut.result()` re-raises whatever the worker raised, so `probe` must catch `URLError` itself and return a `statusCode` of 0. `HTTPError` is a response, so a 404 is a real `statusCode`.
+
+Threads for I/O, every outcome collected, `statusCode` defined even on failure.
+=== ANSWER
+```python
+import urllib.error, urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def probe(url, timeout=5):
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, OSError):
+        return 0
+
+def check_all(urls, workers=8):
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(probe, u): u for u in urls}
+        for fut in as_completed(futures):
+            out[futures[fut]] = {"statusCode": fut.result()}
+    return out
+```
+=== END
+
+=== PROMPT
+Build a star-rating widget as a custom element with a value property.
+=== THINK
+`customElements.define` plus a class extending `HTMLElement`. The upgrade order is the trap: a property assigned before the definition loads sits on the instance and shadows the accessor.
+
+```js
+connectedCallback() {
+  const v = this.value;
+  delete this.value;
+  this.value = v;
+}
+```
+Rendering in the constructor throws -- an `HTMLElement` may not touch attributes there -- so it belongs in `connectedCallback`. I considered `attachShadow`; a text readout gains nothing from it.
+
+State in the attribute, not a field: `observedAttributes` and `attributeChangedCallback` give one render path, markup or setter.
+
+`tabIndex` keeps `StarRating` off the mouse-only path; `bubbles: true` lets a form handler above `StarRating` hear it.
+
+Upgrade handled, one render path, attribute as the single source.
+=== ANSWER
+```js
+class StarRating extends HTMLElement {
+  static observedAttributes = ['value'];
+
+  get value() { return Number(this.getAttribute('value') ?? 0); }
+  set value(v) { this.setAttribute('value', String(Math.max(0, Math.min(5, v)))); }
+
+  connectedCallback() {
+    this.tabIndex = 0;
+    if (!this.hasAttribute('value')) this.value = 0;
+    this.addEventListener('keydown', e => {
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+      if (!step) return;
+      this.value += step;
+      this.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+
+  attributeChangedCallback() {
+    this.textContent = '*'.repeat(this.value);
+  }
+}
+customElements.define('star-rating', StarRating);
+```
+=== END
+
+=== PROMPT
+List the pods in a namespace that have restarted, newest first, from a shell script.
+=== THINK
+Parsing the `kubectl get pods` table breaks the moment a column moves. Structured output instead: `.status.containerStatuses` and `.metadata.creationTimestamp` say it directly.
+
+```bash
+kubectl get pods -n "$ns" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
+```
+`.status.containerStatuses` is absent on a pending pod, and jsonpath prints nothing for a missing field, which silently shifts the columns. `jq` handles the absence explicitly, so pipe `-o json` into it.
+
+In `jq`: `(.status.containerStatuses // []) | map(.restartCount) | add // 0`, which also sums a multi-container pod instead of reporting the first.
+
+For a bare container it would be `docker inspect -f '{{.State.Running}}'`, but `.State` carries no restart history, which is why the pod status is the better source.
+
+Sorting by `.metadata.creationTimestamp` inside `jq` beats piping to `sort`: RFC3339 strings sort lexically and stay with their names.
+
+Structured end to end, missing statuses handled, sorted where the fields still exist.
+=== ANSWER
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ns="${1:?usage: restarts NAMESPACE}"
+
+kubectl get pods -n "$ns" -o json \
+  | jq -r '
+      [ .items[]
+        | { name: .metadata.name,
+            created: .metadata.creationTimestamp,
+            restarts: ((.status.containerStatuses // []) | map(.restartCount) | add // 0) }
+      ]
+      | map(select(.restarts > 0))
+      | sort_by(.created) | reverse
+      | .[] | [.restarts, .name, .created] | @tsv' \
+  | column -t
+```
+=== END
+
+=== PROMPT
+Type a lookup table so the keys are checked and the values are inferred, in TypeScript.
+=== THINK
+`const ROUTES: Record<string, string>` widens every key to `string`, so a typo at the call site compiles. `as const` keeps the literal keys and values.
+
+```ts
+const ROUTES = {
+  home: '/',
+  settings: '/settings',
+} as const;
+export type RouteName = keyof typeof ROUTES;
+```
+`keyof typeof ROUTES` is the whole trick: `typeof` recovers the inferred object type and `keyof` narrows it to `'home' | 'settings'`, which `pathFor` then enforces on its parameter.
+
+`as const` also makes the values `readonly`, so a later assignment is a compile error rather than a runtime surprise.
+
+I wanted a type annotation on `ROUTES` for documentation -- that defeats the inference, since annotating widens it back. `satisfies` gives the check without the widening, which is the pair I want.
+
+Reverse lookup needs `Object.entries`, and `Object.entries` types the keys as `string`, so one cast at that boundary and `pathFor` stays clean.
+
+Literal inference kept, keys checked by `keyof typeof`, `satisfies` in place of an annotation.
+=== ANSWER
+```ts
+export const ROUTES = {
+  home: '/',
+  settings: '/settings',
+  billing: '/settings/billing',
+} as const satisfies Record<string, `/${string}`>;
+
+export type RouteName = keyof typeof ROUTES;
+export type RoutePath = (typeof ROUTES)[RouteName];
+
+export function pathFor(name: RouteName): RoutePath {
+  return ROUTES[name];
+}
+
+export function nameFor(path: string): RouteName | undefined {
+  const entries = Object.entries(ROUTES) as [RouteName, RoutePath][];
+  return entries.find(([, p]) => p === path)?.[0];
+}
+```
+=== END
+
+=== PROMPT
+Lay out a card that switches from stacked to side-by-side based on its own width.
+=== THINK
+A media query measures the viewport, but this card sits in a sidebar on one page and full width on another, so the viewport says nothing useful. A container query measures the parent.
+
+```css
+.card-host { container: card / inline-size; }
+@container card (min-width: 30rem) {
+  .card { grid-template-columns: 12rem 1fr; }
+}
+```
+`inline-size` and not `size`: the block variant needs a fixed height or the element collapses, and only the inline axis is being asked about.
+
+The query targets a descendant of the container, never the container itself -- I first put `container-type` on `.card` and queried `.card`, which never matches. Hence the separate `.card-host` wrapper.
+
+The scripted alternative toggles a class from a `ResizeObserver` entry's `contentRect`; that is a `ResizeObserver` per card and a `contentRect` read per resize, for a layout rule.
+
+Naming the container stops a nested container capturing the query later.
+
+Stacked is the default rule and the wide layout is the enhancement, so it degrades correctly.
+=== ANSWER
+```css
+.card-host {
+  container-type: inline-size;
+  container-name: card;
+}
+
+.card {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+.card img { width: 100%; border-radius: 8px; }
+
+@container card (min-width: 30rem) {
+  .card { grid-template-columns: 12rem 1fr; }
+}
+```
+=== END
+
+=== PROMPT
+Drag and drop an image file onto a box and show a preview, single HTML file.
+=== THINK
+Both `dragover` and `drop` need `preventDefault`; the `dragover` one is the non-obvious half, since without it no `drop` fires at all.
+
+```js
+box.addEventListener('dragover', e => {
+  e.preventDefault();
+  box.classList.add('over');
+});
+```
+`e.dataTransfer.files` is the simple path. `DataTransfer` also exposes `items`, the only way to notice a dropped folder, and such a `DataTransfer` entry has an empty `type`.
+
+`FileReader` with `readAsDataURL` works, but `URL.createObjectURL` is synchronous and skips base64. It leaks until `URL.revokeObjectURL`, so revoke on `load`.
+
+Both defaults prevented, object URL revoked on load, no flicker.
+=== ANSWER
+```html
+<div id="box">Drop an image here</div>
+<img id="preview" alt="">
+<style>#box{border:2px dashed #94a3b8;padding:2rem;text-align:center}#box.over{border-color:#2563eb}</style>
+<script>
+  const box = document.getElementById('box'), preview = document.getElementById('preview');
+  box.addEventListener('dragover', e => { e.preventDefault(); box.classList.add('over'); });
+  box.addEventListener('dragleave', () => box.classList.remove('over'));
+  box.addEventListener('drop', e => {
+    e.preventDefault();
+    box.classList.remove('over');
+    const file = e.dataTransfer.files[0];
+    if (!file?.type.startsWith('image/')) { box.textContent = 'Images only'; return; }
+    const url = URL.createObjectURL(file);
+    preview.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+    preview.src = url;
+  });
+</script>
+```
+=== END
