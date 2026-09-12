@@ -175,6 +175,7 @@ class Host:
     cores: int = 0
     note: str = ""
     busy: str = ""      # a process already holding an arena, if there is one
+    boxes: int = 1      # machines pooled by DSV41_BOXES; > 1 is sizing, not serving
     checked: float = 0.0    # when `busy` was last probed
 
     @property
@@ -238,9 +239,10 @@ def refresh(host: Host, busy_every: float = 4.0) -> Host:
     own, so a budget checked against a startup reading is already stale;
     /proc/meminfo is two lines and costs nothing per frame. The process probe
     forks, so it is throttled."""
-    total, avail = _meminfo()
-    if total:
-        host.total_bytes, host.available_bytes = total, avail
+    if not (_env_gb("DSV41_HOST_TOTAL_GB") or _env_gb("DSV41_HOST_AVAIL_GB") or host.boxes > 1):
+        total, avail = _meminfo()
+        if total:
+            host.total_bytes, host.available_bytes = total, avail
     now = time.monotonic()
     if now - host.checked >= busy_every:
         host.busy = _busy()
@@ -248,9 +250,33 @@ def refresh(host: Host, busy_every: float = 4.0) -> Host:
     return host
 
 
+# The machine, overridable. The defaults come from /proc, but a keep-set has to
+# be sized for the box it will run on, which is often not the box you are
+# sitting at. These let you plan for one:
+#
+#   DSV41_HOST_TOTAL_GB   physical memory, in GB
+#   DSV41_HOST_AVAIL_GB   memory free for the engine, in GB
+#   DSV41_BOXES           how many such machines (see below)
+#   DSV41_HOST_NAME       what to call it on screen
+#
+# DSV41_BOXES multiplies the memory and says so. It answers "what could two of
+# these hold", which is a real question: the whole expert set is 222 GB in the
+# 3-bit format, so two 121 GiB machines hold all of it and no keep-set is
+# needed at all. What it does NOT do is make this engine serve across them --
+# there is no pipeline or expert parallelism here, one process, one machine.
+# Treat a BOXES > 1 answer as sizing for a system you would still have to build.
+def _env_gb(name):
+    v = os.environ.get(name)
+    try:
+        return float(v) * GB if v else None
+    except ValueError:
+        return None
+
+
 def read_host() -> Host:
-    """What this machine has, right now. Linux reads /proc; anything else is a
-    stand-in so the tool still runs where it is being edited."""
+    """What this machine has, right now, unless the environment describes a
+    different one. Linux reads /proc; anything else is a stand-in so the tool
+    still runs where it is being edited."""
     total, avail = _meminfo()
     name, is_spark = platform.node(), False
     for p in ("/proc/device-tree/model", "/sys/devices/virtual/dmi/id/product_name"):
@@ -275,8 +301,28 @@ def read_host() -> Host:
     if not total:  # not Linux: show the Spark so the arithmetic is still the real one
         total, avail = 130.6e9, 117.0e9
         note = "no /proc/meminfo here; showing a GB10's 121 GiB"
-    return Host(name=name, total_bytes=total, available_bytes=avail, is_spark=is_spark,
-                cores=os.cpu_count() or 0, note=note, busy=busy, checked=time.monotonic())
+
+    t_over, a_over = _env_gb("DSV41_HOST_TOTAL_GB"), _env_gb("DSV41_HOST_AVAIL_GB")
+    if t_over:
+        total = t_over
+        avail = a_over or t_over * (avail / total if total else 0.9)
+    elif a_over:
+        avail = a_over
+    if t_over or a_over:
+        note = "memory from the environment, not this machine"
+
+    try:
+        boxes = max(1, int(os.environ.get("DSV41_BOXES", "1")))
+    except ValueError:
+        boxes = 1
+    if boxes > 1:
+        total, avail = total * boxes, avail * boxes
+        note = (f"{boxes} machines pooled: sizing only, this engine serves from one "
+                f"(no pipeline or expert parallelism)")
+
+    return Host(name=os.environ.get("DSV41_HOST_NAME") or name, total_bytes=total,
+                available_bytes=avail, is_spark=is_spark, cores=os.cpu_count() or 0,
+                note=note, busy=busy, boxes=boxes, checked=time.monotonic())
 
 
 # --- topics -----------------------------------------------------------------
@@ -493,6 +539,13 @@ class Plan:
     def max_keep(self) -> float:
         slots = self.max_arena() * GB / EXPERT_BYTES[self.fmt] - self.transient
         return max(0.0, slots / N_ROUTED)
+
+    @property
+    def everything_fits(self) -> bool:
+        """Enough memory for every routed expert, so no keep-set is needed at
+        all and the router is never restricted. Two GB10s get to 93 %; three
+        clear it outright."""
+        return self.max_keep() >= 1.0
 
 def plan(host: Host, index: TopicIndex | None, selection, keep: float, max_seq: int,
          fmt: str = "cb3", select: str = "uniform", arena_gb: float | None = None,
