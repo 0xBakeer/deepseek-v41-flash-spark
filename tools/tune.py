@@ -45,28 +45,35 @@ BLOCKS = " ▏▎▍▌▋▊▉█"
 # into the range where long output falls apart, and the prose inside an HTML
 # page is English. Adding it back costs the markup topics about five points of
 # coverage and buys English forty-five.
+# The fourth field is whether the profile has been through the generation gate.
+# None of them has yet, and the screen says so, because coverage cannot see a
+# gap in the topic CATALOGUE -- only a gap in the selection. The Chat profile
+# scored 0.85 or better on all five of its topics and still reasoned in circles
+# on a two-train arithmetic question, because no topic in the catalogue carries
+# the register thinking mode writes in. Coverage warned about nothing, because
+# there was nothing to warn about. Only a generation gate finds that.
 PROFILES = [
     ("Frontend", "HTML, CSS, JavaScript, TypeScript, and the English around them",
-     ["html", "css", "javascript", "typescript", "english"]),
+     ["html", "css", "javascript", "typescript", "english"], False),
     ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
-     ["python", "go", "java", "sql", "config", "technical", "english"]),
+     ["python", "go", "java", "sql", "config", "technical", "english"], False),
     ("Programming, broadly", "Eleven languages plus the prose that surrounds code",
      ["python", "javascript", "typescript", "go", "rust", "cpp", "java", "php", "ruby",
-      "swift", "sql", "config", "technical", "english"]),
+      "swift", "sql", "config", "technical", "english"], False),
     ("Chat and explanation", "Everyday questions, essays, summaries, technical explanation",
-     ["english", "technical", "academic", "journalism", "translation"]),
+     ["english", "technical", "academic", "journalism", "translation"], False),
     ("Medicine", "Clinical and pharmacological register, with academic prose",
-     ["medical", "academic", "technical", "english"]),
+     ["medical", "academic", "technical", "english"], False),
     ("Law and finance", "Contracts, statutes, filings, financial reporting",
-     ["legal", "finance", "academic", "english"]),
+     ["legal", "finance", "academic", "english"], False),
     ("Data and research", "Python, R, SQL, LaTeX, academic writing",
-     ["python", "rlang", "sql", "latex", "academic", "technical", "english"]),
+     ["python", "rlang", "sql", "latex", "academic", "technical", "english"], False),
     ("Many languages", "Eleven natural languages, for translation and multilingual chat",
      ["english", "german", "french", "spanish", "italian", "portuguese", "arabic",
-      "chinese", "japanese", "russian", "turkish"]),
+      "chinese", "japanese", "russian", "turkish"], False),
     ("Writing", "Journalism, marketing copy, essays, translation",
-     ["english", "journalism", "marketing", "academic", "translation"]),
-    ("Everything", "Every topic this keep-set carries, spread thin", None),
+     ["english", "journalism", "marketing", "academic", "translation"], False),
+    ("Everything", "Every topic this keep-set carries, spread thin", None, False),
 ]
 KEEP_STEPS = [round(0.02 * i, 2) for i in range(3, 31)]          # 6 % .. 60 %
 CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
@@ -102,9 +109,18 @@ def short_path(path: str | None) -> str:
     return path if rel.startswith("..") else rel
 
 
+class MissingStats(Exception):
+    """--stats named a file that is not there. Silence here is dangerous: the
+    tool would carry on with no keep-set, write no TRACE_STATS, and the
+    launcher would fall back to whichever results/trace-* directory sorts last
+    -- which may carry no topics at all and fail three minutes into a load."""
+
+
 def find_stats(explicit: str | None) -> str | None:
     if explicit:
-        return explicit if os.path.exists(explicit) else None
+        if not os.path.exists(explicit):
+            raise MissingStats(explicit)
+        return explicit
     prof = os.environ.get("EXPERT_PROFILE")
     if prof:
         p = os.path.join(ROOT, "results/keepsets", prof, "coverage.json")
@@ -167,7 +183,7 @@ class State:
         # over it. Walk down until one actually fits.
         ceiling = next((k for k in reversed(KEEP_STEPS) if fits(k)), KEEP_STEPS[0])
 
-        for name, blurb, topics in PROFILES:
+        for name, blurb, topics, gated in PROFILES:
             want = list(self.index.topics) if (topics is None and self.index) else (topics or [])
             avail = [t for t in want if t in have]
             missing = [t for t in want if t not in have]
@@ -197,9 +213,11 @@ class State:
             else:
                 status, tone = "spread thin", "bad"
             out_worst = worst
+            if not gated and avail:
+                status, tone = status + " · untested", "warn"
             out.append({"name": name, "blurb": blurb, "topics": avail, "missing": missing,
                         "keep": keep, "plan": p, "status": status, "tone": tone,
-                        "capped": capped, "worst": out_worst})
+                        "capped": capped, "worst": out_worst, "gated": gated})
         self._profiles = out
         return out
 
@@ -832,7 +850,14 @@ def main() -> int:
 
     COVERAGE_TARGET = a.coverage_target
     host = B.read_host()
-    sp_ = find_stats(a.stats)
+    try:
+        sp_ = find_stats(a.stats)
+    except MissingStats as e:
+        print(f"no such keep-set: {e}", file=sys.stderr)
+        here = sorted(glob.glob(os.path.join(ROOT, "results/keepsets/*/coverage.json")))
+        if here:
+            print("available: " + ", ".join(short_path(x) for x in here), file=sys.stderr)
+        return 2
     index = B.TopicIndex(sp_) if sp_ else None
     sel = [t.strip() for t in a.topics.split(",") if t.strip()]
     unknown = [t for t in sel if not index or t not in index.topics] if sel else []
@@ -900,6 +925,10 @@ def main() -> int:
             print(f"  {t:<14} {bar(cur[t][n], 24)} {cur[t][n]:.2f}  {nt:>8,} tokens{flag}")
         return 0
 
+    if a.write and not sp_:
+        print("refusing to write .env: no keep-set found, so TRACE_STATS would be dropped and "
+              "the launcher would pick an arbitrary trace", file=sys.stderr)
+        return 2
     if a.show or a.write or not sys.stdout.isatty():
         p = st.plan()
         env = env_for(st)
