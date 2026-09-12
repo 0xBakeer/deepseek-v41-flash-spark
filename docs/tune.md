@@ -5,36 +5,41 @@ real choice, and it is the one configuration decision on this machine that chang
 the model is good at and whether it loads at all.
 
 `./tune.sh` is that choice on one screen: pick topics, watch what they cost against the memory
-the box has *right now*, and start the server from the same screen.
+the box has *right now*, and start the server from the same screen. The picture below is a real
+render on a GB10 — including the hollow bars, which are the tool telling you those topics were
+traced on too little text to be believed.
 
 ```
- DeepSeek-V4.1-Flash                     NVIDIA GB10 · 130.6 GB · 117.4 free · cb3 experts
+ DeepSeek-V4.1-Flash                          NVIDIA GB10 · 130.6 GB · 117.0 free · cb3 experts
 
- T O P I C S                                      B U D G E T
- 35 available · 3 selected
- ───────────────────────────────────────────────  ──────────────────────────────────────
-▌● python             ████████████████▏··· 0.91   experts resident        5,990 / 15,360
- ● html               ██████████████▎····· 0.82                                   39.0 %
- ○ rust               ██████▏············· 0.35
- ● german             █████████████▊······ 0.79   expert arena                   86.6 GB
- ○ sql                ████████▏··········· 0.46   dense weights                   7.6 GB
-                                                  drafter experts                 7.2 GB
-                                                  KV cache · 32k                  285 MB
-                                                  ──────────────────────────────────────
-                                                  resident                      101.7 GB
-                                                  free after load                15.3 GB
-
-                                                  room to launch                +13.8 GB
-                                                                                  FITS
- ───────────────────────────────────────────────
- R E S I D E N T   E X P E R T S
- ◂   39 % ▸ ███████████████▌·············  max 45 % here
+ T O P I C S                                          B U D G E T
+ 35 available · 3 selected · 19 below
+ ──────────────────────────────────────── traced ───  ────────────────────────────────────────
+▌ ○ academic          ▒▒▒▒▒▒▒······· 0.52   428       experts resident          6,000 / 15,360
+  ○ arabic            ▒▒▒▒▒▒········ 0.46   513                                         39.1 %
+  ○ chinese           ▒▒▒▒▒▒········ 0.45   286
+  ○ config            ▒▒▒▒▒▒▒▒▒····· 0.69   765       expert arena                     86.8 GB
+  ○ cpp               ▒▒▒▒▒▒▒▒▒····· 0.65   644       dense weights                     7.6 GB
+  ○ css               ▒▒▒▒▒▒▒▒▒▒▒··· 0.81   671       drafter experts                   7.2 GB
+  ● english           ███████████▎·· 0.80  2.8k       KV cache · 32k                    285 MB
+  ○ finance           ▒▒▒▒▒▒▒······· 0.52   382       ────────────────────────────────────────
+  ○ french            ▒▒▒▒▒▒········ 0.48   331       resident                        102.0 GB
+  ○ german            ▒▒▒▒▒▒▒······· 0.51   583       free after load                  15.0 GB
+  ○ go                ▒▒▒▒▒▒▒▒▒····· 0.65   553
+  ● html              ▒▒▒▒▒▒▒▒▒▒▒··· 0.85  1.3k       room to launch                  +13.5 GB
+  ○ italian           ▒▒▒▒▒▒▒······· 0.52   371                                          FITS
+  ○ japanese          ▒▒▒▒▒········· 0.42   359
+  ○ java              ▒▒▒▒▒▒▒▒▒····· 0.69   554
+  ● javascript        ▒▒▒▒▒▒▒▒▒▒▒▒·· 0.87  1.2k       A step reads only the experts a token
+                                                      activates. Topics change the keep
+ ───────────────────────────────────────────────────  fraction you need — and that is the
+ R E S I D E N T   E X P E R T S                      arena, not the step.
+ ◂   39 % ▸ ██████████████████▊··········  max 41 % here
 
  C O N T E X T
- ◂   32k ▸  run to 32k here; the cache alone has room for 2.9M
-
- weakest selected topic  german 0.79      raise to 46 % for 0.85 on every one
- ↑↓ topic   space select   ←→ adjust   tab pane   a all   n none   / filter   m fit   r RUN
+ ◂   32k ▸  cache has room for 2.8M
+ 2 selected topics traced on too little text — bars read high
+ ↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  m fit  r RUN  q quit
 ```
 
 ## Where the header's numbers come from

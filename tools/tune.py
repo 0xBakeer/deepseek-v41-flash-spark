@@ -330,8 +330,10 @@ def draw(w, st: State):
     t, v = p.weakest
     if thin_sel and not st.msg:
         n = len(thin_sel)
-        put(w, fy, 1, f"{n} selected topic{'s' if n > 1 else ''} traced on too little text; "
-                      f"those bars read high because the sample chose the experts", C["bad"])
+        long_ = (f"{n} selected topic{'s' if n > 1 else ''} traced on too little text — those bars "
+                 f"read high because the sample chose the experts")
+        short = f"{n} selected topic{'s' if n > 1 else ''} traced on too little text — bars read high"
+        put(w, fy, 1, long_ if len(long_) <= W - 3 else short, C["bad"])
     elif t:
         col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
         put(w, fy, 1, "weakest selected topic  ", C["muted"])
