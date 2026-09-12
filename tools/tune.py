@@ -319,14 +319,21 @@ def draw(w, st: State):
         put(w, fy, 1, "weakest selected topic  ", C["muted"])
         put(w, fy, 25, f"{t} {v:.2f}", col | curses.A_BOLD)
         need = st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET) if st.index else None
-        if need and abs(need - st.keep) > 0.005:
+        mk = p.max_keep()
+        if need and need > mk:
+            # the target is out of this box's reach: say how much of the
+            # selection it CAN serve at the largest keep that fits
+            curves = st.curves()
+            names = sorted(st.sel) if st.sel else list(curves)
+            n = B.keep_n(min(mk, 1.0))
+            ok = sum(1 for t in names if curves.get(t, [0] * 385)[n] >= COVERAGE_TARGET)
+            rec = f"at the {mk:.0%} this box holds, {ok} of {len(names)} reach {COVERAGE_TARGET:.2f}"
+            put(w, fy, min(45, W - len(rec) - 2), rec, C["warn"])
+        elif need and abs(need - st.keep) > 0.005:
             verb = "raise to" if need > st.keep else "enough at"
-            q = B.plan(st.host, st.index, tuple(sorted(st.sel)), need, st.max_seq, fmt=st.fmt)
-            tail = "" if q.verdict != "over" else "  — more than this box holds"
-            rec = (f"{verb} {need * 100:.0f} % for {COVERAGE_TARGET:.2f} on every one{tail}"
-                   if W >= 96 else f"{verb} {need * 100:.0f} %{tail}")
-            put(w, fy, min(45, W - len(rec) - 2), rec,
-                C["warn"] if q.verdict == "over" else C["muted"])
+            rec = (f"{verb} {need * 100:.0f} % for {COVERAGE_TARGET:.2f} on every one"
+                   if W >= 96 else f"{verb} {need * 100:.0f} %")
+            put(w, fy, min(45, W - len(rec) - 2), rec, C["muted"])
     elif st.index and st.index.topics:
         put(w, fy, 1, "no topic selected — the keep-set would use all of them", C["muted"])
     if st.msg:
@@ -414,13 +421,18 @@ def loop(w, st: State) -> str | None:
         elif k == ord("f"):
             st.fmt = "fp4" if st.fmt == "cb3" else "cb3"
         elif k == ord("m"):                     # snap to the coverage target
-            need = st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET) if st.index and st.sel else None
+            need = st.index.keep_for(tuple(sorted(st.sel)), COVERAGE_TARGET) if st.index else None
             if need:
                 st.keep = step(KEEP_STEPS, need, 0)
                 if st.keep < need:
                     st.keep = step(KEEP_STEPS, st.keep, 1)
+                what = "every selected topic" if st.sel else "every topic in this keep-set"
+                if st.plan().verdict == "over":
+                    st.msg = f"{COVERAGE_TARGET:.2f} on {what} needs {need:.0%}, which this box cannot hold"
+            elif st.index and st.index.topics:
+                st.msg = f"nothing reaches {COVERAGE_TARGET:.2f} on all of them, even at 100 %"
             else:
-                st.msg = "no keep fraction reaches that on every selected topic"
+                st.msg = "this keep-set carries no per-topic histogram to fit to"
         elif k in (ord("r"), ord("R")):
             p = st.plan()
             if st.host.busy:

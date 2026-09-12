@@ -288,7 +288,9 @@ class TopicIndex:
         return {t: c[n] for t, c in curves.items()}
 
     def keep_for(self, selection: tuple, target: float, select: str = "uniform") -> float | None:
-        """Smallest keep fraction at which every selected topic reaches `target`."""
+        """Smallest keep fraction at which every selected topic reaches `target`.
+        An empty selection means every topic, which is what the engine ranks on."""
+        selection = tuple(selection) or tuple(self.topics)
         got = self.curves(selection, select)
         if not got:
             return None
