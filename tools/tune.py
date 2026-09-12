@@ -336,7 +336,13 @@ def draw_easy(w, st: State):
         if weakest and W >= 88:
             note = f"weakest of them: {weakest} at {p.coverage.get(weakest, 0):.2f} coverage"
             put(w, h - 2, 1, note[:W - 2], C["muted"])
-    keys = "↑↓ choose · ←→ context · enter apply and inspect · v topic view · r RUN · q quit"
+    for keys in (
+        "↑↓ choose · ←→ context · enter apply and inspect · v topic view · w write · r RUN · q quit",
+        "↑↓ choose · ←→ context · enter inspect · v topics · w write · r RUN · q quit",
+        "↑↓ ←→ · enter inspect · v topics · r RUN · q quit",
+    ):
+        if len(keys) <= W - 2:
+            break
     put(w, h - 1, 1, keys[:W - 2], C["muted"])
     w.noutrefresh()
     curses.doupdate()
