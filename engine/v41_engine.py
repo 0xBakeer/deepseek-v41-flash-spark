@@ -307,7 +307,12 @@ def _maxmin_counts(per: dict, frac: float, n_layers: int = 40, n_experts: int = 
             p[t] = c / tot if tot > 0 else c
         order = {t: np.argsort(p[t])[::-1] for t in topics}
         ptr = {t: 0 for t in topics}
-        got = {t: 0.0 for t in topics}
+        # A topic with no mass in this layer would otherwise be the least covered forever and hand
+        # every slot to its argsort of zeros; it has nothing to ask for, so it does not vote here.
+        got = {t: (0.0 if p[t].sum() > 0 else float("inf")) for t in topics}
+        if all(np.isinf(got[t]) for t in topics):
+            out[L] = np.zeros(n_experts)
+            continue
         admitted, seen = [], set()
         while len(admitted) < n_keep:
             t = min(topics, key=lambda t: got[t])
@@ -589,7 +594,9 @@ class V41Engine:
             # while another starves, optimises the wrong end of the distribution. At keep 0.36 over
             # {english, html, python, reasoning, css, javascript} the sum rule leaves a spread of
             # 0.556-0.814 and maxmin leaves 0.676-0.688: the same budget, +0.126 on the minimum.
-            rank = os.environ.get("DSV41_PRUNE_RANK", "sum")  # "max" was measured worse (NOTES 2026-09-12)
+            # `or`, not a default argument: start.sh sources .env with `set -a`, so a line left empty in
+            # env.example arrives here as '' and must still mean the default.
+            rank = os.environ.get("DSV41_PRUNE_RANK") or "sum"  # "max" was measured worse (NOTES 2026-09-12)
             def _norm(c, L):
                 s_ = c[L].sum()
                 return c[L] / s_ if s_ > 0 else c[L]
@@ -598,6 +605,10 @@ class V41Engine:
             elif rank == "max":
                 counts = {L: np.maximum.reduce([_norm(c, L) for c in per.values()]) for L in range(40)}
             elif rank == "maxmin":
+                if prune_select == "global":
+                    # maxmin's scores are admission ranks, not routing mass, and "global" moves slots
+                    # between layers by mass -- the combination would build a set neither rule describes
+                    raise ValueError("DSV41_PRUNE_RANK=maxmin needs PRUNE_SELECT=uniform (global ranks by mass)")
                 counts = _maxmin_counts(per, prune_keep)
             else:
                 raise ValueError(f"unknown DSV41_PRUNE_RANK {rank!r} (max | maxmin | sum)")

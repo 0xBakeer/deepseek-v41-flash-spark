@@ -112,7 +112,20 @@ check("one topic == that topic's own top-N",
 again = maxmin_counts(per, FRAC, n_layers=N_LAYERS, n_experts=N_EXPERTS)
 check("deterministic", all(np.array_equal(scores[L], again[L]) for L in range(N_LAYERS)))
 
-# 5. a budget wider than the histogram must not loop forever or over-admit
+# 5. a topic with no routing mass in a layer must not take that layer
+silent = {L: (np.zeros(N_EXPERTS) if L == 0 else topic(np.arange(300, 330), mass=1.0, rng=rng))
+          for L in range(N_LAYERS)}
+mixed = maxmin_counts({"big": big, "silent": silent}, FRAC, n_layers=N_LAYERS, n_experts=N_EXPERTS)
+layer0 = set(np.where(mixed[0] > 1.0)[0].tolist())
+check("a zero-mass topic does not vote in its empty layer",
+      layer0 == set(top_n({L: norm(big, L) for L in range(N_LAYERS)})[0].tolist()))
+k1 = top_n(mixed)[1]
+cov_silent = silent[1][k1].sum() / silent[1].sum()
+cov_big = big[1][k1].sum() / big[1].sum()
+check("it still votes where it has mass: parity with the other topic",
+      cov_silent > 0.1 and abs(cov_silent - cov_big) < 0.1, f"silent {cov_silent:.3f} big {cov_big:.3f}")
+
+# 6. a budget wider than the histogram must not loop forever or over-admit
 wide = maxmin_counts(per, 1.0, n_layers=N_LAYERS, n_experts=N_EXPERTS)
 check("full budget admits every expert",
       all(int((wide[L] > 1.0).sum()) == N_EXPERTS for L in range(N_LAYERS)))
