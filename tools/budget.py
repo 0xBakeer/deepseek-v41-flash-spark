@@ -49,6 +49,7 @@ except Exception:  # noqa: BLE001
 N_LAYERS = 40
 N_EXPERTS = 384          # routed experts per layer (config.json n_routed_experts)
 N_ROUTED = N_LAYERS * N_EXPERTS   # 15,360
+TOPK = 6                 # routed experts per token (config.json n_activated_experts)
 
 # One expert as it sits in an arena slot.
 #   fp4: 3 x (2304x2560 weights + 2304x160 UE8M0 scales) -- engine/experts.py EXPERT_BYTES
@@ -233,7 +234,14 @@ class TopicIndex:
                 self.counts[t] = per
         self.topics = [t for t in self.topics if t in self.counts]
         self.totals = {t: sum(sum(v) for v in self.counts[t].values()) for t in self.topics}
+        # Every token routes to `n_activated_experts` experts in each of the 40
+        # layers, so the histogram totals divide back to the tokens the trace
+        # actually saw for that topic. A topic sampled thinly ranks noisily, and
+        # its coverage bar is no more trustworthy than the sample under it.
+        self.tokens = {t: int(round(v / (N_LAYERS * TOPK))) for t, v in self.totals.items()}
         self._cache: dict = {}
+
+    THIN = 2000              # tokens below which a ranking is mostly noise
 
     def __bool__(self) -> bool:
         return bool(self.topics)

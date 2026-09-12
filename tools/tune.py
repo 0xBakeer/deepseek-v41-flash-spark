@@ -192,7 +192,9 @@ def draw(w, st: State):
         st.scroll = st.cursor
     if st.cursor >= st.scroll + list_h:
         st.scroll = st.cursor - list_h + 1
-    bw = max(8, split - 30)
+    bw = max(8, split - 37)
+
+    put(w, y + 2, 22 + bw + 5, " traced ", C["muted"])
 
     if not vis:
         if st.index and st.index.topics:
@@ -224,6 +226,10 @@ def draw(w, st: State):
             col = C["good"] if v >= COVERAGE_TARGET else (C["warn"] if v >= 0.7 else C["bad"])
             put(w, row, 22, bar(v, bw), col if on else C["muted"])
             put(w, row, 22 + bw + 1, f"{v:.2f}", (col | curses.A_BOLD) if on else C["muted"])
+        n = (st.index.tokens.get(t, 0) if st.index else 0)
+        thin = n < B.TopicIndex.THIN
+        label = f"{n / 1000:.0f}k" if n >= 10000 else (f"{n / 1000:.1f}k" if n >= 1000 else str(n))
+        put(w, row, 22 + bw + 6, f"{label:>5}", C["bad"] if thin else C["muted"])
     hidden = max(0, len(vis) - list_h - st.scroll)
 
     if hidden:
@@ -499,7 +505,9 @@ def main() -> int:
         n = B.keep_n(a.keep)
         print(f"{os.path.relpath(sp_, ROOT)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}")
         for t in index.topics:
-            print(f"  {t:<14} {bar(cur[t][n], 24)} {cur[t][n]:.2f}")
+            nt = index.tokens.get(t, 0)
+            flag = "  thin" if nt < B.TopicIndex.THIN else ""
+            print(f"  {t:<14} {bar(cur[t][n], 24)} {cur[t][n]:.2f}  {nt:>8,} tokens{flag}")
         return 0
 
     if a.show or a.write or not sys.stdout.isatty():
