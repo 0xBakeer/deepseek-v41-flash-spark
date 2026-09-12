@@ -122,7 +122,8 @@ class Penalties:
     """
 
     def __init__(self, presence: float = 0.0, frequency: float = 0.0, cycle_repeats: int = 4,
-                 cycle_max_period: int = 16, enabled: bool | None = None):
+                 cycle_max_period: int = 16, enabled: bool | None = None,
+                 no_repeat_ngram: int | None = None):
         self.presence = float(presence or 0.0)
         self.frequency = float(frequency or 0.0)
         self.cycle_repeats = int(cycle_repeats)
@@ -130,12 +131,16 @@ class Penalties:
         if enabled is None:
             enabled = os.environ.get("DSV41_CYCLE_BREAK", "1") == "1"
         self.cycle_enabled = bool(enabled)
+        self.no_repeat_ngram = int(no_repeat_ngram if no_repeat_ngram is not None
+                                   else os.environ.get("DSV41_NO_REPEAT_NGRAM", "0"))
         self.counts: dict[int, int] = {}
         self.hits = 0
+        self.ngram_hits = 0
 
     @property
     def active(self) -> bool:
-        return self.presence != 0.0 or self.frequency != 0.0 or self.cycle_enabled
+        return (self.presence != 0.0 or self.frequency != 0.0 or self.cycle_enabled
+                or self.no_repeat_ngram > 0)
 
     def observe(self, tokens) -> None:
         for t in tokens:
@@ -151,6 +156,24 @@ class Penalties:
                 return block[0]
         return None
 
+    def _banned_ngram_tokens(self, history) -> list:
+        """Tokens that would repeat an n-gram of `no_repeat_ngram` already in `history`.
+
+        Same rule as transformers' NoRepeatNGramLogitsProcessor, which is the reference for this
+        behaviour: if the last n-1 tokens have appeared before, every token that followed them is
+        refused. A degenerate loop repeats far more than n tokens, so it is cut on the second turn
+        of the cycle, while ordinary text and code almost never repeat a whole n-gram verbatim.
+        """
+        n = self.no_repeat_ngram
+        if not n or len(history) < n:
+            return []
+        prefix = tuple(history[-(n - 1):])
+        banned = set()
+        for i in range(len(history) - n + 1):
+            if tuple(history[i:i + n - 1]) == prefix:
+                banned.add(history[i + n - 1])
+        return list(banned)
+
     def apply(self, logits: torch.Tensor, history) -> torch.Tensor:
         """logits [V] or [T, V] fp32 -> the same tensor, penalised in place."""
         if self.presence or self.frequency:
@@ -163,6 +186,14 @@ class Penalties:
                     logits[idx] -= pen
                 else:
                     logits[:, idx] -= pen
+        ban = self._banned_ngram_tokens(history)
+        if ban:
+            idx = torch.tensor(ban, device=logits.device, dtype=torch.long)
+            if logits.dim() == 1:
+                logits[idx] = float("-inf")
+            else:
+                logits[:, idx] = float("-inf")
+            self.ngram_hits += 1
         t = self._cycle_token(history)
         if t is not None:
             self.hits += 1

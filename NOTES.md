@@ -2369,3 +2369,49 @@ both prose and HTML at the same budget (`DSV41_PRUNE_RANK`, default `sum`).
 At 288.8 GB of FP4 experts and 121 GiB of memory there is no arrangement that keeps every expert
 resident. Either the experts stream on a miss (full quality, NVMe-bound) or some are dropped (fast,
 and a workload the keep-set does not cover degenerates). The recipe now ships the first.
+
+### 2026-09-12 01:05-02:45 -- the keep-set was learned from a corpus with no markup in it
+
+The configurations that degenerated all shared one thing: the expert keep-set came from
+`corpus/trace_corpus.jsonl`, 50 documents, 14 coding and 36 general, whose only content marker is
+Python. No HTML, no JavaScript, no CSS, no SQL, no configuration files. The experts that write
+markup never fired while the trace was taken, so they ranked cold, and every pruned configuration
+dropped them. That is why a story and a Python class survived pruning while an HTML file collapsed
+into `<!DOCTYPE><!DOCTYPE><!DOCTYPE>` at keep 31 %, 40 % and 44 % alike.
+
+`corpus/trace_corpus_v2.jsonl` is 95 sequences / 18,546 tokens over the same two categories, built
+from sources that cover what the server is actually asked for: two complete HTML pages, a
+stylesheet, an ES module, a React component, a SQL schema, a Kubernetes manifest, a deployment
+script, Python, an incident write-up and a short story. Re-traced over all 40 layers
+(`results/trace-v2`, 68 s/layer, 364 of 384 experts touched at layer 39) and re-ranked. The keep-set
+it produces overlaps the old one by a Jaccard of only 0.70 -- 30 % of the kept experts changed.
+
+Generation gate (story / Python class / single-file HTML game, 300 greedy tokens each, distinct-token
+ratio; <= 0.15 is degenerate):
+
+| keep-set | story | code | html |
+|---|---|---|---|
+| old corpus, keep 44 % CB3 | 0.27 | 0.51 | **0.03** |
+| old corpus, keep 44 % CB3 + a 12-gram repeat ban | 0.32 | 0.51 | **0.07** |
+| **new corpus, keep 44 % CB3** | **0.43** | **0.50** | **0.40** |
+
+Nothing else changed between the last two rows. The repeat ban is not needed and never fires.
+
+Two things follow. The 3-bit expert format was never the problem -- unpruned CB3 passes the gate
+(0.57 / 0.57 / 0.41), and its earlier failure was pruning plus two dense quantizations. And with a
+keep-set that covers the workload, the model has enough margin to carry the fp4 attention/`wo_a`
+projections and the fp8 head again: they pass the same gate (0.30 / 0.56 / 0.42).
+
+Shipped configuration and what it measures, one request each through the server, greedy, 400 tokens:
+
+| workload | tok/s | DSpark acceptance |
+|---|---|---|
+| Python class | 25.0 | 3.92 |
+| story | 20.3 | 2.90 |
+| single-file HTML game | 37.5 | 5.39 |
+
+`PRUNE_KEEP=0.44 EXPERT_FORMAT=cb3 ARENA_GB=98 TRANSIENT_SLOTS=8 KEEP_FREE_GB=6`,
+`TRACE_STATS=results/trace-v2/stats/coverage.json`, fp32 router, fp4 dense on attention and `wo_a`,
+fp8 head, fused attention kernel off. 6,779 experts resident = 44.1 % of all routed experts, expert
+hit rate 1.0, no NVMe traffic during decode. The step is ~145 ms in all three cases; the spread is
+entirely how well the drafter predicts each kind of text.
