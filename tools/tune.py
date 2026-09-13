@@ -79,12 +79,12 @@ PROFILES = [
     ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
      ["python", "go", "java", "sql", "config", "technical", "english",
       "reasoning", "reasoning_code"], False, "maxmin"),
-    # html and css were missing from a fourteen-topic "programming" bundle -- the exact register
-    # the 2026-09-12 fault was found in. php, ruby and swift make way for them: under maxmin at
-    # keep 0.36 the worst-served topic crosses below 0.68 at about sixteen topics on a GB10.
-    ("Programming, broadly", "Nine languages, markup and styles, plus the prose around code",
-     ["python", "javascript", "typescript", "html", "css", "go", "rust", "cpp", "java",
-      "sql", "config", "technical", "english", "reasoning", "reasoning_code"], False, "maxmin"),
+    # "Programming, broadly" carried fifteen topics and passed 4 of 16 on its gate (2026-09-13):
+    # at this box's budget a profile that wide serves nothing. Its registers are now two
+    # profiles of nine -- the web half is Frontend above, the systems half is this.
+    ("Systems programming", "Rust, C++, Go, Java, SQL, config, and the prose around them",
+     ["rust", "cpp", "go", "java", "sql", "config", "technical", "english",
+      "reasoning", "reasoning_code"], False, "maxmin"),
     ("Chat and explanation", "Everyday questions, essays, summaries, technical explanation",
      ["english", "technical", "academic", "journalism", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),
@@ -95,19 +95,20 @@ PROFILES = [
     ("Data and research", "Python, R, SQL, LaTeX, notebooks and config, academic writing",
      ["python", "rlang", "sql", "latex", "academic", "technical", "english", "config",
       "reasoning", "reasoning_code"], False, "maxmin"),
-    # `translation` is the cheapest topic in the file and was missing from the one profile named
-    # for it.
-    ("Many languages", "Eleven natural languages, for translation and multilingual chat",
-     ["english", "german", "french", "spanish", "italian", "portuguese", "arabic",
-      "chinese", "japanese", "russian", "turkish", "translation",
+    # "Many languages" carried fourteen topics and passed 2 of 15 on its gate (2026-09-13) --
+    # every natural-language prompt failed. Split by script family into two profiles of nine.
+    ("European languages", "English, German, French, Spanish, Italian, Portuguese, translation",
+     ["english", "german", "french", "spanish", "italian", "portuguese", "translation",
+      "reasoning", "reasoning_code"], False, "maxmin"),
+    ("World languages", "English, Arabic, Chinese, Japanese, Russian, Turkish, translation",
+     ["english", "arabic", "chinese", "japanese", "russian", "turkish", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),
     ("Writing", "Journalism, marketing copy, essays, translation",
      ["english", "journalism", "marketing", "academic", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),
-    # At keep 0.36 every one of its topics sits between 0.58 and 0.64 -- below the line where
-    # generations hold together. It is the widest choice, not the safe one; it needs a bigger box.
-    ("Everything", "Every topic this keep-set carries, spread thin -- needs more memory than one GB10",
-     None, False, "maxmin"),
+    # "Everything" -- all 37 topics -- passed 4 of 39 on its gate (2026-09-13). It is not a
+    # profile this box can serve and is no longer offered as one; the topic screen still lets a
+    # user select every topic by hand, and the screen will show what that costs.
 ]
 KEEP_STEPS = [round(0.02 * i, 2) for i in range(3, 31)]          # 6 % .. 60 %
 CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]

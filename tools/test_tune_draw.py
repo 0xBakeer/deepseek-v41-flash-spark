@@ -234,7 +234,12 @@ for h, w in SIZES:
 # applying a profile selects its topics, a keep fraction that fits, and the
 # ranking rule it was budgeted with -- the last one because the keep fraction
 # shown for it was computed under that rule and means nothing under another.
-st = T.State(host, index, stats, 0.39, 32768, "cb3", [], rank="sum")
+# The two-topic `general` keep-set above carries none of a built-in profile's topics, so this
+# block needs the topic catalogue -- since "Everything" was retired (2026-09-13) no profile
+# resolves to "all topics in the file" any more.
+topic_stats = os.path.join(ROOT, "results/keepsets/topics/coverage.json")
+topic_index = B.TopicIndex(topic_stats)
+st = T.State(host, topic_index, topic_stats, 0.39, 32768, "cb3", [], rank="sum")
 pr = next(p for p in st.profiles() if p["topics"])
 st.apply_profile(pr)
 check("applying a profile selects its topics", sorted(st.sel) == sorted(pr["topics"]),
@@ -254,7 +259,8 @@ check("  and applying it leaves that rule alone", st.rank, "sum")
 # The same keep fraction under two rules is two different keep-sets, so a
 # coverage bar without the rule next to it cannot be checked against anything.
 for rank in ("sum", "maxmin"):
-    st = T.State(host, index, stats, 0.39, 32768, "cb3", sorted(index.topics)[:3] if index else [],
+    # the catalogue, not the two-topic general set: a profile shows its rule only once it resolves
+    st = T.State(host, topic_index, topic_stats, 0.39, 32768, "cb3", sorted(topic_index.topics)[:3],
                  rank=rank)
     st.view = "advanced"
     rows = [render(st, 40, 140).row(y) for y in range(40)]
