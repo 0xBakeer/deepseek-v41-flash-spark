@@ -301,3 +301,18 @@ Not every shipped profile carries topics. `results/keepsets/general/` has two (`
 for them but no topic list, and `EXPERT_TOPICS` cannot be used with them. Each profile ships a
 `GATE.md` recording which domains were measured, which passed and which failed. Read it before
 choosing one.
+
+## A small topic under `maxmin` reshuffles the tail (2026-09-14)
+
+`maxmin` water-fills to the least-covered selected topic, so a topic whose saliency histogram is
+spread thin — a 40-record deliberation corpus split over four languages, for instance — keeps
+asking for experts and keeps getting them. The coverage screen cannot see the cost: saliency mass
+is so top-heavy (half of it sits on one expert a layer) that swapping the tail moves every bar by
+about 0.005. The keep-set moves a great deal more. Adding `reasoning_lang` to the nine European
+topics at keep 0.36 swapped 513 of the 5,560 resident experts, 3 to 28 a layer and most of them
+in layers 36–39; together with the 600 that 0.40 → 0.36 drops, the run was missing 1,059 experts
+of the 0.40 keep-set it was meant to improve on. The gate went from 6 of 10 to 3 of 10, and the
+two rows that fail loudest (French and German deliberation) are exactly the ones that route into
+that tail. Read a topic's traced token count and its `n80` (experts holding 80 % of its mass)
+before adding it to a bundle: `reasoning_lang` needs 8 a layer where `reasoning_design` needs 1,
+and the latter is the one that helped Frontend.

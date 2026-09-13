@@ -920,3 +920,20 @@ after 582 s. The seven-profile table above stands; the configuration it was meas
 hold a filled context. `env.example` now ships `DSV41_PRUNE_SOURCE=saliency` and
 `DSV41_PRUNE_RANK=maxmin` — proven at 0.36 as well (Frontend: ten of ten prompts finished, no
 corruption) — and leaves the keep fraction to the budget model, which was right.
+
+### 2026-09-14 02:55 — addendum to §5: `reasoning_lang` gated, negative
+
+European languages with `reasoning_lang` in the bundle, keep 0.36, saliency, `maxmin`, thinking
+on: **3 of 10** (en-note and the two reasoning prompts). The 0.40 record without it was 6 of 10.
+Per row: en-explain repeat-looped 50× in reasoning with a sound answer; fr guard-cut at 12k
+tokens looping a French sentence; de think-exited at 59k tokens looping 154×; it corrupted into
+"e e e e"; pt, es and xl-en-fr guard-cut. The new corpus did not change the failure shape of
+French or German deliberation, and it cost Portuguese and the translation row, which had passed.
+
+Why, measured on the Mac from the same coverage file: the topic is spread (`n80` = 8 experts a
+layer, against 1 for `reasoning_design`), `maxmin` pours budget into it, and 513 of the 5,560
+resident experts were swapped out of the tail — invisible to the coverage number (−0.005 a
+topic), decisive for the rows that route there. The two language profiles ship without it again.
+What this leaves: languages other than English are served with thinking **off** (4 of 4 on the
+same keep-set, §5.4); with thinking on they are the open item, and it is not closed by a corpus
+of that shape.
