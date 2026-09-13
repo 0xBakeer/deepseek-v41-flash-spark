@@ -37,6 +37,27 @@ def run(eng, prompt: str, max_tokens: int):
     return out
 
 
+def _wait_for_host_memory(min_gb: float, timeout_s: float = 300.0) -> None:
+    """Block until /proc/meminfo MemAvailable reaches min_gb, or the timeout passes (Linux only)."""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_gb = int(line.split()[1]) / 1e6
+                        break
+                else:
+                    return
+        except OSError:
+            return
+        if avail_gb >= min_gb:
+            return
+        time.sleep(3)
+    log(f"WARNING: MemAvailable did not reach {min_gb:.0f} GB within {timeout_s:.0f}s; loading anyway")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=os.path.expanduser("~/models/DeepSeek-V4.1-Flash"))
@@ -54,6 +75,10 @@ def main() -> int:
         del eng
         import torch
         torch.cuda.empty_cache()
+        # The arena is tens of GB of pinned, page-cache-backed memory and the kernel reclaims it
+        # lazily; on 2026-09-13 the second load here failed with MemAvailable 9.9 GB while the first
+        # engine's memory was still being returned. Wait for it the way stop.sh does.
+        _wait_for_host_memory(min_gb=float(os.environ.get("DSV41_TEST_MIN_FREE_GB", "90")))
 
     failed = 0
     for i, p in enumerate(PROMPTS):
