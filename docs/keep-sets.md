@@ -207,8 +207,9 @@ checkpoint, and the technical report keeps the correction bias for selection onl
 top-*k′* routing with *k′* the picks that survived, about four of six at the keep fractions here;
 it is not an attenuation toward the shared expert. The reason to try it is that a substituted
 expert injects a signal the model was never trained to receive, and the mHC residual feeds that
-error into the next layer's mixing coefficients as well. Whether fewer correct experts beat six
-partly wrong ones is decidable without pruning at all: the unpruned model at `DSV41_TOPK=4`. The motivation is a profile: at the keep fractions here about 30 % of the routing
+error into the next layer's mixing coefficients as well. Measured on Frontend at keep 0.36 with thinking on (2026-09-13): six of six prompts failed under
+`drop`, including a page that passes under `substitute`. Fewer correct experts do not beat six
+partly wrong ones here; `drop` is kept as a documented negative result. The motivation is a profile: at the keep fractions here about 30 % of the routing
 mass is displaced *however* the keep-set is chosen, and on the 2026-09-12 generation gate that
 showed up as rare tokens corrupted at subword boundaries — `clearTimeout` as `cleartimeout`,
 `OSError` as `oenerror`, `.some` as `.s.s` — which the model then loops trying to repair. Changing
