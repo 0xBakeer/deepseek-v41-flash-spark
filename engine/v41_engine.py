@@ -375,6 +375,34 @@ def build_keep_masks(counts: dict, frac: float, select: str, device, min_per_lay
     return masks, keep
 
 
+def build_prune_fallback(masks: dict, topk: int) -> dict:
+    """Per layer, `topk` DISTINCT resident expert ids, as an int64 device tensor [topk].
+
+    DSV41_PRUNE_MODE=drop weights a non-resident pick with exactly 0, but the slot lookup that
+    follows still has to name an expert that HAS an arena slot: the device LUT holds -1 for an
+    evicted expert and `ExpertStore.resolve` would stream it from NVMe, which is the one thing
+    all-resident mode exists to avoid. Which resident expert stands in cannot change the result --
+    its output is multiplied by 0.
+
+    Why `topk` of them and not one: the decode MoE call goes through `build_routing_small`
+    (tools/fp4_moe.py), which gives each distinct arena slot a single BM=16-row block and is
+    correct only while no slot collects more than BM of the block's (token, expert) pairs. In
+    `substitute` that holds because a token's picks are distinct experts, so a slot can collect at
+    most T_VERIFY pairs. Routing every displaced pick of every column to ONE fallback would put up
+    to T_VERIFY*topk pairs on that slot. One fallback per COLUMN restores the bound: a token can
+    reach a given slot twice at most -- once as its own resident pick, once as that column's
+    fallback -- so the worst case is 2*T_VERIFY.
+    """
+    fb = {}
+    for L, m in masks.items():
+        res = m.nonzero().flatten()          # resident expert ids of this layer, ascending
+        if res.numel() < topk:
+            raise ValueError(f"layer {L} keeps {int(res.numel())} experts, fewer than the {topk} "
+                             f"distinct fallbacks DSV41_PRUNE_MODE=drop needs")
+        fb[L] = res[:topk].to(torch.int64)
+    return fb
+
+
 class V41Engine:
     #: this engine can constrain sampling with a decoding gate (``generate(grammar=...)``)
     supports_grammar = True
@@ -556,6 +584,14 @@ class V41Engine:
         from concurrent.futures import ThreadPoolExecutor as _TPE
         self.eg_pool = _TPE(len(self.args.engram_layer_ids))
         self.model.engram_rows = lambda L, h: self.tables[L].rows(h)
+        # What a routing pick that is NOT resident does, under `--prune-keep`. "substitute" is the
+        # behaviour this engine has always had and stays the default; "drop" zeroes the pick's
+        # weight instead. Read once, here, so the decode graphs can capture a fixed branch.
+        # `or`, not a default argument: start.sh sources .env with `set -a`, so a line left empty
+        # in env.example arrives here as '' and must still mean the default.
+        self.prune_mode = (os.environ.get("DSV41_PRUNE_MODE") or "substitute").strip() or "substitute"
+        if self.prune_mode not in ("substitute", "drop"):
+            raise ValueError(f"unknown DSV41_PRUNE_MODE {self.prune_mode!r} (substitute | drop)")
         self.prune_keep = prune_keep
         if prune_keep and prune_keep < 1.0:
             # pruned, all-resident mode: per layer only the top-N experts (by trace frequency) stay
@@ -652,12 +688,18 @@ class V41Engine:
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
             log(f"pruned mode ({prune_select}): keep {prune_keep:.2f}, {len(ranked)} experts total "
-                f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * self.expert_bytes / 1e9:.1f} GB")
+                f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * self.expert_bytes / 1e9:.1f} GB, "
+                f"non-resident picks: {self.prune_mode}")
         else:
             self.model_prune_mask = None
             ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
                       else [(L, e) for e in range(384) for L in range(40)])
         self.model.prune_mask = self.model_prune_mask
+        # Set together with the mask: `drop` reads both, and a mask without a fallback table would
+        # fail at the first routed layer instead of here.
+        self.model.prune_drop = self.prune_mode == "drop" and self.model_prune_mask is not None
+        self.model.prune_fallback = (build_prune_fallback(self.model_prune_mask, self.args.n_activated_experts)
+                                     if self.model.prune_drop else None)
         self.store.warm_start(ranked, log=log)
         self.fast = None
         if spec and os.environ.get("DSV41_FAST", "1") == "1":
@@ -1033,6 +1075,7 @@ class V41Engine:
             "swa_replay": self.swa_replay,
             "prune_keep": self.prune_keep,
             "prune_select": getattr(self, "prune_select", None),
+            "prune_mode": self.prune_mode,
             "expert_topics": getattr(self, "expert_topics_used", None),
             "hot_profile": self.hot_profile,
             "prefill_chunk": MAX_CHUNK,
@@ -1239,10 +1282,15 @@ if __name__ == "__main__":
             n_keep = max(6, _m.ceil(frac * 384))
             masks, keep = build_keep_masks(counts, frac, a.prune_select, eng.device)
             eng.model.prune_mask = masks if frac < 1.0 else None
+            # the sweep replaces the keep-set per fraction, so the fallback table has to follow it
+            eng.model.prune_drop = eng.prune_mode == "drop" and eng.model.prune_mask is not None
+            eng.model.prune_fallback = (build_prune_fallback(masks, eng.args.n_activated_experts)
+                                        if eng.model.prune_drop else None)
             t0 = time.time()
             res = eng.teacher_forced(a.teacher_forced, max_len=min(512, a.max_seq))
             res["keep_frac"] = frac; res["experts_per_layer"] = n_keep; res["resident_gb_fp4"] = round(n_keep * 40 * EX.EXPERT_BYTES / 1e9, 1)
             res["select"] = a.prune_select; res["per_layer_counts"] = [int(len(keep[L])) for L in range(40)]
+            res["prune_mode"] = eng.prune_mode
             res["seconds"] = round(time.time() - t0, 1)
             out[str(frac)] = res
             log(f"prune keep={frac} {a.prune_select} ({n_keep}/384 per layer avg, {res['resident_gb_fp4']} GB): {json.dumps({k: v for k, v in res.items() if k in ('coding', 'general')})}")

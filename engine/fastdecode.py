@@ -125,6 +125,29 @@ class FastDecoder:
         self.y = torch.zeros(T, a.dim, dtype=torch.bfloat16, device=dev)
         self.route_idx = torch.zeros(T, a.n_activated_experts, dtype=torch.long, device=dev)
         self.route_w = torch.zeros(T, a.n_activated_experts, dtype=torch.float32, device=dev)
+        # DSV41_PRUNE_MODE, decided once by the engine (V41Engine sets both attributes together,
+        # before this object exists). A Python bool, so the branch it selects in `_layer_a` is
+        # baked into the captured graphs and nothing varies at replay time.
+        self.drop_mode = bool(getattr(model, "prune_drop", False))
+        self.prune_fb = getattr(model, "prune_fallback", None)
+        if self.drop_mode and self.prune_fb is None:
+            raise ValueError("DSV41_PRUNE_MODE=drop needs model.prune_fallback alongside model.prune_mask")
+        # In `drop` the expert whose arena SLOT is gathered is not always the expert the router
+        # named: a non-resident pick keeps its true id in `route_idx` (so the taps and the route
+        # stats see the real routing) and is remapped to a resident id here, where its weight of 0
+        # makes the contribution exactly zero. In `substitute` the two are equal by construction,
+        # so they share one buffer and that path's captured op sequence is unchanged.
+        self.route_slot = torch.zeros_like(self.route_idx) if self.drop_mode else self.route_idx
+        # `build_routing_small` (tools/fp4_moe.py) is used for the decode-sized MoE call
+        # (P = T_VERIFY * topk <= 64, BM = 16 from `_pick_bm`) and gives every distinct arena slot
+        # ONE BM-row block. With one fallback per routing column a slot can collect at most
+        # 2 * T_VERIFY of the block's pairs (see build_prune_fallback), so the invariant holds up
+        # to T_VERIFY = 8. Beyond that P is still <= 64 only for T_VERIFY = 10, which would
+        # silently corrupt the block, so refuse the combination instead.
+        if self.drop_mode and T * a.n_activated_experts <= 64 and 2 * T > 16:
+            raise ValueError(f"DSV41_PRUNE_MODE=drop does not support DSV41_BLOCK={T_DRAFT} "
+                             f"(verify block {T}): the decode MoE router gives one 16-row block "
+                             f"per arena slot and the shared fallback can need {2 * T}")
         self.topk = torch.full((T, a.index_topk), -1, dtype=torch.long, device=dev)
         n_cand = self._n_cache(1)
         self.candidates = torch.zeros(T, n_cand, dtype=torch.bool, device=dev)
@@ -325,17 +348,38 @@ class FastDecoder:
         scores = F.softplus(R.mm(y.float(), self.W.layers[L].gate_w)).sqrt()
         logits = scores + w.gate_bias
         pm = getattr(self.m, "prune_mask", None)
-        if pm is not None and L in pm:
+        pruned = pm is not None and L in pm
+        # Same two modes as Model.moe, same arithmetic, same order of operations -- the prefill and
+        # the decode path have to agree pick for pick or the verify step rejects its own drafts.
+        if pruned and not self.drop_mode:
             logits = logits.masked_fill(~pm[L], float("-inf"))
         idx = logits.topk(a.n_activated_experts, dim=-1)[1]
         wts = scores.gather(1, idx)
+        slot_idx = idx
+        if pruned and self.drop_mode:
+            # Every op here has a fixed shape and reads only tensors that already exist, so the
+            # whole branch captures like the rest of the layer: a gather of the layer's bool mask
+            # by the picks, a masked_fill to zero, and a torch.where against the per-column
+            # fallback ids. No `.item()`, no host branch on a tensor value.
+            live = pm[L][idx]                          # bool [T, k]: is this pick resident?
+            wts = wts.masked_fill(~live, 0.0)          # exactly 0 -- the term leaves the sum
+            slot_idx = torch.where(live, idx, self.prune_fb[L])
+        # With every pick dropped the sum is 0, the weights stay 0 (0 / 1e-20) and only the shared
+        # expert of `_layer_b` contributes to this layer.
         wts = wts / (wts.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
         self.route_idx.copy_(idx); self.route_w.copy_(wts)
+        if self.drop_mode:
+            # When substituting, route_slot IS route_idx and the line above already wrote it; that
+            # copy would be a self-copy, so it is skipped rather than captured into every graph
+            self.route_slot.copy_(slot_idx)
         if self.rs_uniq is not None:
             # one-hot the block's k*T expert ids into a [n_routed_experts] table and count the rows
             # that were hit; `index_fill_` writes 1 however many tokens name the same expert.
+            # It counts `slot_idx`, not `idx`, because the quantity is the expert BYTES the step
+            # reads: in `drop` a displaced pick still reads its column's fallback expert (and gets
+            # multiplied by 0), and never reads the expert the router named.
             self.rs_hits.zero_()
-            self.rs_hits.index_fill_(0, idx.reshape(-1), 1)
+            self.rs_hits.index_fill_(0, slot_idx.reshape(-1), 1)
             self.rs_uniq[L] += self.rs_hits.sum()
         self._tap('moe_in', L, y); self._tap('route_idx', L, idx); self._tap('topk', L, self.topk)
 
@@ -414,7 +458,9 @@ class FastDecoder:
 
     def _layer_ab(self, L, sh_state):
         self._layer_a(L, sh_state)
-        self.slots.copy_(self.lut[L][self.route_idx])  # -1 never occurs while the LUT is valid
+        # route_slot IS route_idx when substituting; in `drop` it is the remapped, all-resident
+        # copy, which is what keeps -1 out of the gather there too.
+        self.slots.copy_(self.lut[L][self.route_slot])  # -1 never occurs while the LUT is valid
         self._layer_b(L)
 
     # ------------------------------------------------------------------ route stats
@@ -507,8 +553,10 @@ class FastDecoder:
 
     # ------------------------------------------------------------------ run
     def _resolve(self, L):
-        # host: expert ids -> arena slots (loads misses from NVMe)
-        idx = self.route_idx
+        # host: expert ids -> arena slots (loads misses from NVMe). route_slot, not route_idx: in
+        # `drop` a non-resident pick must never be resolved -- that is exactly the NVMe read the
+        # weight of 0 is there to avoid paying for.
+        idx = self.route_slot
         slots = self.m.store.resolve(L, idx, False)
         self.slots.copy_(slots)
 

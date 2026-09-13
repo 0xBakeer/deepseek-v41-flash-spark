@@ -126,6 +126,23 @@ outside the keep-set, the token goes to its second choice, and then to the secon
 the next token, and the one after that. The errors do not cancel — they compound into repetition,
 and then into structurally broken output.
 
+That substitution is a choice, and `DSV41_PRUNE_MODE` makes it one. The engine masks the router's
+logits to the resident experts and takes the top-*k* among those (`substitute`, the default and the
+only behaviour before this switch existed), so a token whose real top-6 is not resident is computed
+with six experts it did not ask for, each at full renormalised weight. `drop` instead keeps the
+router's real top-6 and gives every pick that did not survive a weight of exactly 0, renormalising
+over the rest; a token with no resident pick at all falls through to the layer's shared expert
+alone. The reason to try it is arithmetic: a MoE layer's output is a weighted **sum** of expert
+outputs, so a dropped term attenuates that sum toward the shared expert, while a substituted term
+injects a signal the model was never trained to receive. It is also what the REAP-style pruning
+literature does. The motivation is a profile: at the keep fractions here about 30 % of the routing
+mass is displaced *however* the keep-set is chosen, and on the 2026-09-12 generation gate that
+showed up as rare tokens corrupted at subword boundaries — `clearTimeout` as `cleartimeout`,
+`OSError` as `oenerror`, `.some` as `.s.s` — which the model then loops trying to repair. Changing
+the keep-set cannot fix that; changing what a displaced pick *does* might. `drop` is an experiment
+and has not been through the generation harness, so it is off by default and `substitute` is
+unchanged to the bit.
+
 This is not a theory about the format or the kernels. It is what this repository spent days chasing:
 
 | keep-set, all at keep 44 % and otherwise identical | story | Python | HTML |

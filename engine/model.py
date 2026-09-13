@@ -486,12 +486,42 @@ class Model:
         k = 3 if n_experts == 128 else a.n_activated_experts
         logits = scores + w.gate_bias
         pm = getattr(self, "prune_mask", None)
-        if pm is not None and n_experts != 128 and L in pm:
-            # expert pruning experiment: the router may only pick surviving experts (REAP-style drop)
+        # `n_experts == 128` is the DSpark drafter's own router over its 3 x 128 fully resident
+        # experts; nothing is ever pruned there, so neither mode touches it.
+        pruned = pm is not None and n_experts != 128 and L in pm
+        # DSV41_PRUNE_MODE: what happens to a routing pick whose expert is not resident.
+        # `substitute` (default) hides the evicted experts from the router, so the token is computed
+        # with six experts it did not ask for, at full renormalised weight. `drop` keeps the
+        # router's real six and gives the ones that did not survive a weight of exactly zero.
+        # A MoE layer's output is a weighted SUM of expert outputs: a missing term attenuates the
+        # sum toward the shared expert, a WRONG term injects a signal the model was never trained
+        # to receive. Measured on the generation gate 2026-09-12, substitution at ~30 % displaced
+        # routing mass corrupts rare tokens at subword boundaries (`clearTimeout` -> `cleartimeout`,
+        # `OSError` -> `oenerror`, `.some` -> `.s.s`) and the model then loops trying to repair
+        # them. Dropping is what the REAP-style pruning literature does; substituting is what this
+        # engine did. See docs/keep-sets.md and env.example.
+        drop = pruned and getattr(self, "prune_drop", False)
+        if pruned and not drop:
+            # the router may only pick surviving experts
             logits = logits.masked_fill(~pm[L], float("-inf"))
         indices = logits.topk(k, dim=-1)[1]
         weights = scores.gather(1, indices)
+        slot_idx = indices
+        if drop:
+            live = pm[L][indices]                          # bool [T, k]: is this pick resident?
+            weights = weights.masked_fill(~live, 0.0)      # exactly 0 -- the term leaves the sum
+            # The slot lookup below still has to name an expert that HAS a slot: `lut[L][e]` is -1
+            # for an evicted expert and `store.resolve` would fetch it from NVMe, which is the one
+            # thing all-resident mode must never do. Which resident expert it is cannot matter --
+            # its contribution is multiplied by 0 -- so every displaced pick in column j takes
+            # `prune_fallback[L][j]` (see `build_prune_fallback` in engine/v41_engine.py: k distinct
+            # resident ids, one per column, which keeps at most two of a token's pairs on one slot).
+            slot_idx = torch.where(live, indices, self.prune_fallback[L])
+        # Renormalising over what is left: with every pick dropped the sum is 0, the weights stay 0
+        # (0 / 1e-20), and only the shared expert contributes to this layer's output.
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20) * a.route_scale
+        # The taps carry the router's TRUE choice and the post-zeroing weights, so a profile sees
+        # what actually happened rather than the substitution.
         self._tap("route_idx", L, indices); self._tap("route_w", L, weights)
         t0 = time.perf_counter()
         # All-resident configurations carry a device slot table (built by the engine from the
@@ -501,10 +531,11 @@ class Model:
         # evicted, which is exactly the pruned all-resident case; anything else takes the host path.
         lut = getattr(self, "slot_lut", None)
         if lut is not None and n_experts != 128:
-            slots = lut[L][indices]
-            self.stats["hits"] = self.stats.get("hits", 0) + indices.numel()
+            slots = lut[L][slot_idx]
+            # every entry of `slot_idx` is resident in both modes, so this is still all hits
+            self.stats["hits"] = self.stats.get("hits", 0) + slot_idx.numel()
         else:
-            slots = store.resolve(L, indices, prefill)
+            slots = store.resolve(L, slot_idx, prefill)
         routed = self.moe_fn(y, slots, weights, arena, a.swiglu_limit).float()
         shared = R.expert_ffn(y, w.sh_w1, w.sh_w2, w.sh_w3, a.swiglu_limit).float()
         self._tap("moe_routed", L, routed); self._tap("moe_shared", L, shared)

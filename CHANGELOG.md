@@ -140,6 +140,17 @@ Until now that was two numbers in a file and a three-minute wait to find out.
 - **Six checks that need no GPU, no checkpoint and no torch**: `tools/test_budget.py`,
   `tools/test_engine_kwargs.py`, `tools/test_tune_draw.py`, `tools/test_tune_profiles.py`,
   `tools/test_tune_brief.py` and the existing `server/test_server.py`.
+- **`DSV41_PRUNE_MODE=drop`** — an experiment on what a routing pick does when its expert is not
+  resident, rather than on which experts are kept. The engine has always hidden the evicted experts
+  from the router, so a displaced token is computed with six experts it did not ask for at full
+  renormalised weight; `drop` keeps the router's real six and weights the ones that did not survive
+  with exactly 0. About 30 % of the routing mass is displaced at these keep fractions however the
+  keep-set is chosen, and on the 2026-09-12 generation gate that showed up as rare tokens corrupted
+  at subword boundaries — `clearTimeout` as `cleartimeout`, `OSError` as `oenerror` — which the
+  model then loops trying to repair. Implemented in both the prefill and the CUDA-graph decode
+  path; **not yet gated on the generation harness**, so the default is unchanged to the bit.
+  `tools/test_route_modes.py` is the seventh torch-free check.
+  [`docs/keep-sets.md`](docs/keep-sets.md#why-coverage-predicts-whether-long-generations-hold-together).
 
 ### Fixed
 - **`EXPERT_TOPICS` had never worked.** `expert_topics` was read inside `V41Engine.__init__` and
