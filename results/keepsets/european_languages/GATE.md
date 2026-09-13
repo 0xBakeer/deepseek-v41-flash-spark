@@ -27,3 +27,32 @@
 **Verdict: FAIL** — 4 of 10 runs failed: `fr-essay` (on) finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 164x on '« coérence » ? je vais utiliser « coérence » ? je'; `de-essay` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 8x on '= "trotz" maybe. m. "trotzdem" = "trotz" = "trotz" maybe'; `it-essay` (on) reasoning loops 5x on 'fallimento paga il costo del lookup in cache più quello '; `es-essay` (on) only 3 of 7 language markers (para, porque, cuando)
 
 This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-13 23:07
+
+| | |
+|---|---|
+| profile | European languages |
+| topics | english, german, french, spanish, italian, portuguese, translation, reasoning, reasoning_code |
+| prompts | 4 runs over 4 prompts |
+| thinking | off |
+| reasoning effort | 45 |
+| max tokens | 4,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| only | `fr-essay,de-essay,es-essay,it-essay` — a filtered re-run, not a full gate |
+| no prompts for | reasoning, reasoning_code — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `fr-essay` | off | stop | 0 | 1,627 | 36 | **FAIL** | only 1 of 7 language markers (qui) |
+| `de-essay` | off | stop | 0 | 1,766 | 39 | PASS | 2 paragraphs, 8 sentences, 5 markers |
+| `it-essay` | off | stop | 0 | 1,535 | 36 | PASS | 2 paragraphs, 8 sentences, 5 markers |
+| `es-essay` | off | stop | 0 | 1,901 | 37 | **FAIL** | only 3 of 7 language markers (pero, porque, entre) |
+
+**Verdict: FAIL** — 2 of 4 runs failed: `fr-essay` (off) only 1 of 7 language markers (qui); `es-essay` (off) only 3 of 7 language markers (pero, porque, entre)
+
+2 of 4 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 0, guard 0, corrupt 0, content 2, repeat 0.
+
+This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
