@@ -132,10 +132,13 @@ only behaviour before this switch existed), so a token whose real top-6 is not r
 with six experts it did not ask for, each at full renormalised weight. `drop` instead keeps the
 router's real top-6 and gives every pick that did not survive a weight of exactly 0, renormalising
 over the rest; a token with no resident pick at all falls through to the layer's shared expert
-alone. The reason to try it is arithmetic: a MoE layer's output is a weighted **sum** of expert
-outputs, so a dropped term attenuates that sum toward the shared expert, while a substituted term
-injects a signal the model was never trained to receive. It is also what the REAP-style pruning
-literature does. The motivation is a profile: at the keep fractions here about 30 % of the routing
+alone. Because the survivors are renormalised to the routed scale — `norm_topk_prob` is on in this
+checkpoint, and the technical report keeps the correction bias for selection only — `drop` is
+top-*k′* routing with *k′* the picks that survived, about four of six at the keep fractions here;
+it is not an attenuation toward the shared expert. The reason to try it is that a substituted
+expert injects a signal the model was never trained to receive, and the mHC residual feeds that
+error into the next layer's mixing coefficients as well. Whether fewer correct experts beat six
+partly wrong ones is decidable without pruning at all: the unpruned model at `DSV41_TOPK=4`. The motivation is a profile: at the keep fractions here about 30 % of the routing
 mass is displaced *however* the keep-set is chosen, and on the 2026-09-12 generation gate that
 showed up as rare tokens corrupted at subword boundaries — `clearTimeout` as `cleartimeout`,
 `OSError` as `oenerror`, `.some` as `.s.s` — which the model then loops trying to repair. Changing

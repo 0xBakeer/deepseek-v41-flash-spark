@@ -493,9 +493,14 @@ class Model:
         # `substitute` (default) hides the evicted experts from the router, so the token is computed
         # with six experts it did not ask for, at full renormalised weight. `drop` keeps the
         # router's real six and gives the ones that did not survive a weight of exactly zero.
-        # A MoE layer's output is a weighted SUM of expert outputs: a missing term attenuates the
-        # sum toward the shared expert, a WRONG term injects a signal the model was never trained
-        # to receive. Measured on the generation gate 2026-09-12, substitution at ~30 % displaced
+        # Because the survivors are renormalised to route_scale (norm_topk_prob is on in this
+        # checkpoint, and the technical report keeps the bias for selection only), `drop` is
+        # top-k' routing with k' = the picks that survived -- about four of six at the keep
+        # fractions used here -- not an attenuation toward the shared expert; only a token that
+        # loses all six falls through to the shared expert alone. The case for it is that a
+        # WRONG expert injects a signal the model was never trained to receive, and the mHC
+        # residual then feeds that error into the next layer's mixing coefficients as well.
+        # Measured on the generation gate 2026-09-12, substitution at ~30 % displaced
         # routing mass corrupts rare tokens at subword boundaries (`clearTimeout` -> `cleartimeout`,
         # `OSError` -> `oenerror`, `.some` -> `.s.s`) and the model then loops trying to repair
         # them. Dropping is what the REAP-style pruning literature does; substituting is what this
