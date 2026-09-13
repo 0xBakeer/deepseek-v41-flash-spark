@@ -1,0 +1,1082 @@
+=== PROMPT
+Build the hero for a landing page for a self-hosted backup tool.
+=== THINK
+Rejected: the centred column over a gradient, every template since 2020. Asymmetric split: copy in 7fr, product shot in 5fr, so the headline is the only loud thing above the fold.
+
+Ground warm rather than white, `#faf7f2`, ink `#241f1a`, accent terracotta `#b4531f` held back for the one primary action; on that ground 5.1:1, past 4.5:1.
+
+```css
+h1 { font-size: clamp(2.25rem, 1.4rem + 3.6vw, 4rem); line-height: 1.05; }
+```
+Sub at 1.125rem/1.6, a 1.5 step down, so the gap reads as hierarchy. Spacing on 8: 24 to the sub, 32 to the buttons, 96 block padding.
+
+Revision: -.03em tracking is too tight at the small end of that clamp; -.02em survives both ends.
+
+The split collapses on content width, not a breakpoint -- `auto-fit` with `minmax(20rem, 1fr)`.
+That is the hero.
+=== ANSWER
+```css
+:root { --ground: #faf7f2; --ink: #241f1a; --accent: #b4531f; }
+.hero { display: grid; gap: 2rem 3rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); padding: 6rem clamp(1rem, 5vw, 4rem); background: var(--ground); color: var(--ink); }
+.hero h1 { margin: 0 0 1.5rem; font-size: clamp(2.25rem, 1.4rem + 3.6vw, 4rem); line-height: 1.05; letter-spacing: -.02em; }
+.hero p { margin: 0 0 2rem; font-size: 1.125rem; line-height: 1.6; max-inline-size: 42ch; }
+.cta { padding: .75rem 1.5rem; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; }
+.cta:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+```
+=== END
+
+=== PROMPT
+Lay out the three-up feature section that sits under that hero.
+=== THINK
+Three columns is a lie on a phone, so the count never gets written down: `repeat(auto-fit, minmax(16rem, 1fr))` gives 3, then 2, then 1 at the widths the text needs.
+
+Cool paper `#f4f7f6`, ink `#16211f`, accent teal `#0f766e` at 4.9:1, appearing once per column on the eyebrow label.
+
+Rejected: a shadow on every feature card. Shadow claims elevation and these are flat siblings on one plane -- a hairline plus `gap: clamp(1.5rem, 3vw, 3rem)` separates them honestly.
+
+Ladder at 1.25: label .75rem/1, title 1.25rem/1.3, body 1rem/1.6.
+```css
+.f-label { font-size: .75rem; font-weight: 600; letter-spacing: .08em; }
+```
+Revision: the label was .6875rem, too small to carry colour at all; .75rem at 600 stays quiet but legible.
+Three flat siblings, no shadows -- section done.
+=== ANSWER
+```css
+:root { --paper: #f4f7f6; --ink: #16211f; --teal: #0f766e; --rule: color-mix(in oklab, var(--ink) 14%, var(--paper)); }
+.features { display: grid; gap: clamp(1.5rem, 3vw, 3rem); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); padding-block: 5rem; background: var(--paper); color: var(--ink); }
+.feature { border-block-start: 1px solid var(--rule); padding-block-start: 1.5rem; }
+.f-label { margin: 0 0 .75rem; color: var(--teal); font-size: .75rem; font-weight: 600; line-height: 1; letter-spacing: .08em; text-transform: uppercase; }
+.feature h3 { margin: 0 0 .5rem; font-size: 1.25rem; line-height: 1.3; }
+.feature p { margin: 0; font-size: 1rem; line-height: 1.6; }
+```
+=== END
+
+=== PROMPT
+Two-column documentation layout with a sticky sidebar and a readable content column.
+=== THINK
+Fixed rail, fluid text: `grid-template-columns: 15rem minmax(0, 1fr)`. That `minmax(0, 1fr)` is not decoration -- without it one long code block blows the column out.
+
+Ground `#f6f7f9`, ink `#1b2430`, accent slate-blue `#35506b` at 7.2:1, used only for the current page.
+
+Revision: 72ch reads too wide at 16px. 66ch at 1.0625rem, leading 1.7 rather than 1.5 because docs are scanned.
+
+```css
+.rail { position: sticky; inset-block-start: 0; align-self: start; max-block-size: 100dvh; }
+```
+`100dvh`, not `100vh`, or the mobile toolbar eats the last entries.
+
+Rejected: an 8px radius on everything including the nav. The current item gets a 2px inline-start bar -- position says "you are here" better than a pill.
+Rail pinned, prose measured, done.
+=== ANSWER
+```css
+:root { --ground: #f6f7f9; --ink: #1b2430; --active: #35506b; }
+.docs { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; background: var(--ground); color: var(--ink); }
+.rail { position: sticky; inset-block-start: 0; align-self: start; max-block-size: 100dvh; overflow: auto; padding-block: 2rem; }
+.rail a { display: block; padding: .375rem .75rem; border-inline-start: 2px solid transparent; }
+.rail a[aria-current="page"] { border-inline-start-color: var(--active); color: var(--active); font-weight: 600; }
+.rail a:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+.prose { max-inline-size: 66ch; font-size: 1.0625rem; line-height: 1.7; }
+```
+=== END
+
+=== PROMPT
+A full-bleed image hero for a magazine feature, headline sitting over the photo.
+=== THINK
+Contrast over a photograph is never given, so build it -- a bottom-weighted scrim:
+```css
+.shot::after { background: linear-gradient(to top, color-mix(in oklab, #120d0f 78%, transparent), transparent 55%); }
+```
+White over that band clears 7:1 whatever the picture does.
+
+Revision: the first instinct, `filter: brightness(.6)`, flattens the whole photograph, sky nobody reads over included.
+
+Kicker in claret `#8a1c3d` on the `#fbf6f4` caption strip, headline white on the scrim. Serif display, `clamp(2rem, 1.2rem + 4vw, 3.75rem)` at 1.1 -- large type needs less air.
+
+Also rejected: centring the headline; bottom-left anchored it reads like a cover.
+The scrim carries the contrast; shipping it.
+=== ANSWER
+```css
+:root { --claret: #8a1c3d; --caption-bg: #fbf6f4; --ink: #1d1418; }
+.shot { position: relative; aspect-ratio: 16/9; overflow: hidden; }
+.shot img { inline-size: 100%; block-size: 100%; object-fit: cover; }
+.shot::after { content: ""; position: absolute; inset: 0; background: linear-gradient(to top, color-mix(in oklab, #120d0f 78%, transparent), transparent 55%); }
+.shot h1 { position: absolute; inset-block-end: clamp(1rem, 4vw, 3rem); inset-inline-start: clamp(1rem, 4vw, 3rem); margin: 0; max-inline-size: 20ch; color: #fff; font: 400 clamp(2rem, 1.2rem + 4vw, 3.75rem)/1.1 Georgia, serif; }
+.caption { background: var(--caption-bg); color: var(--ink); padding: 1rem clamp(1rem, 4vw, 3rem); font-size: .875rem; }
+.caption b { color: var(--claret); }
+```
+=== END
+
+=== PROMPT
+App shell for an admin dashboard: top bar, left rail, scrolling main area.
+=== THINK
+Named areas, one source of truth:
+```css
+.shell { display: grid; grid-template: "bar bar" 3.5rem "rail main" 1fr / 15rem 1fr; block-size: 100dvh; }
+```
+The trap: `overflow: auto` on main does nothing until the track may shrink, so `min-block-size: 0` goes with it.
+
+Revision: a fixed rail plus matching padding on main -- two numbers that must agree forever and never do.
+
+Forest `#2f5d50` as the single accent on `#f7f9f8` (5.9:1), ink `#12201c`; dark surfaces `#131a18` with `#e7ece9` text, flipped through `light-dark()` so only semantic tokens change.
+
+Rejected: the drop shadow under the bar -- a 1px `color-mix()` seam separates without pretending it floats. Bar 3.5rem, rail 15rem, 16px gutters.
+One grid, two seams, no fixed positioning anywhere.
+=== ANSWER
+```css
+:root {
+  color-scheme: light dark; --surface: light-dark(#f7f9f8, #131a18);
+  --ink: light-dark(#12201c, #e7ece9); --accent: light-dark(#2f5d50, #7bbfab);
+  --seam: color-mix(in oklab, var(--ink) 12%, var(--surface));
+}
+.shell { display: grid; block-size: 100dvh; grid-template: "bar bar" 3.5rem "rail main" 1fr / 15rem 1fr; background: var(--surface); color: var(--ink); }
+.bar { grid-area: bar; display: flex; border-block-end: 1px solid var(--seam); }
+.rail { grid-area: rail; overflow: auto; padding: 1rem; border-inline-end: 1px solid var(--seam); }
+.rail a[aria-current] { color: var(--accent); font-weight: 600; }
+main { grid-area: main; min-block-size: 0; overflow: auto; padding: 1.5rem; }
+```
+=== END
+
+=== PROMPT
+Mobile-first product grid for a shop, two columns on a phone.
+=== THINK
+Two columns on a 360px screen is a 10rem card, so `repeat(auto-fill, minmax(9.5rem, 1fr))` is the whole responsive story: 2 up on a phone, 5 on a desktop.
+
+Ground `#f9f8fc`, ink `#1a1726`, violet-ink `#5b3fd1` on the sale tag alone; white on it is 6.1:1.
+
+Revision: the product name at .875rem was unreadable at arm's length. .9375rem with 1.4 leading, clamped to two lines so the price never shifts row to row.
+
+Rejected: an emoji heart for the wishlist -- a different picture per platform. Inline SVG with an `aria-label`.
+```css
+.card:hover img { translate: 0 -2px; }
+```
+lives inside `prefers-reduced-motion: no-preference`.
+Price ends up the loudest thing in the card, which is correct.
+=== ANSWER
+```css
+:root { --bg: #f9f8fc; --ink: #1a1726; --sale: #5b3fd1; }
+.grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); padding: .75rem; background: var(--bg); color: var(--ink); }
+.card img { inline-size: 100%; aspect-ratio: 4/5; object-fit: cover; border-radius: 4px; }
+@media (prefers-reduced-motion: no-preference) { .card img { transition: translate .18s ease; } .card:hover img { translate: 0 -2px; } }
+.card h3 { margin: .5rem 0 .25rem; font-size: .9375rem; line-height: 1.4; font-weight: 400; }
+.price { font-size: 1.0625rem; font-weight: 700; }
+.tag { padding: .125rem .5rem; border-radius: 3px; background: var(--sale); color: #fff; font-size: .75rem; }
+.card a:focus-visible { outline: 2px solid var(--sale); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+Set the typography for a long-form article: headings, body, lists, blockquote.
+=== THINK
+Measure before size: 65ch, and the size that makes 65ch comfortable is 1.125rem at 1.65.
+
+Revision: 1.333 first, and h2 landed at 2rem -- that crowds a 65ch column and reads like a landing page. Back to 1.25: h2 `clamp(1.5rem, 1.2rem + 1vw, 1.75rem)` at 1.25, h3 1.375rem/1.3, meta .875rem.
+
+Rhythm from one flow token, with headings bound to what follows:
+```css
+.article > * + * { margin-block-start: var(--flow, 1.5em); }
+.article h2 { margin-block: 2.5rem .75rem; }
+```
+More space above than below, or the heading floats between paragraphs and belongs to neither.
+
+Paper `#fdfbf7`, ink `#23201c` at 13:1, links umber `#7b3f00`. Rejected: colour-only links -- an underline at `text-underline-offset: 3px` carries it for everyone.
+Measure, scale, rhythm -- that is the whole article sheet.
+=== ANSWER
+```css
+:root {
+  color-scheme: light dark;
+  --paper: light-dark(#fdfbf7, #1a1815); --ink: light-dark(#23201c, #ece7e0);
+  --link: light-dark(#7b3f00, #e0a666); --flow: 1.5em;
+}
+.article { max-inline-size: 65ch; font-size: 1.125rem; line-height: 1.65; background: var(--paper); color: var(--ink); }
+.article > * + * { margin-block-start: var(--flow); }
+.article h2 { margin-block: 2.5rem .75rem; font-size: clamp(1.5rem, 1.2rem + 1vw, 1.75rem); line-height: 1.25; }
+.article h3 { margin-block: 2rem .5rem; font-size: 1.375rem; }
+.article a { color: var(--link); text-underline-offset: 3px; }
+.article a:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+A drop cap for the opening paragraph and a pull quote for the same essay.
+=== THINK
+Drop cap: `initial-letter: 3` sinks three lines with the baseline aligned for free. The float fallback needs a hand-set `line-height: .8`, or the cap inherits 1.65 and sits a third of a line low.
+
+Brick `#9c2b2b` on `#fcf8f5` is 6.3:1, and the cap is the only place it appears.
+
+Rejected: the centred italic quote under a giant decorative quotation mark -- noise, and centring breaks the column. A 3px inline-start rule, flush left.
+
+Quote `clamp(1.25rem, 1.1rem + .6vw, 1.625rem)` at 1.35, tighter than body because the line is short.
+
+Revision: attribution first sat at 55% ink, which failed at 3.1:1. 70% gives 4.9:1 and still recedes.
+```css
+.pull cite { color: color-mix(in oklab, var(--ink) 70%, var(--paper)); }
+```
+Cap and quote both earn their colour; done.
+=== ANSWER
+```css
+:root { --paper: #fcf8f5; --ink: #211c1b; --brick: #9c2b2b; }
+.essay { background: var(--paper); color: var(--ink); font-size: 1.125rem; line-height: 1.65; max-inline-size: 64ch; }
+.essay > p:first-of-type::first-letter {
+  initial-letter: 3; float: inline-start; line-height: .8;
+  margin-inline-end: .5rem; color: var(--brick); font-weight: 700;
+}
+.pull { margin-block: 2rem; padding-inline-start: 1.25rem; border-inline-start: 3px solid var(--brick); }
+.pull p { margin: 0; font-size: clamp(1.25rem, 1.1rem + .6vw, 1.625rem); line-height: 1.35; }
+.pull cite { display: block; margin-block-start: .5rem; font-size: .875rem; font-style: normal; color: color-mix(in oklab, var(--ink) 70%, var(--paper)); }
+```
+=== END
+
+=== PROMPT
+Typography for a REST API reference entry: method, path, description, inline code.
+=== THINK
+Two families meeting, so the sizes cannot match: mono at the same px looks bigger, larger x-height. `font-size-adjust: ex-height .52` normalises it; `.9375em` is the fallback.
+
+Petrol `#0b5d78` on ground `#f5f9fa` is 6.4:1. Inline code sits on `color-mix(in oklab, var(--ink) 7%, var(--ground))`, tinting with the theme instead of being a fixed grey.
+
+Method chips at .75rem/700 tracked .04em; `tabular-nums` on the status table so 200 and 404 line up.
+
+Revision: each method had its own colour and the page turned to confetti -- rejected, one neutral chip.
+```css
+.path { font-family: ui-monospace, monospace; font-size-adjust: ex-height .52; }
+```
+Heading `clamp(1.125rem, 1rem + .5vw, 1.375rem)`, description 1rem/1.6 at 62ch.
+Two families, one optical size -- that is the fix.
+=== ANSWER
+```css
+:root { --ground: #f5f9fa; --ink: #151b1f; --petrol: #0b5d78; }
+.api { background: var(--ground); color: var(--ink); line-height: 1.6; }
+.api h3 { font-size: clamp(1.125rem, 1rem + .5vw, 1.375rem); margin-block: 2rem .5rem; }
+.path, code { font-family: ui-monospace, monospace; font-size: .9375em; font-size-adjust: ex-height .52; }
+.path { color: var(--petrol); }
+code { padding: .1em .35em; border-radius: 3px; background: color-mix(in oklab, var(--ink) 7%, var(--ground)); }
+.method { padding: .125rem .5rem; border: 1px solid currentColor; font-size: .75rem; font-weight: 700; }
+.api p, .api table { max-inline-size: 62ch; font-variant-numeric: tabular-nums; }
+```
+=== END
+
+=== PROMPT
+A testimonial block: quote, name, role, and the customer logo.
+=== THINK
+The logo wants to be the biggest thing and is the least interesting: 24px, monochrome, at the bottom. The sentence is why anyone stops.
+
+Quote `clamp(1.25rem, 1.15rem + .5vw, 1.5rem)` at 1.5, upright. Rejected: italics on the whole quote -- two lines is flavour, five is a slog.
+
+Olive `#4c5b2f` on `#f8f8f4`, 5.4:1, on the rule above the quote and nowhere else.
+
+Name .9375rem/600, role .875rem at `color-mix(in oklab, var(--ink) 72%, var(--bg))` -- 5.2:1, quiet but readable.
+
+Revision: name and role started stacked with 8px between them; they read as two facts instead of one person. One line, separated by a thin middot.
+```css
+.who { display: flex; gap: .5rem; align-items: baseline; }
+```
+Sentence loudest, logo last -- that is the order.
+=== ANSWER
+```css
+:root { --bg: #f8f8f4; --ink: #1c2015; --olive: #4c5b2f; }
+.testimonial { background: var(--bg); color: var(--ink); padding: 2rem; max-inline-size: 44ch; border-block-start: 3px solid var(--olive); }
+.testimonial blockquote { margin: 0 0 1.5rem; font-size: clamp(1.25rem, 1.15rem + .5vw, 1.5rem); line-height: 1.5; text-wrap: pretty; }
+.who { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.who .name { font-size: .9375rem; font-weight: 600; }
+.who .role { font-size: .875rem; color: color-mix(in oklab, var(--ink) 72%, var(--bg)); }
+.who .role::before { content: "\00b7"; margin-inline-end: .5rem; }
+.testimonial img { display: block; margin-block-start: 1.5rem; block-size: 24px; filter: grayscale(1); }
+```
+=== END
+
+=== PROMPT
+A reusable section header: eyebrow, title, description, and an action link on the right.
+=== THINK
+Three jobs in one component, separated by type alone -- no rules, no boxes.
+
+Eyebrow .8125rem/1 at 600, `letter-spacing: .1em`, uppercase, in magenta-ink `#97316b` (5.9:1 on `#fbf7fa`). Title `clamp(1.5rem, 1.15rem + 1.4vw, 2.25rem)` at 1.2. Description 1rem/1.6 capped at 60ch.
+
+Revision: the title was magenta too and the header became one coloured lump. Title in ink `#1d1820`; only the eyebrow carries the accent.
+
+Layout, action pushed away and free to wrap:
+```css
+.sh { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: end; justify-content: space-between; }
+```
+Rejected: the centred title over a decorative divider; flush left, the eye starts in one place.
+Three sizes, one accent, no dividers.
+=== ANSWER
+```css
+:root { --bg: #fbf7fa; --ink: #1d1820; --accent: #97316b; }
+.sh { display: flex; flex-wrap: wrap; gap: 1rem 2rem; align-items: end; justify-content: space-between; background: var(--bg); color: var(--ink); }
+.sh .eyebrow { margin: 0 0 .5rem; color: var(--accent); font-size: .8125rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+.sh h2 { margin: 0; font-size: clamp(1.5rem, 1.15rem + 1.4vw, 2.25rem); line-height: 1.2; text-wrap: balance; }
+.sh p { margin: .5rem 0 0; max-inline-size: 60ch; font-size: 1rem; line-height: 1.6; }
+.sh a { color: var(--accent); font-size: .9375rem; font-weight: 600; text-underline-offset: 3px; }
+.sh a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+```
+=== END
+
+=== PROMPT
+Numbered steps for a setup guide, with the numbers as part of the design.
+=== THINK
+A default `<ol>` marker is right-aligned and its column widens at 10, so the text edge shifts halfway down the page. Own the number.
+
+```css
+.steps li { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); gap: .75rem; }
+.steps li::before { content: counter(step); font-variant-numeric: tabular-nums; }
+```
+Indigo `#33509e` on `#f7f8fd` is 7.4:1; numeral .875rem/700 in a 1.75rem circle -- a marker, not a headline.
+
+Revision: filled indigo circles with white numerals shouted louder than the instructions. Outline circle, indigo numeral.
+
+Rejected: emoji ticks for done steps -- a `[data-done]` swap to a check glyph instead.
+
+Step title 1.0625rem/1.4 at 600, body 1rem/1.6, 1.5rem between steps.
+The numbers guide without shouting; that is the guide.
+=== ANSWER
+```css
+:root { --bg: #f7f8fd; --ink: #171b2b; --indigo: #33509e; }
+.steps { counter-reset: step; list-style: none; margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); gap: .75rem; margin-block-end: 1.5rem; }
+.steps li::before {
+  content: counter(step); display: grid; place-items: center; inline-size: 1.75rem; block-size: 1.75rem;
+  border: 1.5px solid var(--indigo); border-radius: 50%; color: var(--indigo);
+  font-size: .875rem; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.steps h3 { margin: 0 0 .25rem; font-size: 1.0625rem; font-weight: 600; line-height: 1.4; }
+```
+=== END
+
+=== PROMPT
+Set up the colour token layer for a product UI, light and dark from one definition.
+=== THINK
+Two layers or the sheet rots: primitives that never move, semantics that flip. `#1a7f5a` is a fact; `--accent` is a decision.
+
+`light-dark()` keeps both themes in one declaration, beating a second `:root` block that drifts:
+```css
+:root { color-scheme: light dark; --surface: light-dark(#f7f8f7, #14171a); }
+```
+Revision: I flipped the primitives in a media query first; redefining what `--emerald-600` means is a lie. Only semantics flip.
+
+A fixed `#e2e8f0` border is wrong in dark; `color-mix(in oklab, var(--text) 12%, var(--surface))` tracks the current theme.
+
+Rejected: one `--accent` for text, fill and border -- text needs 4.5:1, a fill only 3:1, so `--accent-text` is the darker token.
+Primitives fixed, semantics flipped, borders mixed.
+=== ANSWER
+```css
+:root {
+  color-scheme: light dark;
+  --emerald-600: #1a7f5a; --emerald-400: #4ecfa0;
+  --surface: light-dark(#f7f8f7, #14171a); --raised: light-dark(#ffffff, #1b1f23);
+  --text: light-dark(#131816, #e8edea);
+  --accent-fill: light-dark(var(--emerald-600), var(--emerald-400));
+  --accent-text: light-dark(#14664a, var(--emerald-400));
+  --border: color-mix(in oklab, var(--text) 12%, var(--surface));
+}
+body { background: var(--surface); color: var(--text); }
+.card { background: var(--raised); border: 1px solid var(--border); }
+.btn { background: var(--accent-fill); color: light-dark(#fff, #0c1210); padding: .5rem 1rem; }
+.btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+Define status colours -- info, success, warning, danger -- that stay legible in both themes.
+=== THINK
+Four hues, two jobs each: text on the page ground, and a badge fill. Info `#0369a1`, success `#15803d`, danger `#b91c1c` on `#f8fafc` land between 5.1:1 and 7.4:1.
+
+Revision: warning was `#f59e0b`, which is 2.1:1 on that ground -- unreadable. Amber is a fill colour, never a text colour. Text goes to `#b45309`; the bright amber survives as the fill with dark text on it.
+
+The badge tint comes from the status token, not four more hexes:
+```css
+.badge { background: color-mix(in oklab, var(--status) 14%, var(--surface)); color: var(--status); }
+```
+In dark each token moves to its 400 step and the formula still holds -- it mixes against the current surface.
+
+Rejected: colour as the only signal -- every badge carries an icon and a word, since red against green is the common deficiency.
+One hue per status, one mix, no second sheet.
+=== ANSWER
+```css
+:root {
+  color-scheme: light dark;
+  --surface: light-dark(#f8fafc, #101418);
+  --info: light-dark(#0369a1, #6cb6e4); --success: light-dark(#15803d, #62c281);
+  --warn: light-dark(#b45309, #e0a355); --danger: light-dark(#b91c1c, #ef8080);
+}
+.badge {
+  --status: var(--info);
+  display: inline-flex; align-items: center; gap: .375rem;
+  padding: .125rem .5rem; border-radius: 4px; font-size: .8125rem;
+  color: var(--status); background: color-mix(in oklab, var(--status) 14%, var(--surface));
+}
+.badge[data-status="success"] { --status: var(--success); }
+.badge[data-status="danger"] { --status: var(--danger); }
+```
+=== END
+
+=== PROMPT
+Dark-first theme for a monitoring console that lives on a wall screen.
+=== THINK
+Dark-first, not dark-mode-added. Ground `#14161a`, not black: pure `#000` under white text vibrates, and on an OLED panel the scroll smear is worse.
+
+Text `#e6e9ef` gives 13.6:1. Not full white -- 90% is calmer and still far past 4.5:1.
+
+One accent, amber `#f0b429`, on the live value alone. Rejected: the neon-on-black dashboard where six saturated hues compete. Saturation is the alarm channel on this screen and has to stay free.
+
+Revision: I raised the panels with `box-shadow` first, and a shadow is invisible on a dark ground. Elevation by lightness:
+```css
+--s1: color-mix(in oklab, #ffffff 4%, var(--bg));
+--s2: color-mix(in oklab, #ffffff 8%, var(--bg));
+```
+Readable from four metres: the value at `clamp(1.75rem, 1.2rem + 2vw, 3rem)` with `tabular-nums`, so a changing number does not jitter.
+Dark ground, one accent, elevation by lightness.
+=== ANSWER
+```css
+:root {
+  color-scheme: dark;
+  --bg: #14161a; --text: #e6e9ef; --amber: #f0b429;
+  --s1: color-mix(in oklab, #ffffff 4%, var(--bg));
+  --s2: color-mix(in oklab, #ffffff 8%, var(--bg));
+  --line: color-mix(in oklab, var(--text) 14%, var(--bg));
+}
+body { background: var(--bg); color: var(--text); margin: 0; }
+.panel { background: var(--s1); border: 1px solid var(--line); border-radius: 6px; padding: 1rem; }
+.panel--focus { background: var(--s2); }
+.metric { font-size: clamp(1.75rem, 1.2rem + 2vw, 3rem); line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--amber); }
+```
+=== END
+
+=== PROMPT
+Build an accent ramp from one brand colour so the steps look evenly spaced.
+=== THINK
+The brand red is `#c2543c`, which is `oklch(.62 .16 28)`. Hold the hue, step the lightness -- in oklch equal L steps look equal, which is the entire reason not to do this in HSL.
+
+Rejected: an HSL lighten/darken ramp. Equal HSL steps make yellow far brighter than blue at the same number, and the ramp reads lopsided.
+
+Revision: I stepped chroma linearly with lightness and the 900 came out nearly black with a purple cast, the 50 chalky. Chroma has to taper at both ends:
+```css
+--c-50:  oklch(.97 .02 28);
+--c-500: oklch(.62 .16 28);
+--c-900: oklch(.32 .09 28);
+```
+Contrast decides which step does which job: 600 on the 50 ground measures 5.3:1, so 600 is the text step; 500 has enough weight as a fill against white but not as text.
+Hue held, lightness even, chroma tapered.
+=== ANSWER
+```css
+:root {
+  --c-50: oklch(.97 .02 28); --c-100: oklch(.93 .05 28); --c-300: oklch(.80 .11 28);
+  --c-500: oklch(.62 .16 28); --c-600: oklch(.55 .15 28); --c-700: oklch(.47 .13 28);
+  --c-900: oklch(.32 .09 28);
+  --accent-text: var(--c-600); --accent-fill: var(--c-500); --tint: var(--c-50);
+}
+@supports not (color: oklch(0 0 0)) {
+  :root { --c-50: #fdf0ed; --c-500: #c2543c; --c-600: #a8452f; --c-900: #3f1a11; }
+}
+.note { background: var(--tint); color: var(--c-900); border-inline-start: 3px solid var(--accent-fill); padding: .75rem 1rem; }
+.note a { color: var(--accent-text); }
+.note a:focus-visible { outline: 2px solid var(--c-700); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+A surface and elevation system for a light UI, without a shadow on everything.
+=== THINK
+Rejected first, the default mistake: a shadow under every card. When everything floats, nothing does.
+
+Three levels, cue escalating: page `#eef2f6` is colour alone, card `#ffffff` adds a 1px border, overlay adds a real shadow -- menus and dialogs, the only things that leave the plane.
+
+Revision: page and card were both `#ffffff` with a border between, and the hierarchy vanished on a bright screen. Tinting the page gives the card something to sit on.
+
+Shadow in two layers, both weak, tinted with the ink rather than black:
+```css
+--shadow-3: 0 1px 2px rgb(19 26 33 / .10), 0 12px 28px rgb(19 26 33 / .12);
+```
+Accent ocean `#2a6f97` at 5.0:1 on the card. Radius escalates too: 0 on the page, 8px on cards, 12px on overlays -- not one uniform value everywhere.
+Colour, then border, then shadow, in that order.
+=== ANSWER
+```css
+:root {
+  --page: #eef2f6; --card: #ffffff; --ink: #131a21; --accent: #2a6f97;
+  --border: color-mix(in oklab, var(--ink) 12%, var(--card));
+  --shadow-3: 0 1px 2px rgb(19 26 33 / .10), 0 12px 28px rgb(19 26 33 / .12);
+}
+body { background: var(--page); color: var(--ink); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; }
+.overlay { background: var(--card); border-radius: 12px; box-shadow: var(--shadow-3); padding: 1rem; }
+.card a { color: var(--accent); }
+.card a:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+A theme toggle with three states: light, dark, and follow the system.
+=== THINK
+Follow-the-system is the default, so it must be the absence of a choice: no attribute on the root. An explicit pick writes `data-theme`.
+
+The trick is that `color-scheme` does the work, so `light-dark()` tokens need no second block:
+```css
+:root { color-scheme: light dark; }
+:root[data-theme="light"] { color-scheme: only light; }
+:root[data-theme="dark"] { color-scheme: only dark; }
+```
+Revision: a `.dark` class plus a `prefers-color-scheme` query -- on a system-dark machine an explicit light choice lost, both matched and the last rule won.
+
+Rejected: a sun/moon emoji control. Three labelled segments in a radiogroup, bronze `#8b6f2f` -- `oklch(.52 .08 85)`, picked on the L axis -- on the selected one, 4.9:1 on the track.
+The default state is no state at all.
+=== ANSWER
+```css
+:root { color-scheme: light dark; --track: light-dark(#f2efe8, #21201c); --ink: light-dark(#1d1b16, #ece8dd); --bronze: light-dark(#8b6f2f, #d3b268); }
+:root[data-theme="light"] { color-scheme: only light; }
+:root[data-theme="dark"] { color-scheme: only dark; }
+.themes { display: inline-flex; gap: .25rem; padding: .25rem; border-radius: 999px; background: var(--track); }
+.themes input { position: absolute; opacity: 0; }
+.themes span { display: block; padding: .25rem .75rem; border-radius: 999px; color: var(--ink); }
+.themes input:checked + span { background: var(--bronze); color: light-dark(#fff, #1b1913); }
+.themes input:focus-visible + span { outline: 2px solid var(--ink); }
+```
+=== END
+
+=== PROMPT
+Style one field of a settings form: label, input, help text, error state.
+=== THINK
+Label above the control, always. Rejected: the placeholder standing in for the label -- it disappears the moment typing starts and takes the question with it.
+
+Ground `#f6f8fb`, ink `#161d26`, steel blue `#245ea8` at 6.2:1 on the ring. Spacing on 4: 6px label to control, 24px between fields, `.625rem .75rem` padding for a 44px target.
+
+Revision: the error was a red border alone. A colourblind user sees a slightly different grey box, so the reason becomes text tied by `aria-describedby` and the border thickens to 2px -- shape as well as colour.
+
+```css
+input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+```
+
+Help at .8125rem in `color-mix(in oklab, var(--ink) 70%, var(--bg))`, 5.4:1.
+One question, one control, one message.
+=== ANSWER
+```css
+:root { --bg: #f6f8fb; --ink: #161d26; --focus: #245ea8; --danger: #a51f1f;
+  --line: color-mix(in oklab, var(--ink) 22%, var(--bg)); }
+.field { display: grid; gap: .375rem; color: var(--ink); }
+.field label { font-size: .875rem; font-weight: 600; }
+.field input { padding: .625rem .75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.field .help { font-size: .8125rem; color: color-mix(in oklab, var(--ink) 70%, var(--bg)); }
+.field input[aria-invalid="true"] { border: 2px solid var(--danger); }
+.field .err { font-size: .8125rem; font-weight: 600; color: var(--danger); }
+```
+=== END
+
+=== PROMPT
+A search input for a site header, with a clear button inside the field.
+=== THINK
+The button sits in the field, so the field makes room: `padding-inline-end: 2.5rem`, the button absolutely placed in that same 2.5rem.
+
+Revision: `display: none` on the clear button made the header jump when it appeared. `visibility: hidden` reserves the space.
+
+Placeholder at 40% ink measures 2.8:1 and fails; 62% gives 4.6:1 and still reads as secondary. Leaf `#4a7c2f` (4.7:1 on `#f7faf5`) is only on the ring.
+```css
+.search input { inline-size: clamp(12rem, 30vw, 24rem); }
+```
+The field grows with the header rather than snapping at a breakpoint.
+
+Rejected: a magnifier emoji in the placeholder -- the icon belongs in the markup as an SVG.
+Room made, no jump, placeholder legible.
+=== ANSWER
+```css
+:root { --bg: #f7faf5; --ink: #18220f; --leaf: #4a7c2f; --line: color-mix(in oklab, var(--ink) 20%, var(--bg)); }
+.search { position: relative; display: inline-flex; color: var(--ink); }
+.search input { inline-size: clamp(12rem, 30vw, 24rem); padding: .5rem 2.5rem .5rem .75rem; border: 1px solid var(--line); border-radius: 999px; }
+.search input::placeholder { color: color-mix(in oklab, var(--ink) 62%, var(--bg)); }
+.search input:focus-visible { outline: 2px solid var(--leaf); outline-offset: 2px; }
+.clear { position: absolute; inset-inline-end: .25rem; inline-size: 2rem; block-size: 2rem; border: 0; border-radius: 50%; background: none; }
+.search input:placeholder-shown ~ .clear { visibility: hidden; }
+.clear:focus-visible { outline: 2px solid var(--leaf); }
+```
+=== END
+
+=== PROMPT
+Custom checkbox and radio controls that keep the native input.
+=== THINK
+`appearance: none` on the real input, then rebuild the box -- keeping the input keeps the label association, keyboard and form value.
+
+Revision: the tick was a background SVG data URI, which cannot follow `currentColor` and stayed dark when the theme flipped. A `clip-path` shape takes `currentColor`.
+
+```css
+input::before { scale: 0; background: currentColor; clip-path: polygon(14% 44%, 0 65%, 40% 100%, 100% 16%); }
+```
+Grape `#6b2fa8` at 6.6:1 on `#faf8fd` for the checked state.
+
+Rejected: one radius for every control. The checkbox keeps 4px, the radio stays a circle -- shape is the only cue that one allows several answers.
+Native input, custom shell, nothing lost.
+=== ANSWER
+```css
+:root { --bg: #faf8fd; --ink: #1b1626; --grape: #6b2fa8; --line: color-mix(in oklab, var(--ink) 30%, var(--bg)); }
+input[type="checkbox"], input[type="radio"] {
+  appearance: none; display: grid; place-content: center; inline-size: 1.125rem;
+  block-size: 1.125rem; border: 2px solid var(--line); border-radius: 4px;
+}
+input[type="radio"] { border-radius: 50%; }
+input::before { content: ""; inline-size: .625rem; block-size: .625rem; scale: 0; background: currentColor; clip-path: polygon(14% 44%, 0 65%, 40% 100%, 100% 16%, 84% 0, 39% 64%); }
+input[type="radio"]::before { clip-path: none; border-radius: 50%; }
+input:checked { border-color: var(--grape); color: var(--grape); }
+input:checked::before { scale: 1; }
+input:focus-visible { outline: 2px solid var(--grape); outline-offset: 2px }
+```
+=== END
+
+=== PROMPT
+A four-step progress indicator for a checkout flow.
+=== THINK
+Three states, one loud: upcoming recedes, done is quiet confirmation, current carries the weight.
+
+Ochre `#b8620f` at 4.6:1 on `#fdf9f4` for done and current, upcoming at `color-mix(in oklab, var(--ink) 55%, var(--bg))`.
+
+Revision: the current step pulsed. Motion at the top of the page pulled the eye off the field being typed into -- weight and fill only now.
+
+```css
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); }
+```
+
+Rejected: emoji ticks on completed steps. `aria-current="step"` carries the state and the dot fills.
+
+Below 30rem the labels hide and the dots remain -- a container query, since this also lives in a sidebar.
+Current loudest, done quiet, upcoming faint.
+=== ANSWER
+```css
+:root { --bg: #fdf9f4; --ink: #241a10; --ochre: #b8620f; --faint: color-mix(in oklab, var(--ink) 55%, var(--bg)); }
+.steps { container-type: inline-size; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--bg); color: var(--faint); }
+.step { display: grid; justify-items: center; font-size: .8125rem; }
+.dot { display: grid; place-items: center; inline-size: 1.75rem; block-size: 1.75rem; border: 2px solid currentColor; border-radius: 50%; }
+.step[data-state="done"] { color: var(--ochre); }
+.step[aria-current="step"] { color: var(--ochre); font-weight: 700; }
+.step[aria-current="step"] .dot { background: var(--ochre); color: var(--bg); }
+@container (width < 30rem) { .label { position: absolute; clip-path: inset(50%); } }
+```
+=== END
+
+=== PROMPT
+A button system: primary, secondary and ghost, plus disabled and loading.
+=== THINK
+Three weights, one primary per view. Navy `#123d7a` carries white at 9.7:1; secondary is that navy on a 1px border; ghost has no border.
+
+Revision: secondary and ghost were indistinguishable at rest, since ghost had a faint border too. Ghost loses it and earns a `color-mix()` tint on hover.
+
+Disabled at `opacity: .5` drags the label to 3.4:1; a muted token holds 4.6:1 and the `disabled` attribute carries the semantics.
+
+Rejected: the spinner that replaces the label -- the button resizes and the row jumps. The label stays, `aria-busy` marks the state, the control stops taking clicks; nothing to suppress under reduced motion.
+```css
+.btn[aria-busy="true"] { pointer-events: none; cursor: progress; }
+```
+Also rejected: a drop shadow on the primary; colour weight is already the hierarchy.
+One primary, three weights, no shadows.
+=== ANSWER
+```css
+:root { --bg: #f5f7fa; --navy: #123d7a; --muted: #5f6773; }
+.btn { padding: .5rem 1rem; border-radius: 6px; border: 1px solid transparent; font: inherit; }
+.btn--primary { background: var(--navy); color: #fff; }
+.btn--secondary, .btn--ghost { background: none; color: var(--navy); }
+.btn--secondary { border-color: currentColor; }
+.btn--ghost:hover { background: color-mix(in oklab, var(--navy) 10%, var(--bg)); }
+.btn:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+.btn:disabled { background: #e6e9ee; color: var(--muted); cursor: not-allowed; }
+.btn[aria-busy="true"] { pointer-events: none; cursor: progress; }
+```
+=== END
+
+=== PROMPT
+A file upload dropzone with idle, dragging and rejected-file states.
+=== THINK
+Revision, since I had it backwards: `:hover` was the drag state, and the pointer crosses that box on the way to anywhere. Dragging is a JS-set `[data-dragging]` instead.
+
+Cyan-slate `#1e7a8c` at 4.8:1 on `#f4fafb`, on the dashed border. Dragging fills with `color-mix(in oklab, var(--accent) 10%, var(--bg))` and goes solid -- never colour alone.
+
+```css
+.drop { min-block-size: clamp(8rem, 20vh, 12rem); border: 2px dashed var(--accent); }
+```
+Sized against the viewport: on a phone a fixed 12rem of empty box is most of the screen.
+
+The real file input is visually hidden inside the label, so `:focus-within` gives the zone a keyboard ring.
+
+Rejected: an emoji cloud icon; the instruction is text, the picture is an `aria-hidden` SVG.
+Three states, three shapes, none of them colour alone.
+=== ANSWER
+```css
+:root { --bg: #f4fafb; --ink: #12212a; --accent: #1e7a8c; --danger: #a3281f; }
+.drop {
+  display: grid; place-items: center; gap: .5rem; padding: 1.5rem;
+  min-block-size: clamp(8rem, 20vh, 12rem); border: 2px dashed var(--accent);
+  border-radius: 10px; background: var(--bg); color: var(--ink);
+}
+.drop input { position: absolute; inline-size: 1px; clip-path: inset(50%); }
+.drop:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+.drop[data-dragging] { border-style: solid; background: color-mix(in oklab, var(--accent) 10%, var(--bg)); }
+.drop[data-invalid] { border: 2px solid var(--danger); }
+.drop-error { font-size: .8125rem; color: var(--danger); }
+```
+=== END
+
+=== PROMPT
+Style a data table of invoices: sortable headers, numeric columns, many rows.
+=== THINK
+Rows are read across, so only horizontal hairlines. Rejected: the full grid of rules, which turns a table into graph paper.
+
+Revision: 14px body is too small on a data table -- 15px at 1.5, with .8125rem uppercase headers.
+
+Numbers right, text left, `tabular-nums` on the money column -- proportional digits make a column of totals wobble.
+
+Ground `#f7f7fa`, ink `#1a1b26`, indigo-grey `#4a4e8f` at 6.9:1 on the sorted header only.
+
+```css
+thead th { position: sticky; inset-block-start: 0; background: var(--bg); }
+```
+Without that background the rows show through as they scroll under.
+
+Row hover is a `color-mix()` tint, not a border change -- a border change reflows every row by a pixel.
+Hairlines across, digits aligned, head pinned.
+=== ANSWER
+```css
+:root { --bg: #f7f7fa; --ink: #1a1b26; --sorted: #4a4e8f;
+  --line: color-mix(in oklab, var(--ink) 14%, var(--bg)); }
+table { inline-size: 100%; border-collapse: collapse; background: var(--bg); color: var(--ink); font-size: .9375rem; }
+thead th { position: sticky; inset-block-start: 0; background: var(--bg); font-size: .8125rem; text-transform: uppercase; text-align: start; }
+th, td { padding: .625rem .75rem; border-block-end: 1px solid var(--line); }
+.num { text-align: end; font-variant-numeric: tabular-nums; }
+th[aria-sort] { color: var(--sorted); }
+tbody tr:hover { background: color-mix(in oklab, var(--ink) 5%, var(--bg)); }
+th button:focus-visible { outline: 2px solid var(--sorted); }
+```
+=== END
+
+=== PROMPT
+A stat card for a dashboard: label, current value, change since last week.
+=== THINK
+The value is the card, so it gets the size: `clamp(2rem, 1.5rem + 2vw, 3rem)` with `tabular-nums`, label .8125rem above, delta .875rem below.
+
+Revision: the delta was green or red text alone. It now carries a sign and an arrow glyph, with colour as the third cue rather than the only one.
+
+Mustard `#8a6d00` at 4.6:1 on `#fbfaf4` for the label rule; positive `#1c6b45`, negative `#9c2f2f`, both past 4.5:1.
+
+Rejected: a shadow under every card. A 1px border and the ground between them is enough; they are equals, not floating objects.
+
+```css
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+```
+14rem is where the largest value still fits on one line, so nothing wraps mid-number.
+Value loudest, delta signed, no shadows.
+=== ANSWER
+```css
+:root { --bg: #fbfaf4; --ink: #1f1c10; --mustard: #8a6d00; --up: #1c6b45; --down: #9c2f2f;
+  --line: color-mix(in oklab, var(--ink) 15%, var(--bg)); }
+.stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+.stat { padding: 1rem; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.stat .label { font-size: .8125rem; text-transform: uppercase; color: var(--mustard); }
+.stat .value { font-size: clamp(2rem, 1.5rem + 2vw, 3rem); line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat .delta { font-size: .875rem; font-weight: 600; }
+.stat .delta[data-dir="up"] { color: var(--up); }
+.stat .delta[data-dir="down"] { color: var(--down); }
+```
+=== END
+
+=== PROMPT
+A three-tier pricing table with one tier recommended.
+=== THINK
+Rejected: the scaled-up middle column -- it breaks the baseline of every row beside it, so features stop lining up. The recommended tier gets a 2px border and a small label: same box, more weight.
+
+Price at `clamp(2rem, 1.6rem + 1.6vw, 2.75rem)` with `tabular-nums`, features 1rem/1.7.
+
+Revision: I centred the feature lists. A centred list has no left edge to return to -- flush left, tick in its own column.
+
+Rust `#9a3412` at 5.6:1 on `#fdf8f4`, on the recommended border and the one primary button.
+
+```css
+.tiers { grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+```
+Three across, then one column, with no breakpoint to maintain.
+Same box, more weight, lists flush left.
+=== ANSWER
+```css
+:root { --bg: #fdf8f4; --ink: #21160f; --rust: #9a3412;
+  --line: color-mix(in oklab, var(--ink) 16%, var(--bg)); }
+.tiers { display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); }
+.tier { padding: 1.5rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
+.tier[data-recommended] { border: 2px solid var(--rust); }
+.tier .tag { color: var(--rust); font-size: .75rem; font-weight: 700; text-transform: uppercase; }
+.tier .price { font-size: clamp(2rem, 1.6rem + 1.6vw, 2.75rem); line-height: 1.1; font-variant-numeric: tabular-nums; }
+.tier ul { margin: 1rem 0; padding: 0; list-style: none; line-height: 1.7; }
+.tier li { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr); }
+```
+=== END
+
+=== PROMPT
+The frame around a line chart: axes, gridlines, legend, tooltip target.
+=== THINK
+The data is the subject; the frame must not compete. Gridlines horizontal only, at `color-mix(in oklab, var(--ink) 10%, var(--bg))` -- the eye reads a value against the y axis, and vertical rules only add noise.
+
+Rejected: the 3D bar look with a shadow under the plot. Depth that encodes nothing is decoration on data.
+
+Revision: axis text at 55% ink measures 3.1:1 and fails. 70% gives 4.7:1 and still sits behind the line.
+
+Denim `#3a6ea5` as the single series colour on `#f5f7fb`; a second would need a hue that separates in greyscale too, so the legend carries a dash pattern.
+
+```css
+.chart { aspect-ratio: 16/9; min-block-size: 12rem; }
+```
+Ratio rather than a fixed height, so the plot keeps its shape while the card resizes.
+
+Axis labels .75rem with `tabular-nums`, y labels aligned to the plot edge.
+Frame quiet, data loud, gridlines one direction.
+=== ANSWER
+```css
+:root { --bg: #f5f7fb; --ink: #131820; --series: #3a6ea5;
+  --grid: color-mix(in oklab, var(--ink) 10%, var(--bg));
+  --axis: color-mix(in oklab, var(--ink) 70%, var(--bg)); }
+.chart { aspect-ratio: 16/9; min-block-size: 12rem; background: var(--bg); color: var(--ink); }
+.chart .grid line { stroke: var(--grid); }
+.chart .series { fill: none; stroke: var(--series); stroke-width: 2; }
+.chart text { font-size: .75rem; fill: var(--axis); font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 1rem; font-size: .8125rem; }
+.chart :focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+An empty state for a project list that has no projects yet.
+=== THINK
+An empty state is a question, not a shrug. Three things in order: what is missing at 1.125rem/1.4 at 600, why in one line at .9375rem, then the action that fixes it.
+
+Rejected: the huge grey illustration that fills half the panel. A 32px line icon at 60% ink, and the sentence does the work.
+
+Khaki `#7d6b3f` at 4.8:1 on `#faf9f5`, on the action only -- there is exactly one thing to do here.
+
+Revision: I centred the block in the viewport with `min-height: 60vh`. Inside a panel that pushes it below the fold; it should centre in whatever box contains it.
+```css
+.empty { display: grid; place-content: center; min-block-size: 100%; }
+```
+Text capped at 36ch so the two lines break evenly instead of running the panel width.
+A question, one reason, one way out.
+=== ANSWER
+```css
+:root { --bg: #faf9f5; --ink: #1e1b12; --khaki: #7d6b3f;
+  --muted: color-mix(in oklab, var(--ink) 60%, var(--bg)); }
+.empty { display: grid; place-content: center; gap: .5rem; min-block-size: 100%; background: var(--bg); color: var(--ink); }
+.empty svg { inline-size: 32px; color: var(--muted); }
+.empty h2 { margin: 0; font-size: 1.125rem; font-weight: 600; line-height: 1.4; }
+.empty p { margin: 0; max-inline-size: 36ch; font-size: .9375rem; color: var(--muted); }
+.empty .action { margin-block-start: .5rem; padding: .5rem 1rem; border-radius: 6px; background: var(--khaki); color: var(--bg); font-weight: 600; }
+.empty .action:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+```
+=== END
+
+=== PROMPT
+An activity feed: avatar, actor, what they did, and a timestamp.
+=== THINK
+A feed is scanned for who and when, so the columns are fixed, fluid, fixed:
+```css
+.event { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; gap: .75rem; }
+```
+`minmax(0, 1fr)` keeps a long commit message from pushing the timestamp off the edge.
+
+Revision: 40px avatars looked right on a desktop and squeezed the sentence into a gutter on a phone. 32px, and the sentence gets the space.
+
+Rejected: one shadowed card per event. This is a list, not a stack; a hairline says the same with none of the weight.
+
+Lilac `#785ba6` at 5.1:1 on `#f8f7fb` for the actor's name; the verb stays ink so the sentence reads as a sentence.
+
+Timestamps .8125rem, `tabular-nums`, 68% ink (4.7:1), aligned to the end.
+Who, what, when -- three columns, one hairline.
+=== ANSWER
+```css
+:root { --bg: #f8f7fb; --ink: #1a1622; --lilac: #785ba6;
+  --line: color-mix(in oklab, var(--ink) 12%, var(--bg));
+  --muted: color-mix(in oklab, var(--ink) 68%, var(--bg)); }
+.feed { background: var(--bg); color: var(--ink); font-size: .9375rem; }
+.event { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; gap: .75rem; padding-block: .75rem; border-block-end: 1px solid var(--line); }
+.event img { inline-size: 2rem; block-size: 2rem; border-radius: 50%; }
+.event .actor { color: var(--lilac); font-weight: 600; }
+.event .actor:focus-visible { outline: 2px solid var(--lilac); outline-offset: 2px; }
+.event time { font-size: .8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+```
+=== END
+
+=== PROMPT
+A top navigation bar for a marketing site, with the current section marked.
+=== THINK
+The current section needs more than colour, so `aria-current="page"` also gets a 2px underline -- the mark survives greyscale and a screen reader.
+
+Maroon `#6b2233` at 7.1:1 on `#f8f5f5`, on the current item and the ring.
+
+Revision: the underline was a `border-block-end` added on hover and every link jumped 2px. A transparent border at rest holds the space; only the colour changes.
+
+Labels .9375rem at 600, items 24px apart, bar 3.5rem tall, each link filling its height so the hit area is the whole bar.
+
+Rejected: uppercase labels tracked at .1em -- a 2014 template, and it costs legibility at this size.
+```css
+.nav { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+```
+Wrapping beats a burger at tablet width: five links fit on two lines.
+Marked twice, no jump, no burger.
+=== ANSWER
+```css
+:root { --bg: #f8f5f5; --ink: #1d1417; --maroon: #6b2233;
+  --line: color-mix(in oklab, var(--ink) 12%, var(--bg)); }
+.bar { display: flex; align-items: center; min-block-size: 3.5rem; background: var(--bg); color: var(--ink); border-block-end: 1px solid var(--line); }
+.nav { display: flex; flex-wrap: wrap; gap: 1.5rem; }
+.nav a { display: inline-flex; min-block-size: 3.5rem; font-size: .9375rem; font-weight: 600; border-block-end: 2px solid transparent; }
+.nav a:hover { border-block-end-color: var(--line); }
+.nav a[aria-current="page"] { color: var(--maroon); border-block-end-color: var(--maroon); }
+.nav a:focus-visible { outline: 2px solid var(--maroon); outline-offset: -2px; }
+```
+=== END
+
+=== PROMPT
+A modal dialog built on the native dialog element.
+=== THINK
+`<dialog>` with `showModal()`: focus trapping, Escape and the inert background are free, and my hand-rolled versions are worse.
+
+Backdrop: `color-mix(in oklab, #0b1015 55%, transparent)` rather than a flat 50% black, which goes muddy over a warm page.
+
+Width `min(32rem, 100% - 2rem)`; a fixed 600px overflows a phone.
+
+Revision: I faded `opacity` on an `.open` class and nothing animated -- `display` flips discretely and kills the transition. `@starting-style` plus `allow-discrete` actually runs.
+```css
+@starting-style { dialog[open] { opacity: 0; translate: 0 8px; } }
+```
+Rejected: an emoji X for close -- a real button with `aria-label="Close"` and a 44px target.
+
+Steel `#2f4858` at 8.1:1 on `#f5f7f8` for the ring; 120ms fade and rise, none under reduced motion.
+Native element, real transition, one accent.
+=== ANSWER
+```css
+:root { --surface: #f5f7f8; --ink: #121a1f; --steel: #2f4858; }
+dialog {
+  inline-size: min(32rem, 100% - 2rem); padding: 1.5rem; border: 0; border-radius: 12px;
+  background: var(--surface); color: var(--ink);
+  opacity: 0; translate: 0 8px;
+  transition: opacity .12s ease, translate .12s ease, display .12s allow-discrete;
+}
+dialog[open] { opacity: 1; translate: 0 0; }
+@starting-style { dialog[open] { opacity: 0; translate: 0 8px; } }
+dialog::backdrop { background: color-mix(in oklab, #0b1015 55%, transparent); }
+dialog .close:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { dialog { transition: none; } }
+```
+=== END
+
+=== PROMPT
+Toast notifications that appear in the bottom corner and stack.
+=== THINK
+A fixed container, `column-reverse`: a new toast pushes older ones up, nothing reorders.
+
+The container must not eat clicks beneath: `pointer-events: none` on it, `auto` per toast.
+
+Pine `#146c43` success, `#9b2226` error, both past 5:1 on `#f5f9f6`, with an icon and a word -- never colour alone.
+
+Revision: 3s auto-dismiss is too short for a sentence; 6s, and hovering pauses it.
+
+Rejected: animating `inset-block-end` -- layout every frame; `translate` and `opacity` composite.
+```css
+@media (prefers-reduced-motion: no-preference) { .toast { animation: rise .15s ease; } }
+```
+Under reduced motion it just appears; `role="status"` announces it.
+Stacked upward, never blocking, honest under reduced motion.
+=== ANSWER
+```css
+:root { --bg: #f5f9f6; --ink: #121a15; --ok: #146c43; --err: #9b2226; --line: color-mix(in oklab, #121a15 14%, #f5f9f6); }
+.toasts { position: fixed; inset: auto 1rem 1rem auto; display: flex; flex-direction: column-reverse; gap: .5rem; pointer-events: none; }
+.toast {
+  pointer-events: auto; inline-size: min(22rem, calc(100vw - 2rem));
+  display: flex; padding: .75rem 1rem;
+  border: 1px solid var(--line); border-inline-start-width: 3px; background: var(--bg); color: var(--ink);
+}
+.toast[data-kind="ok"] { border-inline-start-color: var(--ok); }
+.toast[data-kind="err"] { border-inline-start-color: var(--err); }
+@keyframes rise { from { opacity: 0; translate: 0 .5rem; } }
+@media (prefers-reduced-motion: no-preference) { .toast { animation: rise .15s ease; } }
+```
+=== END
+
+=== PROMPT
+A tab bar for a settings panel, with the selected tab marked.
+=== THINK
+Tabs are one-of-many, so exactly one is loud: gold `#a16207` at 4.8:1 on `#faf8f2` with a 2px underline, the rest at 70% ink.
+
+Revision: weight alone marked the selection, and the row reflowed as the bold label grew. Reserve the bold width at rest:
+```css
+.tab::after { content: attr(data-label); font-weight: 700; block-size: 0; visibility: hidden; }
+```
+
+Rejected: a filled pill behind every tab -- pills make the set look like buttons, and buttons imply actions, not a current view.
+
+Labels .875rem, 44px tall, 1.5rem apart. Arrow-key behaviour belongs to `role="tablist"`; CSS only marks `[aria-selected="true"]`.
+
+Narrow panel: `overflow-x: auto` with `scroll-snap-type: inline mandatory`.
+One loud tab, no reflow, no pills.
+=== ANSWER
+```css
+:root { --bg: #faf8f2; --ink: #1f1a10; --gold: #a16207;
+  --muted: color-mix(in oklab, var(--ink) 70%, var(--bg));
+  --line: color-mix(in oklab, var(--ink) 12%, var(--bg)); }
+.tabs { display: flex; overflow-x: auto; scroll-snap-type: inline mandatory; border-block-end: 1px solid var(--line); background: var(--bg); }
+.tab { min-block-size: 44px; border: 0; background: none; color: var(--muted); font-size: .875rem; border-block-end: 2px solid transparent; }
+.tab::after { content: attr(data-label); font-weight: 700; block-size: 0; visibility: hidden; }
+.tab[aria-selected="true"] { color: var(--gold); font-weight: 700; border-block-end-color: var(--gold); }
+.tab:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+```
+=== END
+
+=== PROMPT
+A dropdown menu under a toolbar button.
+=== THINK
+The one place a shadow is honest: the menu really does overlay the page, so border, 8px radius, one soft shadow. Rejected: the 16px-radius floating card everything copies.
+
+Teal `#14636b` at 5.9:1 on `#f4f8f8` for the focused item and the ring.
+
+Revision: aligned to the button's start edge, the menu clipped off screen near the window edge. It flips to the end edge when the trigger is in the last quarter -- one attribute, no measuring.
+
+```css
+.menu { min-inline-size: 12rem; max-block-size: 60vh; overflow: auto; }
+```
+`60vh` keeps a long menu on screen; it scrolls inside itself.
+
+Items 2rem tall, `.375rem .75rem` padding, hover and `:focus-visible` tinted with `color-mix()`.
+Overlays, so it may float; everything else stays flat.
+=== ANSWER
+```css
+:root { --bg: #f4f8f8; --ink: #10201f; --teal: #14636b;
+  --line: color-mix(in oklab, var(--ink) 14%, var(--bg)); }
+.menu {
+  position: absolute; inset-block-start: 100%; inset-inline-start: 0;
+  min-inline-size: 12rem; max-block-size: 60vh; overflow: auto; margin: 0; list-style: none;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink);
+  box-shadow: 0 8px 24px rgb(16 32 31 / .14);
+}
+.menu[data-align="end"] { inset-inline-start: auto; inset-inline-end: 0; }
+.menu button { inline-size: 100%; min-block-size: 2rem; padding: .375rem .75rem; border: 0; background: none; text-align: start; font-size: .875rem; }
+.menu button:is(:hover, :focus-visible) { background: color-mix(in oklab, var(--teal) 12%, var(--bg)); }
+```
+=== END
+
+=== PROMPT
+An off-canvas navigation drawer for a phone, plus the skip link above it.
+=== THINK
+The skip link is the first focusable element and shows only on focus -- parked off screen with `translate`, since `display: none` cannot take focus.
+
+Revision: I animated `inset-inline-start` -- layout every frame, stuttering on a mid-range phone. `translate: -100% 0` to `0` composites and holds 60fps.
+
+Coffee `#5c3b1e` at 7.6:1 on `#faf7f4` for the current item; the scrim is `color-mix(in oklab, #17110c 55%, transparent)`, and a scrim tap closes.
+
+Rejected: a hamburger emoji trigger; an inline SVG on a real button with `aria-expanded`.
+```css
+@media (prefers-reduced-motion: reduce) { .drawer { transition: none; } }
+```
+Under reduced motion it is simply there.
+Composited slide, focusable skip link, no emoji.
+=== ANSWER
+```css
+:root { --bg: #faf7f4; --ink: #1d1610; --coffee: #5c3b1e; }
+.skip { position: absolute; inset: .5rem auto auto .5rem; background: var(--bg); color: var(--coffee); translate: 0 -200%; }
+.skip:focus-visible { translate: 0 0; outline: 2px solid var(--coffee); }
+.drawer {
+  position: fixed; inset-block: 0; inset-inline-start: 0; z-index: 2;
+  inline-size: min(20rem, 85vw); background: var(--bg); color: var(--ink);
+  translate: -100% 0; transition: translate .2s ease;
+}
+.drawer[data-open] { translate: 0 0; }
+.drawer a[aria-current="page"] { color: var(--coffee); font-weight: 700; }
+.scrim { position: fixed; inset: 0; background: color-mix(in oklab, #17110c 55%, transparent); }
+@media (prefers-reduced-motion: reduce) { .drawer { transition: none; } }
+```
+=== END
