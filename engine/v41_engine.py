@@ -592,6 +592,20 @@ class V41Engine:
         self.prune_mode = (os.environ.get("DSV41_PRUNE_MODE") or "substitute").strip() or "substitute"
         if self.prune_mode not in ("substitute", "drop"):
             raise ValueError(f"unknown DSV41_PRUNE_MODE {self.prune_mode!r} (substitute | drop)")
+        # WHICH measurement the keep-set ranks experts by. "counts" is routing FREQUENCY, what this
+        # engine has always used; "saliency" is REAP's criterion (Lasby et al., Cerebras, ICLR 2026,
+        # arXiv 2510.13999) -- the summed gate_weight x ||expert output||, i.e. the magnitude the
+        # expert actually contributed. REAP measured the difference on Kimi-K2, which has this
+        # model's shape (384 routed experts, one shared, auxiliary-loss-free routing): pruning by
+        # frequency collapsed LiveCodeBench from 0.434 to 0.082 at 75 % kept and to 0.000 at 50 %,
+        # while pruning by saliency held at 0.440 and 0.429. Our own generation gate shows that
+        # failure mode at 36 % kept. Both are read as 384 floats per layer and ranked by the same
+        # rules, so this switches the quantity and nothing else. Same `or` as PRUNE_MODE above:
+        # start.sh sources .env with `set -a`, so an empty line must still mean the default.
+        self.prune_source = (os.environ.get("DSV41_PRUNE_SOURCE") or "counts").strip() or "counts"
+        if self.prune_source not in EX.COUNT_SOURCES:
+            raise ValueError(f"unknown DSV41_PRUNE_SOURCE {self.prune_source!r} "
+                             f"({' | '.join(EX.COUNT_SOURCES)})")
         self.prune_keep = prune_keep
         if prune_keep and prune_keep < 1.0:
             # pruned, all-resident mode: per layer only the top-N experts (by trace frequency) stay
@@ -607,8 +621,19 @@ class V41Engine:
                 topics = EX.available_topics(trace_stats)
             per = {}
             for t in topics:
-                c = EX.category_counts(trace_stats, t)
+                c = EX.category_counts(trace_stats, t, source=self.prune_source)
                 if len(c) != 40:
+                    if self.prune_source != "counts":
+                        # Distinguished from "no such topic", because the fix is different: the topic
+                        # is in the file, the MEASUREMENT is not, and re-tracing is the only way to
+                        # get it. Silently falling back to counts would serve a keep-set the operator
+                        # explicitly asked not to have.
+                        raise ValueError(
+                            f"{trace_stats} carries no {self.prune_source}_{t} histogram for all 40 "
+                            f"layers (got {len(c)}). DSV41_PRUNE_SOURCE={self.prune_source} needs a "
+                            f"trace taken with the expert-output norms: re-run tools/expert_trace.py "
+                            f"(it records `out_norms` since 2026-09-13) and tools/expert_stats.py over "
+                            f"it, or set DSV41_PRUNE_SOURCE=counts to rank topic {t!r} by frequency.")
                     raise ValueError(f"topic {t!r} is not in {trace_stats} (have: {', '.join(EX.available_topics(trace_stats))})")
                 per[t] = c
             if not per:
@@ -687,9 +712,12 @@ class V41Engine:
                     f"(coldest {self.sim_cb2_frac:.0%} per layer); slot size unchanged")
             if len(ranked) > self.store.lru_slots:
                 log(f"WARNING: pruned set {len(ranked)} experts > {self.store.lru_slots} LRU slots; the tail will stream")
+            # The rank rule and the histogram family both change WHICH experts these are, so both
+            # belong in the line that reports the set -- a measurement quoted without them cannot
+            # be reproduced.
             log(f"pruned mode ({prune_select}): keep {prune_keep:.2f}, {len(ranked)} experts total "
                 f"({min(per_layer)}-{max(per_layer)} per layer), {len(ranked) * self.expert_bytes / 1e9:.1f} GB, "
-                f"non-resident picks: {self.prune_mode}")
+                f"ranked by {rank} on {self.prune_source}, non-resident picks: {self.prune_mode}")
         else:
             self.model_prune_mask = None
             ranked = (EX.rank_from_trace(trace_stats, profile=self.hot_profile) if trace_stats
@@ -1076,6 +1104,8 @@ class V41Engine:
             "prune_keep": self.prune_keep,
             "prune_select": getattr(self, "prune_select", None),
             "prune_mode": self.prune_mode,
+            # which measurement ranked the keep-set: routing frequency or REAP saliency
+            "prune_source": self.prune_source,
             "expert_topics": getattr(self, "expert_topics_used", None),
             "hot_profile": self.hot_profile,
             "prefill_chunk": MAX_CHUNK,
@@ -1271,12 +1301,19 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if a.teacher_forced and a.prune_sweep:
         import math as _m
+        # the sweep ranks with whatever DSV41_PRUNE_SOURCE the engine was built with, or its rows
+        # would describe keep-sets the server will not build
+        src = eng.prune_source
         if a.prune_profile == "mixed":
-            cc, cg = EX.category_counts(a.trace_stats, "coding"), EX.category_counts(a.trace_stats, "general")
+            cc = EX.category_counts(a.trace_stats, "coding", source=src)
+            cg = EX.category_counts(a.trace_stats, "general", source=src)
             counts = {L: cc[L] / cc[L].sum() + cg[L] / cg[L].sum() for L in cc if L in cg}
         else:
-            counts = EX.category_counts(a.trace_stats, a.prune_profile)
-        assert len(counts) == 40, f"trace npz files missing next to {a.trace_stats}: {len(counts)} layers"
+            counts = EX.category_counts(a.trace_stats, a.prune_profile, source=src)
+        assert len(counts) == 40, (f"no {src}_* histogram for all 40 layers next to {a.trace_stats}: "
+                                   f"{len(counts)} layers"
+                                   + (" -- re-trace with tools/expert_trace.py for saliency"
+                                      if src == "saliency" else ""))
         out = {}
         for frac in [float(x) for x in a.prune_sweep.split(",")]:
             n_keep = max(6, _m.ceil(frac * 384))
@@ -1291,6 +1328,7 @@ if __name__ == "__main__":
             res["keep_frac"] = frac; res["experts_per_layer"] = n_keep; res["resident_gb_fp4"] = round(n_keep * 40 * EX.EXPERT_BYTES / 1e9, 1)
             res["select"] = a.prune_select; res["per_layer_counts"] = [int(len(keep[L])) for L in range(40)]
             res["prune_mode"] = eng.prune_mode
+            res["prune_source"] = src
             res["seconds"] = round(time.time() - t0, 1)
             out[str(frac)] = res
             log(f"prune keep={frac} {a.prune_select} ({n_keep}/384 per layer avg, {res['resident_gb_fp4']} GB): {json.dumps({k: v for k, v in res.items() if k in ('coding', 'general')})}")

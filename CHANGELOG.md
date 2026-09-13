@@ -109,6 +109,23 @@ fit in memory at once, and which 40 % decides both what the model is good at and
 Until now that was two numbers in a file and a three-minute wait to find out.
 
 ### Added
+- **`DSV41_PRUNE_SOURCE=saliency`** — rank a keep-set by how much each expert *contributes* instead
+  of how often it is picked. Everything here has ranked experts by routing frequency; REAP (Lasby
+  et al., Cerebras, ICLR 2026, [arXiv 2510.13999](https://arxiv.org/abs/2510.13999)) benchmarked
+  that on Kimi-K2 — 384 routed experts, one shared, auxiliary-loss-free routing, this model's shape
+  — and frequency-based pruning collapses where saliency holds: LiveCodeBench 0.434 → **0.082** at
+  75 % of experts kept and **0.000** at 50 %, against 0.440 and 0.429 for saliency. Saliency is
+  `gate_weight(t, e) · ‖expert_e(x_t)‖₂` over the calibration corpus, stored as a sum rather than
+  REAP's mean (the rules normalise each layer's histogram before ranking it, so the two differ only
+  by the count factor, and the sum is frequency × magnitude). `tools/expert_trace.py` now records
+  `out_norms` beside `indices` and `weights`; `tools/expert_stats.py` writes `saliency_<topic>`
+  beside `counts_<topic>`; the engine, `tools/budget.py` and `./tune.sh --source counts|saliency`
+  read whichever family the variable names, with the three ranking rules unchanged. A trace taken
+  before this carries no saliency histograms and the engine refuses by name rather than falling
+  back. **Not yet gated on the generation harness here** — REAP's numbers are REAP's, on another
+  model and another benchmark — so `counts` remains the default and nothing about a default run
+  moves. `tools/test_saliency.py` checks all of it without torch, a GPU or the checkpoint.
+  [`docs/keep-sets.md`](docs/keep-sets.md#frequency-is-not-contribution).
 - **`./tune.sh`** — pick topics, watch what they cost against the memory the box has free right
   now, and start the server from the same screen. Coverage per topic (the fraction of its measured
   routing the budget keeps resident) with the number of tokens each was traced on; the memory

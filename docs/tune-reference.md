@@ -31,6 +31,7 @@ job, a bare `./tune.sh` behaves as `--print`.
 | `--max-seq N` | `MAX_SEQ`, else `32768` | context length the KV cache is sized for |
 | `--format cb3\|fp4` | `EXPERT_FORMAT`, else `cb3` | the arena's expert layout, which sets the slot size |
 | `--rank sum\|max\|maxmin` | `DSV41_PRUNE_RANK`, else `sum` | how several selected topics are combined into one ranking of the same budget, which decides *which* experts the keep fraction holds. Shown on both screens next to the keep fraction, and written out with it. Applying a shipped profile sets it to `maxmin`; a profile from a file names no rule and leaves it alone |
+| `--source counts\|saliency` | `DSV41_PRUNE_SOURCE`, else `counts` | which measurement the experts are ranked by: `counts` is routing frequency, `saliency` is the summed `gate_weight x ||expert output||` (REAP, arXiv 2510.13999). Orthogonal to `--rank` — the rules are the same, the numbers they rank are not. Shown beside the rank and written out with it; a `coverage.json` traced before 2026-09-13 carries no `saliency_<topic>` histograms and the tool then finds no topics at all. See [`docs/keep-sets.md`](keep-sets.md#frequency-is-not-contribution) |
 | `--transient-slots N` | `TRANSIENT_SLOTS`, else `8` | prefill slots outside the LRU; the arena is sized to hold these too |
 | `--keep-free-gb F` | `KEEP_FREE_GB`, else `6.0` | host memory the launcher is told to leave free |
 | `--coverage-target F` | `DSV41_COVERAGE_TARGET`, else `0.85` | the coverage every selected topic should reach; sets the bar colours and what `m` fits to |
@@ -341,6 +342,7 @@ captured and the summary still read. This run is off Linux, so the memory figure
 $ ./tune.sh --topics coding --print
 PRUNE_KEEP=0.39
 DSV41_PRUNE_RANK=sum
+DSV41_PRUNE_SOURCE=counts
 MAX_SEQ=32768
 ARENA_GB=87
 EXPERT_FORMAT=cb3
@@ -364,6 +366,10 @@ there is no `.env` at all, `env.example` is copied first.
 straight out of the environment `.env` is sourced into. It is written every time: the coverage on
 the screen was read off a keep-set built with that rule, and a `.env` that reproduces the keep
 fraction but not the rule reproduces a different keep-set.
+
+`DSV41_PRUNE_SOURCE` is written the same way and for the same reason: the rule and the histogram
+family together decide which experts a keep fraction holds, so reproducing one without the other
+reproduces a different set.
 
 `EXPERT_TOPICS` is written only when at least one topic is selected. `TRACE_STATS` is written as a
 path relative to the repository root and takes precedence over `EXPERT_PROFILE` in `start.sh`, so a

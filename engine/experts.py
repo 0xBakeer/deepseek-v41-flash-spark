@@ -454,21 +454,38 @@ def available_topics(trace_stats_json: str) -> list:
         return []
 
 
+#: The two per-layer histogram families tools/expert_stats.py writes. `counts` is how OFTEN a
+#: layer's experts were picked; `saliency` is how MUCH they contributed -- the sum over the tokens
+#: routed to an expert of `gate_weight * ||expert(x)||`, which is REAP's criterion (Lasby et al.,
+#: Cerebras, ICLR 2026, arXiv 2510.13999). They are read identically and ranked identically; which
+#: one a keep-set is built from is `DSV41_PRUNE_SOURCE`.
+COUNT_SOURCES = ("counts", "saliency")
+
+
 def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384,
-                    n_layers: int = 40) -> dict[int, np.ndarray]:
+                    n_layers: int = 40, source: str = "counts") -> dict[int, np.ndarray]:
     """Per-layer expert histogram restricted to one corpus category.
+
+    `source` picks the family: "counts" (routing frequency, the histogram this engine has always
+    ranked by) or "saliency" (REAP's gate_weight x expert-output norm, summed). The return shape is
+    identical -- 384 non-negative floats per layer -- so every ranking rule downstream is unchanged
+    and only the quantity being ranked moves.
 
     `coverage.json` only carries the mixed histogram (`counts`) plus the two coverage *curves*, so a
     workload-specific hot set has to be recomputed from the raw traces the stats were made from:
-    `results/<name>/trace/layer<L>.npz` with `indices` [tokens, 6] and `category` [tokens].
+    `results/<name>/trace/layer<L>.npz` with `indices` [tokens, 6], `category` [tokens] and -- for
+    saliency -- `weights` and `out_norms`, both [tokens, 6].
     """
+    if source not in COUNT_SOURCES:
+        raise ValueError(f"unknown histogram source {source!r} ({' | '.join(COUNT_SOURCES)})")
+    key = f"{source}_{profile}"
     # Preferred source: the per-category histogram written into coverage.json itself, so a plain
     # checkout can build a keep-set without the raw trace arrays next to it.
     try:
         d = json.load(open(trace_stats_json))
         pl = d.get("per_layer") or {}
-        got = {int(L): np.asarray(v[f"counts_{profile}"], dtype=np.float64)
-               for L, v in pl.items() if f"counts_{profile}" in v}
+        got = {int(L): np.asarray(v[key], dtype=np.float64)
+               for L, v in pl.items() if key in v}
         if len(got) >= n_layers:
             return got
     except Exception:  # noqa: BLE001 - fall through to the raw arrays
@@ -483,10 +500,18 @@ def category_counts(trace_stats_json: str, profile: str, n_experts: int = 384,
         L = int(re.search(r"layer(\d+)", os.path.basename(path)).group(1))
         z = np.load(path)
         idx, cat = z["indices"], z["category"]
-        sel = idx[cat.astype("U") == profile]
+        m = cat.astype("U") == profile
+        sel = idx[m]
         if sel.size == 0:
             continue
-        out[L] = np.bincount(sel.reshape(-1).astype(np.int64), minlength=n_experts).astype(np.float64)
+        if source == "counts":
+            out[L] = np.bincount(sel.reshape(-1).astype(np.int64), minlength=n_experts).astype(np.float64)
+        elif "out_norms" in z.files and z["out_norms"].shape == idx.shape:
+            w = z["weights"][m].astype(np.float64) * z["out_norms"][m].astype(np.float64)
+            out[L] = np.bincount(sel.reshape(-1).astype(np.int64), weights=w.reshape(-1),
+                                 minlength=n_experts)
+        # else: a trace from before the saliency tracer. Leaving the layer out is what makes the
+        # engine refuse the file by name rather than build a keep-set out of a short one.
     return out
 
 

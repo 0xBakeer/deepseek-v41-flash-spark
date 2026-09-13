@@ -158,7 +158,7 @@ class MissingStats(Exception):
     -- which may carry no topics at all and fail three minutes into a load."""
 
 
-def find_stats(explicit: str | None) -> str | None:
+def find_stats(explicit: str | None, source: str = B.SOURCE_DEFAULT) -> str | None:
     if explicit:
         if not os.path.exists(explicit):
             raise MissingStats(explicit)
@@ -171,8 +171,11 @@ def find_stats(explicit: str | None) -> str | None:
     cands = sorted(glob.glob(os.path.join(ROOT, "results/keepsets/*/coverage.json")))
     cands += sorted(glob.glob(os.path.join(ROOT, "results/trace-*/stats/coverage.json")))
     best, best_n = None, -1
-    for c in cands:                       # the one that carries the most topics
-        n = len(B.topic_names(c))
+    # the one that carries the most topics IN THE FAMILY that will rank them: a
+    # file traced before the expert-output norms has every counts_* and no
+    # saliency_*, and picking it under --source saliency leaves no topics at all
+    for c in cands:
+        n = len(B.topic_names(c, source))
         if n > best_n:
             best, best_n = c, n
     return best
@@ -366,7 +369,7 @@ def describe_selection(topics) -> str:
 class State:
     def __init__(self, host, index, stats_path, keep, max_seq, fmt, selection,
                  transient_slots=B.TRANSIENT_SLOTS_DEFAULT, keep_free_gb=B.KEEP_FREE_GB_DEFAULT,
-                 user_profiles=(), profiles_path=None, rank=B.RANK_DEFAULT):
+                 user_profiles=(), profiles_path=None, rank=B.RANK_DEFAULT, source=None):
         self.host, self.index, self.stats_path = host, index, stats_path
         self.keep, self.max_seq, self.fmt = keep, max_seq, fmt
         # How the selected topics are combined into one ranking (DSV41_PRUNE_RANK).
@@ -374,6 +377,12 @@ class State:
         # it, and the engine will build the keep-set with it too, or the bars
         # describe a server nobody is going to run.
         self.rank = rank
+        # WHICH histograms are being ranked (DSV41_PRUNE_SOURCE): routing
+        # frequency, or REAP saliency. It is a property of the loaded index --
+        # one index reads one family -- and mirrored here so that the screen can
+        # say it and .env can be written with it. Taken from the index when it
+        # has one, so the two can never disagree.
+        self.source = source or getattr(index, "source", None) or B.SOURCE_DEFAULT
         # The arena has to hold the kept set PLUS the transient ring, and the
         # engine's own default ring is 400 slots, not 8. Sizing against one
         # value and running with the other is how a keep-set that reads nothing
@@ -603,8 +612,10 @@ def draw_easy(w, st: State):
         if pr["mine"] and 3 + len(pr["name"]) + 10 < W - len(st_txt) - 2:
             put(w, y, 4 + len(pr["name"]), "· yours", C["muted"])
         put(w, y, max(3, W - len(st_txt) - 2), st_txt, tone[pr["tone"]] | (curses.A_BOLD if here else 0))
-        cost = (f"{pr['keep'] * 100:.0f} % of experts · {pr['rank']} · {st.max_seq // 1024}k context"
-                if pr["topics"] else "")
+        # The profile names its own ranking rule; the histogram family it ranks is the screen's,
+        # so both are here -- the pair is what decides which experts the keep fraction holds.
+        cost = (f"{pr['keep'] * 100:.0f} % of experts · {pr['rank']} · {st.source} · "
+                f"{st.max_seq // 1024}k context" if pr["topics"] else "")
         put(w, y + 1, 3, pr["blurb"][:max(10, W - len(cost) - 6)], C["muted"])
         if cost:
             put(w, y + 1, max(3, W - len(cost) - 2), cost, C["muted"])
@@ -799,8 +810,16 @@ def draw(w, st: State):
     put(w, sy + 1, 1, sp("RESIDENT EXPERTS"), (C["accent"] if kf else C["muted"]) | curses.A_BOLD)
     # Which experts those are is the ranking rule's doing as much as the
     # fraction's, and the two rules put the same budget in different places, so
-    # the rule belongs where the number it qualifies is.
-    put(w, sy + 1, max(34, split - len(st.rank) - 6), f"rank {st.rank}", C["muted"], maxw=split - 34)
+    # the rule belongs where the number it qualifies is. The histogram family it
+    # ranks belongs there for the same reason: frequency and saliency order the
+    # same layer differently, and the coverage bars above are read off whichever
+    # one is named here.
+    # A truncated `rank maxmin · sal` says less than `maxmin · saliency` does, so the longest
+    # label that fits whole wins rather than the longest one clipped.
+    room = split - 34
+    rule = next((s for s in (f"rank {st.rank} · {st.source}", f"{st.rank} · {st.source}",
+                             f"rank {st.rank}", st.rank) if len(s) <= room), st.rank)
+    put(w, sy + 1, max(34, split - len(rule) - 1), rule, C["muted"], maxw=room)
     mk = p.max_keep()
     kb = max(10, split - 22)
     put(w, sy + 2, 1, f"◂ {st.keep * 100:4.0f} % ▸", (C["bright"] | curses.A_BOLD) if kf else C["muted"])
@@ -1193,8 +1212,9 @@ def brief(st: State) -> str:
     para(f"""
         Written by `./tune.sh --brief` from `{short_path(st.stats_path)}`, which carries
         {len(have)} topic{'' if len(have) == 1 else 's'}, at keep {keep:.0%} in the
-        `{st.fmt}` layout, ranked by `{st.rank}`. Every figure below is computed from that file at the moment the
-        brief was written, so re-run the command after the keep-set changes.""")
+        `{st.fmt}` layout, ranked by `{st.rank}` on the `{st.source}` histograms. Every figure below is
+        computed from that file at the moment the brief was written, so re-run the command after the
+        keep-set changes.""")
 
     line("## Why this is a task at all")
     line()
@@ -1501,7 +1521,7 @@ def brief(st: State) -> str:
 # --- output -----------------------------------------------------------------
 
 MANAGED = ("EXPERT_TOPICS", "PRUNE_KEEP", "MAX_SEQ", "ARENA_GB", "TRACE_STATS", "EXPERT_FORMAT",
-           "TRANSIENT_SLOTS", "KEEP_FREE_GB", "DSV41_PRUNE_RANK")
+           "TRANSIENT_SLOTS", "KEEP_FREE_GB", "DSV41_PRUNE_RANK", "DSV41_PRUNE_SOURCE")
 
 
 def env_for(st: State) -> dict:
@@ -1513,6 +1533,10 @@ def env_for(st: State) -> dict:
         # reads it under its own name, straight out of the environment .env is
         # sourced into, which is why this one key is not the bare form.
         "DSV41_PRUNE_RANK": st.rank,
+        # ... and off a keep-set built from THESE histograms. Same reasoning,
+        # same bare engine-side name: a run that ranks frequency where the screen
+        # ranked saliency keeps a different set of experts at the same budget.
+        "DSV41_PRUNE_SOURCE": st.source,
         "MAX_SEQ": str(st.max_seq),
         "ARENA_GB": f"{math.ceil(p.arena)}",
         "EXPERT_FORMAT": st.fmt,
@@ -1565,6 +1589,11 @@ def main() -> int:
                     help="how several topics are combined into one ranking: "
                          f"{' | '.join(B.RANKS)} (default %(default)s, from DSV41_PRUNE_RANK). "
                          "A profile that names a rule overrides it.")
+    ap.add_argument("--source", default=B.source_from_env(), metavar="WHICH",
+                    help="which measurement ranks the experts: "
+                         f"{' | '.join(B.SOURCES)} (default %(default)s, from DSV41_PRUNE_SOURCE). "
+                         "counts is routing frequency; saliency is gate weight x expert-output "
+                         "norm, and needs a coverage.json with saliency_<topic> histograms.")
     ap.add_argument("--transient-slots", type=int,
                     default=int(os.environ.get("TRANSIENT_SLOTS") or B.TRANSIENT_SLOTS_DEFAULT),
                     help="prefill slots outside the LRU; the arena is sized to hold these too")
@@ -1601,16 +1630,22 @@ def main() -> int:
         # the very disagreement between screen and engine this flag exists for.
         print(f"unknown rank {a.rank!r} (DSV41_PRUNE_RANK): {' | '.join(B.RANKS)}", file=sys.stderr)
         return 2
+    if a.source not in B.SOURCES:
+        # same reasoning as --rank: it defaults from the environment, and a file
+        # that says `salience` must stop the tool rather than be served frequency
+        print(f"unknown source {a.source!r} (DSV41_PRUNE_SOURCE): {' | '.join(B.SOURCES)}",
+              file=sys.stderr)
+        return 2
     host = B.read_host()
     try:
-        sp_ = find_stats(a.stats)
+        sp_ = find_stats(a.stats, a.source)
     except MissingStats as e:
         print(f"no such keep-set: {e}", file=sys.stderr)
         here = sorted(glob.glob(os.path.join(ROOT, "results/keepsets/*/coverage.json")))
         if here:
             print("available: " + ", ".join(short_path(x) for x in here), file=sys.stderr)
         return 2
-    index = B.TopicIndex(sp_) if sp_ else None
+    index = B.TopicIndex(sp_, a.source) if sp_ else None
     # Profiles from a file. A broken file costs its own profiles and nothing
     # else, so every problem is reported and the tool carries on with the
     # built-in ones -- including into the interactive screen, where stderr is
@@ -1629,13 +1664,19 @@ def main() -> int:
         where = short_path(sp_) if sp_ else "any coverage.json in the checkout"
         print(f"not in {where}: {', '.join(unknown)}", file=sys.stderr)
         print(f"have: {', '.join(index.topics) if index else '(none)'}", file=sys.stderr)
+        if a.source != "counts" and (not index or not index.topics):
+            # the likeliest cause by far: the file predates the tracer that records
+            # expert-output norms, so it has every counts_* and no saliency_*
+            print(f"this keep-set carries no {a.source}_<topic> histograms at all — re-run "
+                  f"tools/expert_trace.py and tools/expert_stats.py, or use --source counts",
+                  file=sys.stderr)
         return 2
     if unknown:
         sel = [t for t in sel if t not in unknown]   # the screen is where this gets fixed
 
     st = State(host, index, sp_, a.keep, a.max_seq, a.format, sel,
                transient_slots=a.transient_slots, keep_free_gb=a.keep_free_gb,
-               user_profiles=user, profiles_path=files[-1], rank=a.rank)
+               user_profiles=user, profiles_path=files[-1], rank=a.rank, source=a.source)
     st.problem = problems[0] if problems else ""
     if unknown:
         st.msg = f"dropped, not in this keep-set: {', '.join(unknown)}"
@@ -1667,7 +1708,7 @@ def main() -> int:
             p = pr["plan"]
             if pr["topics"]:
                 n_t = len(pr["topics"])
-                print(f"  {'':<22} {pr['keep']:.0%} of experts · rank {pr['rank']} · "
+                print(f"  {'':<22} {pr['keep']:.0%} of experts · rank {pr['rank']} · {st.source} · "
                       f"{p.arena:.0f} GB · {p.free_after_load:.0f} GB free · "
                       f"{n_t} topic{'' if n_t == 1 else 's'}")
             if pr["topics"] and pr["missing"]:
@@ -1711,7 +1752,7 @@ def main() -> int:
         cur = index.curves(tuple(index.topics), rank=st.rank)[0]
         n = B.keep_n(a.keep)
         print(f"{short_path(sp_)} — {len(index.topics)} topics, coverage at keep {a.keep:.0%}, "
-              f"rank {st.rank}")
+              f"rank {st.rank}, source {st.source}")
         for t in index.topics:
             nt = index.tokens.get(t, 0)
             flag = "  thin" if nt < B.TopicIndex.THIN else ""

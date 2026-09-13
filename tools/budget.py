@@ -105,6 +105,23 @@ def rank_from_env() -> str:
     refused by the caller rather than silently served as the default."""
     return (os.environ.get("DSV41_PRUNE_RANK") or RANK_DEFAULT).strip() or RANK_DEFAULT
 
+
+# WHICH measurement the histograms are, before any rule combines them.
+# `counts` is how often each expert was picked; `saliency` is how much it
+# contributed -- the summed gate weight x expert-output norm, REAP's criterion
+# (Lasby et al., Cerebras, ICLR 2026, arXiv 2510.13999). Both are 384 numbers per
+# layer and every rule above treats them the same, so this is orthogonal to
+# RANKS: a coverage bar is one (source, rank) pair, and neither may differ from
+# the engine's or the bar promises routing the server will not keep.
+SOURCES = ("counts", "saliency")
+SOURCE_DEFAULT = "counts"
+
+
+def source_from_env() -> str:
+    """The histogram family the engine will rank on (DSV41_PRUNE_SOURCE).
+    Unvalidated, for the same reason as rank_from_env."""
+    return (os.environ.get("DSV41_PRUNE_SOURCE") or SOURCE_DEFAULT).strip() or SOURCE_DEFAULT
+
 # The KV and indexer caches are allocated for MAX_SEQ up front (engine/model.py
 # Caches). Per token: for every kv_source_layer, one compressed-KV row of
 # head_dim and one index row of index_head_dim, both bf16, at that layer's
@@ -452,33 +469,46 @@ def _maxmin_order(per_norm: list, n_experts: int = N_EXPERTS) -> list:
     return admitted
 
 
-def topic_names(path: str) -> list:
+def topic_names(path: str, source: str = SOURCE_DEFAULT) -> list:
     """The topic names in a coverage file, without loading its histograms --
-    find_stats compares every candidate in the checkout and there can be many."""
+    find_stats compares every candidate in the checkout and there can be many.
+
+    `source` because a file traced before the expert-output norms carries every
+    `counts_<topic>` and no `saliency_<topic>`, and under --source saliency such
+    a file has no usable topics at all: it must not win find_stats' count."""
+    pre = source + "_"
     try:
         d = json.load(open(path))
         any_layer = next(iter((d.get("per_layer") or {}).values()), {})
-        return sorted(k[len("counts_"):] for k in any_layer if k.startswith("counts_"))
+        return sorted(k[len(pre):] for k in any_layer if k.startswith(pre))
     except Exception:  # noqa: BLE001
         return []
 
 
 class TopicIndex:
     """The per-topic expert histograms in a coverage.json, and everything that
-    can be derived from a selection of them without touching the model."""
+    can be derived from a selection of them without touching the model.
 
-    def __init__(self, path: str):
+    `source` selects the family of histograms to read -- `counts_<topic>`
+    (routing frequency) or `saliency_<topic>` (REAP's gate weight x expert-output
+    norm, summed). One index reads one family, because everything below it is a
+    ranking of one set of numbers and mixing the two in a single screen would
+    show a coverage the engine cannot reproduce under either setting."""
+
+    def __init__(self, path: str, source: str = SOURCE_DEFAULT):
         self.path = path
+        self.source = source
+        pre = source + "_"
         d = json.load(open(path))
         pl = d.get("per_layer") or {}
         any_layer = next(iter(pl.values()), {})
-        self.topics = sorted(k[len("counts_"):] for k in any_layer if k.startswith("counts_"))
+        self.topics = sorted(k[len(pre):] for k in any_layer if k.startswith(pre))
         self.counts = {}
         for t in self.topics:
             per = {}
             ok = True
             for L in range(N_LAYERS):
-                v = pl.get(str(L), {}).get(f"counts_{t}")
+                v = pl.get(str(L), {}).get(pre + t)
                 if v is None:
                     ok = False
                     break
@@ -491,7 +521,25 @@ class TopicIndex:
         # layers, so the histogram totals divide back to the tokens the trace
         # actually saw for that topic. A topic sampled thinly ranks noisily, and
         # its coverage bar is no more trustworthy than the sample under it.
-        self.tokens = {t: int(round(v / (N_LAYERS * TOPK))) for t, v in self.totals.items()}
+        #
+        # Only `counts` totals divide back that way: saliency's total is a sum of
+        # magnitudes and carries no token count at all, so the sample size is
+        # read out of the frequency histograms of the same file -- the same
+        # trace, the same tokens, whichever family ranks them.
+        counts_totals = self.totals
+        if source != "counts":
+            counts_totals = {}
+            for t in self.topics:
+                tot = 0.0
+                for L in range(N_LAYERS):
+                    v = pl.get(str(L), {}).get("counts_" + t)
+                    if v is None:
+                        tot = 0.0
+                        break
+                    tot += sum(float(x) for x in v)
+                counts_totals[t] = tot
+        self.tokens = {t: int(round(counts_totals.get(t, 0.0) / (N_LAYERS * TOPK)))
+                       for t in self.topics}
         self._cache: dict = {}
         # A topic's normalised histogram does not depend on what it is selected
         # with, and the profile screen ranks ten selections over the same

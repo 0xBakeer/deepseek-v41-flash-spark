@@ -16,7 +16,8 @@ tools/engram_rows.py (rows fetched on demand, the two 101 GB tables are never
 downloaded).
 
 Outputs (in --out):
-  trace/layer{L}.npz     per-token top-6 expert ids + routing weights + full gate scores(optional)
+  trace/layer{L}.npz     per-token top-6 expert ids, routing weights, expert-output norms
+                         + full gate scores (optional)
   state/after_layer{L}.pt residual stream + compress-kv checkpoints (for --resume)
   meta.json               corpus + run metadata
   logits/ (if head shard present after layer 39): teacher-forced top-1 accuracy + NLL per
@@ -188,8 +189,9 @@ def main():
             eg = safe_open(os.path.join(a.engram_dir, f"layer{L}_weights.safetensors"), "pt", device="cpu")
             ew = R.EngramWeights(lambda n, eg=eg: eg.get_tensor(n), L, dev)
 
-        rec_idx, rec_w, rec_scores, rec_cat, rec_tok = [], [], [], [], []
+        rec_idx, rec_w, rec_norm, rec_scores, rec_cat, rec_tok = [], [], [], [], [], []
         expert_cache: dict = {}
+        big_norm = [0]
         for s, st in zip(seqs, states):
             if ew is not None:
                 rows = load_engram_rows(a.engram_dir, L, s["id"], dev)
@@ -203,13 +205,29 @@ def main():
                 rec_cat.extend([s["category"]] * indices.size(0))
                 rec_tok.extend(s["ids"])
 
-            R.block_forward(st, w, experts, args, expert_cache, record)
+            def record_norms(out_norms):
+                # fp16, like `weights`: these are ranked per layer and summed over thousands of
+                # tokens, so three decimal digits are far more than the ranking can use, and the
+                # array is the same size as `indices`. Counted, not clamped, if any norm leaves
+                # fp16's range -- a saturated value would quietly distort the sum it lands in.
+                half = out_norms.to(torch.float16).cpu().numpy()
+                big_norm[0] += int((~np.isfinite(half)).sum())   # counted host-side: one sync, not two
+                rec_norm.append(half)
+
+            R.block_forward(st, w, experts, args, expert_cache, record, record_norms)
         n_uniq = len(expert_cache)
         del expert_cache, w, experts, ew
         torch.cuda.empty_cache() if dev.startswith("cuda") else None
 
+        if big_norm[0]:
+            log(f"layer {L}: WARNING {big_norm[0]} expert-output norms overflowed fp16; "
+                f"their saliency is inf and the layer's ranking cannot be trusted")
         np.savez_compressed(os.path.join(a.out, "trace", f"layer{L}.npz"),
                             indices=np.concatenate(rec_idx), weights=np.concatenate(rec_w),
+                            # [tokens, topk], aligned with `indices`: ||expert_e(x_t)|| before the
+                            # gate weight. weight * out_norm is REAP's saliency (arXiv 2510.13999),
+                            # which tools/expert_stats.py sums into `saliency_<topic>`.
+                            out_norms=np.concatenate(rec_norm),
                             scores=(np.concatenate(rec_scores) if a.save_scores else np.zeros(0, np.float16)),
                             category=np.array(rec_cat), token=np.array(rec_tok, dtype=np.int32))
         torch.save({"layer": L, "states": [{"h": st.h.cpu(), "pre_mix": st.pre_mix.cpu(),

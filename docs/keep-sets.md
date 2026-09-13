@@ -24,7 +24,8 @@ matters so much: a policy is only as good as the workload sample it was learned 
 *N* is decided by a measured routing trace. `tools/expert_trace.py` pushes a corpus through the
 model one layer at a time and records which experts each token picked; `tools/expert_stats.py`
 turns that into the per-layer histograms in a `coverage.json`. The engine ranks each layer's 384
-experts by those counts and keeps the top *N*.
+experts by those counts and keeps the top *N* — or by how much each expert *contributed* rather than
+how often it was picked, which is [`DSV41_PRUNE_SOURCE`](#frequency-is-not-contribution).
 
 ## A topic is one per-layer histogram
 
@@ -96,6 +97,75 @@ selection runs every topic down. Measured on this box at `PRUNE_KEEP=0.36`, 139 
 below the 0.7 line; 35 of the catalogue's 36 topics together run 0.580–0.636, with english the
 hardest. The same full selection under `sum` puts chinese hardest at 0.464. Sixteen is this box at
 this keep fraction, not a property of the rule — the boundary moves with both.
+
+## Frequency is not contribution
+
+Everything above ranks experts by how **often** the router picked them. That is one measurement of
+an expert's worth and it is not obviously the right one.
+
+REAP (Lasby et al., Cerebras, ICLR 2026, [arXiv 2510.13999](https://arxiv.org/abs/2510.13999))
+benchmarked the alternative on Kimi-K2 — 384 routed experts, one shared, auxiliary-loss-free
+routing, the same shape as this model — and the gap is not subtle:
+
+| criterion | LiveCodeBench, 75 % of experts kept | 50 % kept |
+|---|---|---|
+| routing frequency | 0.082 | 0.000 |
+| saliency | 0.440 | 0.429 |
+
+(dense baseline 0.434/0.440.) Frequency-based pruning does not degrade there; it collapses.
+Our own generation gate shows that failure mode at 36 % kept: the keep-set scores well on every
+selected topic's coverage and the output still degenerates.
+
+**Saliency** is the magnitude an expert actually contributes. For expert *e* in layer *L*, over a
+calibration corpus, REAP defines it as the mean over the tokens routed to *e* of
+
+```
+gate_weight(t, e) · ‖ expert_e(x_t) ‖₂
+```
+
+— the gate weight the router gave that pick, times the L2 norm of that expert's output for that
+token, taken *before* the weight is applied. An expert the router reaches for constantly whose
+output barely moves the residual stream is at the top of a frequency ranking and near the bottom of
+a saliency one, and a keep-set built the first way spends its budget on it.
+
+This repository stores the **sum** over those tokens rather than the mean. Every rule downstream
+normalises a layer's histogram by its own total before ranking it, so mean and sum differ by exactly
+the count factor; the mean asks *how much does this expert contribute when it fires*, the sum asks
+*how much of this layer's output does it account for*, and the second is the question a cache policy
+asks. The sum is also literally frequency × magnitude, which is what makes the two families the same
+measurement with and without the magnitude factor — an expert that fired once at enormous magnitude
+tops a mean ranking and is worth nothing to a keep-set.
+
+`tools/expert_trace.py` records, per token and per pick, the gate weight (`weights`, post
+renormalisation and post `route_scale` — the number actually multiplied into the expert's output)
+and `out_norms`, the unweighted `‖expert_e(x_t)‖₂`. `tools/expert_stats.py` sums `weight × out_norm`
+per expert into `saliency_<topic>` beside `counts_<topic>` in `coverage.json`.
+
+**`DSV41_PRUNE_SOURCE=counts|saliency`** picks which family the engine ranks a keep-set by. The
+ranking rules are untouched: `sum`, `max` and `maxmin` see 384 non-negative numbers per layer either
+way and cannot tell which measurement produced them. `./tune.sh --source counts|saliency` reads the
+same variable, shows the family beside the rank on both screens and writes it into `.env`;
+`tools/test_saliency.py` holds the screen's saliency keep-set to the engine's, layer by layer, under
+all three rules, the way `tools/test_budget_rank.py` does for counts.
+
+A `coverage.json` built before 2026-09-13 carries every `counts_<topic>` and no `saliency_<topic>`,
+and the engine **refuses by name** rather than falling back to frequency. Getting them needs a fresh
+trace — the norms are taken inside the layer forward and cannot be recovered from the stored
+indices:
+
+```bash
+python tools/expert_trace.py --model-dir ./models/DeepSeek-V4.1-Flash \
+    --corpus corpus/trace_corpus.jsonl --engram-dir engram_rows \
+    --out results/trace-YYYYMMDD
+python tools/expert_stats.py --trace results/trace-YYYYMMDD \
+    --out results/trace-YYYYMMDD/stats
+./tune.sh --source saliency --stats results/trace-YYYYMMDD/stats/coverage.json --write
+```
+
+The trace is resumable as before (`--resume`), and the new arrays are the same size as `indices`, so
+a trace costs what it always did. What has **not** been done here is the measurement that matters:
+no generation gate has been run on a saliency keep-set on this box. REAP's numbers are REAP's, on
+another model and another benchmark. Until that run exists, `counts` stays the default.
 
 ## Coverage
 

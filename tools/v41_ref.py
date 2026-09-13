@@ -732,9 +732,17 @@ def engram_forward(h: torch.Tensor, rows: torch.Tensor, ew: EngramWeights, args:
 
 # ----------------------------------------------------------------------------- block
 def block_forward(st: SeqState, w: LayerWeights, experts: ExpertLoader, args: Args, expert_cache: dict,
-                  record=None):
+                  record=None, record_norms=None):
     """One backbone block over one sequence. `record(indices, weights, scores)` receives the router output.
-    `expert_cache` maps expert id -> (w1,w2,w3) for experts already dequantized in this layer."""
+    `expert_cache` maps expert id -> (w1,w2,w3) for experts already dequantized in this layer.
+
+    `record_norms(out_norms)` is optional and receives, after the routed loop, a [T, topk] fp32
+    tensor aligned with `indices`: the L2 norm of each pick's expert output BEFORE its gate weight
+    is applied. It is what REAP (Lasby et al., arXiv 2510.13999) multiplies by the gate weight to
+    score an expert by the magnitude it contributes rather than by how often it is picked. A second
+    unweighted forward would double the cost of the trace, so the norm is taken off the weighted
+    contribution the loop already computes and divided by the weight -- see the loop.
+    """
     x = st.h
     residual = x
     attn_pre, attn_post, attn_comb = hc_mixes(x, w.hc_attn_fn, w.hc_attn_scale, w.hc_attn_base, args)
@@ -752,12 +760,32 @@ def block_forward(st: SeqState, w: LayerWeights, experts: ExpertLoader, args: Ar
     if record is not None:
         record(indices, weights, scores)
     out = torch.zeros_like(y, dtype=torch.float32)
+    # [T, topk], same layout as `indices`/`weights`; None when nobody asked, so the default path
+    # allocates nothing and runs the same arithmetic it always did.
+    out_norms = None if record_norms is None else torch.zeros_like(weights, dtype=torch.float32)
     for e in torch.unique(indices).tolist():
         if e not in expert_cache:
             expert_cache[e] = experts(e)
         w1, w2, w3 = expert_cache[e]
         idx, top = torch.where(indices == e)
-        out[idx] += expert_ffn(y[idx], w1, w2, w3, args.swiglu_limit, weights[idx, top, None]).float()
+        contrib = expert_ffn(y[idx], w1, w2, w3, args.swiglu_limit, weights[idx, top, None]).float()
+        out[idx] += contrib
+        if out_norms is not None:
+            # REAP's saliency wants ||expert_e(x_t)||, the UNWEIGHTED output, and `expert_ffn`
+            # folds the gate weight in before w2. w2 is linear and the weight is a positive
+            # scalar per pick, so ||g * expert(x)|| = g * ||expert(x)||: dividing the norm of the
+            # contribution the loop already has by g recovers the unweighted norm, with no second
+            # forward and without touching a single operation that feeds `out`. (Not bit-exact
+            # against an unweighted forward -- expert_ffn rounds g*h to the activation dtype before
+            # w2, so this is the norm of what was ACTUALLY added, divided by g. That is the
+            # quantity a keep-set wants, and running a second unweighted forward to get the other
+            # one would double the cost of the trace.)
+            # (Cheaper still: g * ||expert(x)|| IS ||contrib||, so expert_stats multiplying the
+            # two back together is a round trip -- kept apart because the two factors are the
+            # frequency-vs-magnitude decomposition, and a trace should record both.)
+            out_norms[idx, top] = contrib.norm(dim=-1) / weights[idx, top].clamp_min(1e-20)
+    if record_norms is not None:
+        record_norms(out_norms)
     out += expert_ffn(y, w.sh_w1, w.sh_w2, w.sh_w3, args.swiglu_limit).float()
     y = out.to(y.dtype)
 

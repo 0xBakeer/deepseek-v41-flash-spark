@@ -4,6 +4,8 @@ expert_stats.py -- turn the per-layer router traces from expert_trace.py into th
 that decide the expert strategy (Phase 1):
 
   * per-layer expert usage histogram (share of routed slots per expert)
+  * per-layer expert SALIENCY histogram: how much magnitude each expert contributed, not how
+    often it was picked (`saliency_<topic>` next to `counts_<topic>`; see `saliency_hist`)
   * per-layer and global cumulative coverage curves: fraction of routed slots covered by
     the top-N% (or top-K) experts; global = best allocation across layers, i.e. experts
     ranked by frequency over all layers
@@ -37,9 +39,36 @@ def load(trace_dir: str):
                     key=lambda p: int(re.search(r"layer(\d+)", p).group(1))):
         L = int(re.search(r"layer(\d+)", p).group(1))
         z = np.load(p)
-        layers[L] = {"idx": z["indices"].astype(np.int64), "w": z["weights"].astype(np.float32), "cat": z["category"]}
+        d = {"idx": z["indices"].astype(np.int64), "w": z["weights"].astype(np.float32), "cat": z["category"]}
+        # `out_norms` arrived with the saliency tracer (2026-09-13). A trace taken before it has
+        # every other array and must still process: the layer simply gets no saliency histogram.
+        if "out_norms" in z.files and z["out_norms"].shape == d["idx"].shape:
+            d["norm"] = z["out_norms"].astype(np.float32)
+        layers[L] = d
     meta = json.load(open(os.path.join(trace_dir, "meta.json")))
     return layers, meta
+
+
+def saliency_hist(idx: np.ndarray, w: np.ndarray, norm: np.ndarray) -> np.ndarray:
+    """REAP's saliency (Lasby et al., Cerebras, ICLR 2026, arXiv 2510.13999) as a 384-wide
+    histogram: for expert e, the total of `gate_weight(t, e) * ||expert_e(x_t)||` over the tokens
+    routed to it -- the magnitude it actually contributed to the residual stream.
+
+    SUM, where REAP's definition is a MEAN over the tokens routed to the expert. The engine
+    normalises every histogram by its own per-layer total and then takes the top N, so a mean and
+    a sum differ by exactly the count factor: the mean asks "how much does this expert contribute
+    WHEN it fires", the sum asks "how much of this layer's output does it account for". The second
+    is the question a keep-set asks, and it is the one that composes with `counts` -- sum is
+    frequency x magnitude, so the two histograms are the same measurement with and without the
+    magnitude factor, and `DSV41_PRUNE_SOURCE` switches between them without changing the rules
+    that rank them. An expert fired once at enormous magnitude is a mean-ranking's top expert and
+    is worth almost nothing to a cache policy.
+
+    Why this matters: REAP benchmarked Kimi-K2 -- 384 routed experts, one shared, auxiliary-
+    loss-free routing, the same shape as this model -- and found frequency-based pruning collapses
+    (LiveCodeBench 0.434 -> 0.082 at 75 % kept, 0.000 at 50 %) where saliency holds (0.440/0.429).
+    """
+    return np.bincount(idx.reshape(-1), weights=(w * norm).reshape(-1), minlength=N_EXP)
 
 
 def coverage_curve(counts: np.ndarray):
@@ -97,6 +126,12 @@ def main():
 
     per_layer = {}
     glob_counts = {}
+    no_norms = [L for L in Ls if "norm" not in layers[L]]
+    if no_norms:
+        print(f"note: {len(no_norms)} of {len(Ls)} layers carry no `out_norms` (layers "
+              f"{no_norms[0]}-{no_norms[-1]}): they were traced before tools/expert_trace.py "
+              f"recorded expert-output norms, so they get no saliency_* histogram and "
+              f"DSV41_PRUNE_SOURCE=saliency will refuse this file. Re-trace to use it.")
     for L in Ls:
         idx = layers[L]["idx"]
         counts = np.bincount(idx.reshape(-1), minlength=N_EXP)
@@ -109,9 +144,17 @@ def main():
         # block uniqueness (union over 6 consecutive tokens)
         bl = [len(np.unique(idx[t:t + 6])) for t in range(0, n_tok - 5, 6)]
         per_layer[L]["block6_unique_mean"] = float(np.mean(bl))
+        nrm = layers[L].get("norm")
+        if nrm is not None:
+            # The mixed histogram, next to `counts`: what the whole corpus's routing contributed.
+            per_layer[L]["saliency"] = saliency_hist(idx, layers[L]["w"], nrm)
         for c in cats:
             m = layers[L]["cat"] == c
             cat_counts = np.bincount(idx[m].reshape(-1), minlength=N_EXP)
+            if nrm is not None:
+                # One per topic, next to counts_<topic> and read the same way: the engine's
+                # DSV41_PRUNE_SOURCE picks which of the two families ranks the keep-set.
+                per_layer[L][f"saliency_{c}"] = saliency_hist(idx[m], layers[L]["w"][m], nrm[m])
             # the histogram itself, not just its coverage curve: the engine's pruned mode ranks
             # experts per category, and reading it from here means a checkout does not need the
             # raw per-layer trace arrays (tens of MB) to reproduce a keep-set.
@@ -132,6 +175,12 @@ def main():
     # category overlap: experts in the top-K set of coding vs general
     lines = []
     lines.append(f"# Expert coverage -- {meta['n_tokens']} tokens, {meta['n_seqs']} sequences, layers {Ls[0]}-{Ls[-1]}\n")
+    sal_note = ("and `saliency_<topic>` (gate weight x expert-output norm, REAP arXiv 2510.13999); "
+                "`DSV41_PRUNE_SOURCE` picks which the engine ranks a keep-set by"
+                if not no_norms else
+                "only -- this trace carries no `out_norms`, so there is no saliency histogram and "
+                "`DSV41_PRUNE_SOURCE=saliency` will refuse this file")
+    lines.append(f"Histograms per layer: `counts_<topic>` (routing frequency) {sal_note}.\n")
     lines.append("## Per layer\n")
     lines.append("| layer | experts used | top-10% covers | top-25% covers | top-50% covers | entropy (bits, max 8.58) | unique experts / 6-token block (max 36) |")
     lines.append("|---|---|---|---|---|---|---|")
