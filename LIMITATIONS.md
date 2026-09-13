@@ -319,3 +319,12 @@ a finished answer flagged for a redraft — none corrupts a token, none fails to
 structurally wrong — so the profile improved in kind and lost in count, and the count is what a user
 reads. Whether ten topics is simply one too many for this box at this keep fraction is untested: no
 narrower variant of it has been gated.
+
+## 2026-09-13 22:50 — keep 0.40 does not survive a filled context
+
+A 195k-token prompt against `PRUNE_KEEP=0.40` / `ARENA_GB=89.2` at `MAX_SEQ=262144` drove host
+MemAvailable to 0.8 GB and the watchdog ended the engine 582 s into the prefill. Every gate prompt
+before it had been under 300 tokens. The budget model's verdict of "over" for that configuration
+was correct and the fork's 1M-context claim for the same expert count does not transfer to this
+engine's prefill. Measured points: 0.36 / 81 GB serves a filled 256k; 0.40 / 89.2 GB serves prompts
+under roughly 80k tokens by the reserve arithmetic, unmeasured between.

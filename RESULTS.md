@@ -911,3 +911,12 @@ cannot tell a model that drafted a function signature four ways before choosing 
 that has stopped making progress. Both are worth knowing about and only one is a defect. Until the
 gate can separate them, these runs are counted as failures, which is the conservative direction but
 makes the 39 a floor rather than a measurement.
+
+### 2026-09-13 22:50 — addendum to §5: the long-prefill test landed, negative
+
+Keep 0.40 at 256k is a short-prompt result only. A 195k-token prefill (4,000 synthetic sections,
+194,797 tokens by the tokenizer) took MemAvailable to 0.8 GB and the watchdog killed the engine
+after 582 s. The seven-profile table above stands; the configuration it was measured on does not
+hold a filled context. `env.example` now ships `DSV41_PRUNE_SOURCE=saliency` and
+`DSV41_PRUNE_RANK=maxmin` — proven at 0.36 as well (Frontend: ten of ten prompts finished, no
+corruption) — and leaves the keep fraction to the budget model, which was right.

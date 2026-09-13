@@ -162,15 +162,17 @@ every number on it, and how to add topics of your own.
 
 **Added 2026-09-13 — the recipe the profiles were last measured on.** How a keep-set is *ranked*
 turned out to matter more than which topics are in it. Ranking by how much each expert contributes
-instead of how often the router picks it, and spending the largest budget this box will hold, takes
-seven narrow profiles from 34 to 39 of 61 prompts on the generation harness, removes the rare-token
-corruption entirely and cuts the think blocks that never close. It needs three settings —
-`DSV41_PRUNE_SOURCE=saliency`, `DSV41_PRUNE_RANK=maxmin` and `PRUNE_KEEP=0.40` with
-`ARENA_GB=89.2` (154 experts a layer, an 89.0 GB arena) — and `MAX_SEQ=262144` served all seven
-profiles, for short prompts only. [`RESULTS.md`](RESULTS.md) §5 has every run, both controls and
-what was refuted. **[`env.example`](env.example) still ships the previous defaults**
-(`PRUNE_KEEP=0.39`, `ARENA_GB=87`, `MAX_SEQ=32768`, no rank and no source): the long-prefill memory
-test that would justify moving them has not landed.
+instead of how often the router picks it — `DSV41_PRUNE_SOURCE=saliency` with
+`DSV41_PRUNE_RANK=maxmin` — removes the rare-token corruption entirely, cuts the think blocks that
+never close, and with the largest budget that fits takes seven narrow profiles from 34 to 39 of 61
+prompts on the generation harness. [`RESULTS.md`](RESULTS.md) §5 has every run, both controls and
+what was refuted. **How large a budget fits depends on the prompts you send.** `PRUNE_KEEP=0.40`
+with `ARENA_GB=89.2` (154 experts a layer) served every gate prompt at `MAX_SEQ=262144` and was
+then killed by the memory watchdog 582 s into a 195k-token prefill (MemAvailable 0.8 GB), exactly
+where `./tune.sh` had said it would not fit. For a context you will actually fill, the measured
+point is `PRUNE_KEEP=0.36` with `ARENA_GB=81` at 256k; 0.40 is for prompts under roughly 80k
+tokens. `env.example` now ships the rank and the source; the keep fraction and arena stay the
+screen's call.
 
 ## Two ways to run it
 
