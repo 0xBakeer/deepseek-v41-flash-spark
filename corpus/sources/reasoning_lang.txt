@@ -1,0 +1,881 @@
+=== PROMPT
+J'ai un week-end de libre en octobre : Lyon ou Strasbourg, en partant de Paris ?
+=== THINK
+Le premier critère qui vient à l'esprit est le temps de trajet : deux heures de TGV pour Lyon, un peu moins pour Strasbourg. Match nul, ce n'est pas là que ça se joue.
+
+Je penchais pour Lyon à cause de la table. Mais un week-end, c'est deux jours pleins au maximum.
+
+Non, plutôt raisonner en échelle de ville. Strasbourg se parcourt à pied : Petite France, cathédrale, quartier allemand tiennent dans un kilomètre. À Lyon, il faut jongler entre la Presqu'île, le Vieux Lyon et Fourvière. Sur deux jours, la compacité vaut plus que la gastronomie.
+
+Un seul piège : les semaines de session du Parlement européen, où les hôtels strasbourgeois doublent de prix. Cela se vérifie en une minute.
+
+C'est décidé : ce sera Strasbourg.
+=== ANSWER
+Strasbourg, pour un week-end de deux jours.
+
+Le trajet ne départage rien : environ 1 h 50 de TGV dans les deux cas. Ce qui départage, c'est l'échelle. Strasbourg se visite intégralement à pied, alors que Lyon impose des déplacements entre la Presqu'île, le Vieux Lyon et Fourvière — facilement une demi-journée perdue sur un séjour court.
+
+Vérifiez seulement que votre week-end ne tombe pas sur une session du Parlement européen : les prix des hôtels y doublent. Gardez Lyon pour trois ou quatre jours, quand la table a le temps de s'exprimer.
+=== END
+
+=== PROMPT
+Wochenendtrip von Hamburg nach Dresden: Bahn oder Auto?
+=== THINK
+Reine Fahrzeit: mit der Bahn etwa viereinhalb Stunden, mit dem Auto je nach Baustellen fünf bis sechs. Die Bahn liegt vorn, aber nicht deutlich genug, um allein danach zu entscheiden.
+
+Kosten: Sparpreis hin und zurück rund 90 Euro pro Person, das Auto etwa 70 Euro Sprit plus Parkhaus in der Altstadt, zwölf Euro am Tag. Zu zweit gewinnt das Auto knapp, allein die Bahn.
+
+Ich wollte es beim Preis belassen. Nein, besser am eigentlichen Zweck messen: In Dresden liegt alles zwischen Frauenkirche, Zwinger und Neustadt fußläufig beieinander. Ein Auto steht zwei Tage im Parkhaus und kostet nur.
+
+Dazu kommt der Freitagabend. A2 und A14 sind zur Rushhour zuverlässig dicht, und aus fünf Stunden werden dann sieben.
+
+Die Rechnung ist eindeutig, ich lege mich fest.
+=== ANSWER
+Nimm die Bahn.
+
+Sie ist mit rund viereinhalb Stunden schon ohne Stau schneller, und am Freitagabend werden aus fünf Autostunden auf der A2 und der A14 leicht sieben. Der Preisvorteil des Autos zu zweit — etwa 70 Euro Sprit gegen zweimal 90 Euro Sparpreis — schmilzt durch zwölf Euro Parkgebühr pro Tag in der Altstadt.
+
+Entscheidend ist aber der Zuschnitt der Stadt: Frauenkirche, Zwinger, Brühlsche Terrasse und die Neustadt erreichst du zu Fuß. Anders sähe es nur aus, wenn ihr zu viert fahrt und einen Tag in der Sächsischen Schweiz einplant.
+=== END
+
+=== PROMPT
+国庆三天假，从上海出发，去杭州还是苏州？
+=== THINK
+先看交通：去苏州高铁半小时，去杭州一小时，差别不大，不是决定因素。
+
+本来想选杭州，西湖名气大。不对，应该反过来想：假期只有三天，越是名气大的地方越挤，西湖边一天有一半时间耗在排队和公交上。
+
+苏州的园林分散在城区各处，拙政园、留园、网师园可以错峰走，加上平江路和山塘街，三天刚好排满。住宿也便宜，观前街一带三百多一晚。
+
+唯一顾虑是夜里没什么可逛，但平江路的评弹正好补上这一段。
+
+三天的行程已经排清楚，可以给出建议了。
+=== ANSWER
+建议去苏州。
+
+理由有三：高铁半小时直达，比杭州省出一小时；国庆期间西湖客流高度集中，而苏州的园林分散在城区各处，可以错峰游览；住宿成本更低，观前街一带三百元左右。
+
+行程可以这样排：第一天拙政园加平江路，第二天留园和山塘街，第三天网师园，晚上听一场评弹。若你更看重湖山风景而非园林，再考虑杭州，但一定要避开西湖的核心时段。
+=== END
+
+=== PROMPT
+十一月に東京から二泊三日で、京都と金沢のどちらに行くか迷っています。
+=== THINK
+まず移動時間。東京から京都は新幹線で二時間十五分、金沢は二時間半。ほぼ互角なので、ここでは決まらない。
+
+紅葉なら京都だと思っていた。いや、むしろ逆で、十一月下旬の京都は混雑が激しく、嵐山や東福寺は入場待ちだけで一時間かかる。二泊三日では移動と行列で半分が消える。
+
+金沢なら兼六園、ひがし茶屋街、近江町市場が徒歩と短いバスで回れる。紅葉も十一月中旬が見頃で、雪吊りの作業も始まっている。
+
+宿も金沢のほうが取りやすく、価格が落ち着いている。
+
+判断の材料はそろったので、ここで結論を述べる。
+=== ANSWER
+二泊三日なら金沢をおすすめします。
+
+移動時間はほぼ同じ（新幹線で京都は二時間十五分、金沢は二時間半）なので差はつきません。分かれ目は密度です。十一月下旬の京都は紅葉の最盛期で、嵐山や東福寺は待ち時間だけで一時間かかることもあり、短い日程では移動と行列に半分を取られます。
+
+金沢は兼六園・ひがし茶屋街・近江町市場が徒歩と短いバスで回れ、雪吊りも見頃です。京都は三泊以上、できれば平日に休みが取れるときのために残しておくとよいでしょう。
+=== END
+
+=== PROMPT
+Dans un compte rendu, j'hésite entre « la cohérence du discours » et « la consistance du discours ».
+=== THINK
+D'abord l'orthographe, parce que c'est là que la faute passe : cohérence prend un h après le c, du latin cohaerentia. La forme sans h n'existe pas. Une fois ce point réglé, la question devient une vraie question de sens.
+
+Cohérence, c'est l'absence de contradiction interne : les parties du discours tiennent ensemble. Consistance, en français courant, renvoie à la texture, à l'épaisseur — la consistance d'une sauce.
+
+Le sens logique de « consistant » est un calque de l'anglais consistent. Dans un compte rendu professionnel, il passera pour un anglicisme.
+
+Une exception, tout de même : en logique formelle, la consistance d'un système est un terme technique établi. Ce n'est pas le registre de votre texte.
+
+Le choix est net, je tranche.
+=== ANSWER
+Écrivez « la cohérence du discours », avec le h : le mot vient du latin cohaerentia.
+
+Cohérence désigne l'absence de contradiction entre les parties, ce qui est bien votre idée. Consistance, en français courant, désigne la texture d'une matière ; son emploi au sens logique est un calque de l'anglais consistent et sera lu comme un anglicisme dans un compte rendu.
+
+Seule exception légitime : en logique formelle, « la consistance d'un système » est un terme technique, sans rapport avec votre usage.
+=== END
+
+=== PROMPT
+Heißt es "trotz dem Regen sind wir gelaufen" oder "trotzdem sind wir gelaufen"?
+=== THINK
+Das sind zwei verschiedene Wörter, nicht zwei Schreibweisen desselben Wortes. Genau daran scheitert die Frage sonst.
+
+"Trotz" ist eine Präposition und braucht ein Bezugswort: trotz des Regens. Standardsprachlich folgt der Genitiv; der Dativ "trotz dem Regen" ist umgangssprachlich und in einem geschriebenen Text fehl am Platz.
+
+"Trotzdem" ist ein Adverb, steht allein und greift den vorigen Satz auf: "Es regnete. Trotzdem sind wir gelaufen."
+
+Ich wollte zuerst schreiben, eine der beiden Formen sei schlicht falsch. Nein, besser so: beide sind richtig, brauchen aber verschiedene Umgebungen, und die Wahl hängt allein davon ab, ob ein Substantiv folgt.
+
+Der Unterschied ist sauber benannt, jetzt die Antwort.
+=== ANSWER
+Beides ist korrekt, aber nicht austauschbar — es sind zwei verschiedene Wörter.
+
+- "trotz" ist eine Präposition und verlangt ein Bezugswort: *trotz des Regens* sind wir gelaufen. Im Standarddeutsch mit Genitiv; "trotz dem Regen" ist umgangssprachlich.
+- "trotzdem" ist ein Adverb ohne Bezugswort und knüpft an den vorigen Satz an: "Es regnete in Strömen. *Trotzdem* sind wir gelaufen."
+
+Merkregel: Folgt ein Substantiv, schreibst du *trotz*. Steht das Wort allein am Satzanfang, schreibst du *trotzdem*.
+=== END
+
+=== PROMPT
+写年终总结时，「这项改动对团队的影响很大」里的「影响」换成「冲击」合适吗？
+=== THINK
+先分清词义。「影响」是中性词，可褒可贬；「冲击」偏负面，带有突然、剧烈、被动承受的意味。
+
+年终总结是正式文书，如果这项改动是成绩，用「冲击」会让上级以为团队受了损失。
+
+不对，问题其实不在选哪个词。「影响很大」本身就模糊，读者只能猜是好是坏，换一个词救不了这句话。
+
+真正该改的是句式：把评价写成可以核对的事实，比如交付周期从两周缩短到五天，这样连形容词都不需要。
+
+思路已经理顺，下面把结论和更好的写法一起给出。
+=== ANSWER
+不建议换成「冲击」。
+
+「影响」中性，「冲击」偏负面，暗示突然而被动地承受损害。若这项改动是正面成果，用「冲击」会被误读。
+
+不过更值得改的是整个句式。「影响很大」没有说明是什么影响，读者只能猜。写成「这项改动使交付周期从两周缩短到五天」，既具体又不必用形容词。年终总结里，凡是能用数字的地方都不要用「很大」。
+=== END
+
+=== PROMPT
+取引先に見積書を送るメールで、「ご確認ください」と「ご査収ください」はどちらが適切ですか。
+=== THINK
+まず語の中身を分ける。「査収」は「よく調べて受け取る」で、受領を前提とした言い方。「確認」は内容を見てもらうだけで、受領までは含意しない。
+
+添付書類にはつい「ご査収」と書いてしまう。いや、むしろそこが落とし穴で、見積書はまだ合意前の書類だ。受領を前提にすると、受け入れを促しているように読まれる。
+
+請求書や納品書のように内容が確定した書類なら「ご査収」で問題ない。見積書は「ご確認のうえ、ご検討ください」が自然。
+
+「ご査収」は口頭では使わない点も添えておきたい。
+
+区別がはっきりしたので、回答に移る。
+=== ANSWER
+見積書には「ご確認ください」、より丁寧にするなら「ご確認のうえ、ご検討いただけますと幸いです」をおすすめします。
+
+「ご査収ください」は「よく調べたうえで受け取ってください」という意味で、受領が前提の表現です。請求書・納品書・領収書のように内容が確定した書類には適しますが、合意前の見積書に使うと受け入れを促しているように読まれかねません。
+
+なお「ご査収」は書面やメールに限られ、口頭では使わない表現です。
+=== END
+
+=== PROMPT
+On était sept au restaurant, l'addition fait 268 euros, le patron enlève 10 % et on laisse 15 euros de pourboire. Combien chacun ?
+=== THINK
+D'abord la remise : 10 % de 268, cela fait 26,80. Reste donc 241,20.
+
+Ensuite le pourboire. Attention à l'ordre : la remise porte sur l'addition, pas sur le pourboire, qui s'ajoute après. 241,20 + 15 = 256,20.
+
+Division par sept : 7 × 36 = 252, il reste 4,20, soit 0,60 par personne. Chacun doit 36,60. Vérification : 36,60 × 7 = 256,20, cela tombe juste, pas de centime orphelin.
+
+J'allais proposer d'arrondir à 37 euros par tête, comme on le fait souvent. Non, plutôt garder le compte exact : l'arrondi ferait 259 euros au total, presque 3 euros de trop dont personne ne saurait où ils passent.
+
+Le calcul tient au centime près, je donne le résultat.
+=== ANSWER
+36,60 euros par personne.
+
+Le détail :
+
+- Addition : 268,00
+- Remise de 10 % : −26,80, soit 241,20
+- Pourboire, ajouté après la remise : +15,00, soit 256,20
+- Divisé par 7 : 36,60 exactement (36,60 × 7 = 256,20)
+
+Le montant tombe juste, inutile d'arrondir : à 37 euros par tête, vous verseriez 259 euros, soit 2,80 euros de plus que le total réel.
+=== END
+
+=== PROMPT
+Schreib eine kurze Mail, mit der ich einen Kundentermin von Dienstag auf Donnerstag verschiebe.
+=== THINK
+Drei Dinge müssen hinein: die Verschiebung, ein Grund, der nicht nach Ausrede klingt, und ein konkreter Ersatztermin. Wer nur "nächste Woche?" schreibt, schiebt die Arbeit zum Kunden.
+
+Als Grund wollte ich "aufgrund eines unvorhergesehenen Ereignisses" schreiben. Nein, besser konkret und knapp: eine vorgezogene Produktionsbesprechung. Das ist nachprüfbar und erspart Spekulationen.
+
+Die Entschuldigung gehört an den Anfang, nicht ans Ende. Steht sie hinten, wirkt sie wie eine Höflichkeitsfloskel, die man noch angehängt hat.
+
+Und zwei Uhrzeiten für Donnerstag anbieten statt einer, damit der Kunde mit einem Wort antworten kann.
+
+Alle Bausteine liegen bereit, ich formuliere die Mail.
+=== ANSWER
+Betreff: Verschiebung unseres Termins am Dienstag
+
+Sehr geehrte Frau Rothmann,
+
+es tut mir leid, unseren Termin am Dienstag verschieben zu müssen: Eine Produktionsbesprechung wurde auf diesen Zeitraum vorgezogen, und ich möchte mir lieber in Ruhe Zeit für Sie nehmen als das Gespräch abzukürzen.
+
+Ginge es bei Ihnen am Donnerstag um 10 oder um 15 Uhr? Ich richte mich ganz nach Ihnen und schicke Ihnen die Agenda, sobald der Termin steht.
+
+Vielen Dank für Ihr Verständnis
+Julian Brand
+=== END
+
+=== PROMPT
+一件外套原价 680 元，先打八折，再用 50 元优惠券，最后要付多少？
+=== THINK
+八折就是原价的百分之八十：680 × 0.8 = 544。
+
+再减优惠券：544 − 50 = 494。
+
+等一下，顺序要确认。如果先用券再打折，就是 (680 − 50) × 0.8 = 504，比 494 贵十元。题目说的是先打折再用券，所以 494 才对。
+
+再验算一遍：68 × 8 = 544，小数点位置没错；544 − 50 = 494。
+
+两种顺序都算过了，可以给出答案。
+=== ANSWER
+最后需付 494 元。
+
+计算过程：
+
+- 八折：680 × 0.8 = 544 元
+- 再减优惠券：544 − 50 = 494 元
+
+顺序很关键。若反过来先用券再打折，结果是 (680 − 50) × 0.8 = 504 元，要多付十元。所以这类活动中，先折扣、后用券对买家更有利，下单前值得确认商家的扣减顺序。
+=== END
+
+=== PROMPT
+食洗機は本体八万円、一回あたりの水道光熱費が二十円、手洗いなら一回四十円で十五分かかります。買う価値はありますか。
+=== THINK
+差額は一回あたり二十円。一日二回使うとして年間七百三十回、差額は約一万四千六百円。八万円を回収するのに五年半かかる計算になる。
+
+金額だけ見ると微妙だ。いや、むしろ時間で測るべきだろう。一回十五分、年間七百三十回なら約百八十時間。五年なら九百時間になる。
+
+九百時間を八万円で買うと考えれば、一時間あたり九十円弱。これは明らかに安い。
+
+設置費用と洗剤代を足しても、この結論は動かない。
+
+評価軸が定まったので、答えをまとめる。
+=== ANSWER
+買う価値はあります。ただし、光熱費の節約ではなく時間で元を取る買い物です。
+
+金額だけで見ると、差額は一回二十円、年間七百三十回で約一万四千六百円。本体八万円の回収に五年半かかり、決め手になりません。
+
+一方、手洗い十五分を年間七百三十回やめられるので、五年でおよそ九百時間が浮きます。八万円を九百時間で割ると一時間あたり九十円弱。設置費用や洗剤代を足しても割安です。使用頻度が一日一回を下回るなら、この計算は成り立たない点にご注意ください。
+=== END
+
+=== PROMPT
+Explique-moi simplement quand utiliser `git rebase` plutôt que `git merge`.
+=== THINK
+Le réflexe serait de partir du graphe des commits. Mauvaise idée : la question demande une explication simple, donc je pars de ce que l'utilisateur voit, l'historique.
+
+`merge` conserve l'histoire réelle et ajoute un commit de fusion. `rebase` rejoue les commits au-dessus de la branche cible : l'historique devient linéaire, mais les identifiants changent.
+
+J'allais en faire une affaire de goût. Non, le vrai critère est ailleurs : la branche est-elle partagée ? Si un collègue a déjà récupéré ces commits, les réécrire casse son dépôt.
+
+D'où la règle : rebase tant que c'est local, merge dès que c'est publié.
+
+La règle tient en une phrase, je la formule.
+=== ANSWER
+La règle tient en une phrase : rebasez ce qui n'est qu'à vous, fusionnez ce qui est déjà partagé.
+
+- `git rebase` rejoue vos commits au-dessus de la branche cible. L'historique reste linéaire, mais les commits changent d'identifiant — donc jamais sur une branche que quelqu'un d'autre a déjà récupérée.
+- `git merge` garde l'histoire réelle et ajoute un commit de fusion. Plus verbeux, toujours sûr.
+
+En pratique : `git pull --rebase` pour vous mettre à jour chaque matin, `git merge` pour intégrer une branche terminée dans `main`.
+=== END
+
+=== PROMPT
+Ein Angebot lautet 2.400 Euro netto, ein zweites 2.750 Euro brutto. Welches ist günstiger?
+=== THINK
+Die beiden Zahlen sind nicht vergleichbar, solange sie nicht auf derselben Grundlage stehen. Also erst alles auf brutto bringen.
+
+2.400 Euro netto mal 1,19 ergibt 2.856 Euro brutto. Zwischenrechnung: 2.400 mal 0,19 sind 456, plus 2.400 macht 2.856. Das zweite Angebot liegt mit 2.750 Euro also 106 Euro darunter.
+
+Halt, das gilt nur für Privatkunden. Ein vorsteuerabzugsberechtigtes Unternehmen zahlt die Umsatzsteuer nur durchlaufend, dann zählt netto: 2.400 gegen 2.750 geteilt durch 1,19, also 2.310,92 Euro.
+
+Die Rangfolge bleibt damit dieselbe, nur der Abstand schrumpft. Genau das gehört in die Antwort.
+
+Beide Fälle sind durchgerechnet, ich schreibe das Ergebnis auf.
+=== ANSWER
+Das hängt davon ab, ob Sie vorsteuerabzugsberechtigt sind.
+
+**Als Privatperson** zählt der Bruttopreis: 2.400 Euro netto entsprechen 2.856 Euro brutto (2.400 × 1,19). Das zweite Angebot ist mit 2.750 Euro um 106 Euro günstiger.
+
+**Als Unternehmen mit Vorsteuerabzug** zählt netto: 2.750 Euro brutto sind 2.310,92 Euro netto (2.750 ÷ 1,19). Dann ist das zweite Angebot um 89,08 Euro günstiger — dieselbe Richtung, aber ein anderer Betrag.
+
+In beiden Fällen gewinnt also das zweite Angebot; achten Sie nur darauf, im Vergleich nie netto gegen brutto zu stellen.
+=== END
+
+=== PROMPT
+HTTP 里的 301 和 302 有什么区别，接口迁移该用哪个？
+=== THINK
+先分清语义。301 是永久重定向，302 是临时重定向。
+
+关键差别在缓存。浏览器会把 301 长期缓存下来，之后不再请求旧地址；302 每次都会先问旧地址。
+
+接口迁移看起来该用 301，永久嘛。不对，要先想清楚是否可逆：一旦客户端缓存了 301，想改回去就只能等缓存过期，而浏览器可能缓存到用户清理数据为止。
+
+所以迁移期先用 302，等新地址稳定运行一段时间、确认不会回滚，再换成 301。
+
+另外还要注意方法是否保留，POST 用 308 和 307 更稳妥。
+
+取舍已经清楚，下面按迁移的先后顺序给出建议。
+=== ANSWER
+迁移期先用 302，稳定后再改成 301。
+
+区别在缓存：301 是永久重定向，浏览器会长期缓存，之后不再请求旧地址；302 是临时重定向，每次仍会先问旧地址。301 的代价是几乎不可撤销，一旦客户端缓存，回滚只能等缓存过期。
+
+另外，301 和 302 在历史实现中可能把 POST 改写成 GET。若接口要保留请求方法，永久用 308、临时用 307。
+=== END
+
+=== PROMPT
+作業を中断して別のブランチに移りたいとき、`git stash` と一時的なコミットはどちらがいいですか。
+=== THINK
+まず違いを整理する。`git stash` は変更を退避して作業ツリーをきれいにする。一時コミットは履歴に残り、あとから `git reset` で整える前提になる。
+
+短い中断なら stash が手軽だと思った。いや、むしろ危ないのは stash だ。名前のないスタックに積まれるだけで、二つ三つ溜まると中身が分からなくなる。新規ファイルは `-u` を付けないと退避されない。
+
+一時コミットならメッセージを付けられ、`git log` に見え、ブランチに紐づくので取り違えも起きない。一日以上またぐ中断ならこちらが安全だ。
+
+使い分けの基準が決まったので、回答する。
+=== ANSWER
+数分から数十分の中断なら `git stash`、それより長い中断なら一時コミットをおすすめします。
+
+`git stash` は名前のないスタックに積まれるため、二つ三つ溜まると中身が分からなくなります。新規ファイルは `-u` を付けないと退避されません。
+
+一時コミットなら「WIP: 検索の絞り込み」のようにメッセージを残せ、`git log` で見え、ブランチに紐づくので取り違えが起きません。戻ったら `git reset --soft HEAD~1` で作業状態に復帰できます。
+=== END
+
+=== PROMPT
+Écris une relance courte pour un client qui n'a pas répondu à mon devis envoyé il y a deux semaines.
+=== THINK
+Le piège de la relance, c'est le reproche déguisé : « je n'ai pas eu de retour de votre part » met la faute sur le client et ferme la porte.
+
+Je pars donc de l'inverse : lui rendre service. Rappeler le devis en une ligne, proposer une information utile, laisser une sortie honorable — un « ce n'est pas le moment » est une réponse acceptable, et le dire augmente les chances d'en obtenir une.
+
+Longueur : cinq lignes. Une relance longue ressemble à une plaidoirie.
+
+J'hésitais à mentionner une date limite de validité. Non, plutôt la formuler comme une information factuelle : le devis expire le 30 octobre, voilà pourquoi j'écris maintenant. Cela donne un motif à la relance sans forcer la main.
+
+Le ton est trouvé, je rédige le message.
+=== ANSWER
+Objet : Devis du 28 septembre — toujours d'actualité ?
+
+Bonjour Monsieur Delaunay,
+
+Je reviens vers vous au sujet du devis envoyé le 28 septembre pour la réfection de l'éclairage de l'atelier. Il reste valable jusqu'au 30 octobre, d'où mon message aujourd'hui.
+
+Si un point mérite d'être précisé — le phasage des travaux ou le choix des luminaires —, je peux vous envoyer une variante chiffrée dans la journée. Et si le projet est reporté, dites-le-moi simplement : je reprendrai contact au printemps.
+
+Bien cordialement,
+Claire Vasseur
+=== END
+
+=== PROMPT
+Was ist der Unterschied zwischen `docker stop` und `docker kill`?
+=== THINK
+`docker stop` schickt SIGTERM, wartet standardmäßig zehn Sekunden und schickt danach SIGKILL. `docker kill` schickt sofort SIGKILL, ohne Frist.
+
+Das klingt nach einer Frage von Sekunden. Nein, es entscheidet darüber, ob die Anwendung sauber beenden darf: offene Transaktionen abschließen, Puffer schreiben, sich vom Load Balancer abmelden.
+
+Eine Falle gehört dazu: Läuft der Prozess nicht als PID 1, sondern unter einer Shell, verschluckt diese das SIGTERM. Dann wirkt `docker stop` wie `docker kill`, nur später.
+
+Und wenn die Frist nicht reicht, greift man nicht zu kill, sondern verlängert sie.
+
+Damit ist der Unterschied vollständig umrissen, ich schreibe die Antwort.
+=== ANSWER
+`docker stop` beendet den Container höflich, `docker kill` sofort.
+
+- `docker stop` sendet SIGTERM, wartet zehn Sekunden und erst dann SIGKILL. Die Anwendung kann Transaktionen abschließen, Puffer schreiben und sich abmelden.
+- `docker kill` sendet sofort SIGKILL. Der Prozess bekommt nichts mit, laufende Schreibvorgänge brechen ab.
+
+Im Alltag also immer `docker stop`; reicht die Frist nicht, nimm `docker stop -t 30` statt kill.
+
+Häufige Falle: Startet der Entrypoint über eine Shell, verschluckt diese das Signal - `docker stop` wirkt dann wie kill mit zehn Sekunden Verzögerung. Beende ihn deshalb mit `exec`.
+=== END
+
+=== PROMPT
+帮我写一封给主管的请假邮件，下周三下午看牙医，两小时。
+=== THINK
+只请两小时，邮件越短越好，三点足够：时间、原因一句带过、工作怎么交接。
+
+本来想写「因个人原因」，太含糊，反而让人猜。牙医复诊是正当理由，直说更干脆。
+
+交接这一点最容易漏，却是主管唯一真正关心的：那半天有没有会、谁能顶上。
+
+结尾不必反复道歉，一句致谢就够，过度客气反而显得心虚。
+
+要点都齐了，现在按这个顺序把邮件写出来。
+=== ANSWER
+主题：请假申请（10 月 15 日下午两小时）
+
+王经理：
+
+您好。我下周三（10 月 15 日）下午两点有牙医复诊，需请假约两小时，预计四点前回到公司。
+
+当天下午的需求评审我已与李明确认，由他代为参加并整理纪要；其余工作不受影响，紧急事项可随时电话联系我。
+
+麻烦您审批，谢谢。
+
+张岚
+=== END
+
+=== PROMPT
+A、B、Cの三人のうち正直者は一人だけです。Aは「Bは嘘つきだ」、Bは「Cは嘘つきだ」、Cは「AもBも嘘つきだ」と言いました。正直者は誰ですか。
+=== THINK
+順に仮定していく。
+
+Aが正直者だとすると、Bは嘘つき。すると「Cは嘘つき」が嘘なので、Cは正直者になる。正直者が二人になり、矛盾する。
+
+Bが正直者だとすると、Cは嘘つき。Cの「AもBも嘘つき」が嘘なら、少なくとも一人は正直者で、それはB自身。矛盾しない。Aの「Bは嘘つき」も嘘になり、正直者はBだけ。
+
+Cが正直者だとすると、AもBも嘘つき。いや、Aが嘘つきならBは正直者になり、Cが唯一という前提と衝突する。
+
+三通りのうち整合するのは一つだけなので、結論を書く。
+=== ANSWER
+正直者はBです。
+
+- Aが正直者と仮定すると、Bは嘘つき、よってBの発言「Cは嘘つき」は偽、つまりCも正直者。二人になり矛盾。
+- Bが正直者と仮定すると、Cは嘘つき。Cの「AもBも嘘つき」は偽で、正直者はB自身。Aの発言も偽になり、条件と一致します。
+- Cが正直者と仮定すると、AもBも嘘つきのはずですが、Aが嘘つきならBが正直者となり、前提と衝突します。
+
+整合するのは二番目だけです。
+=== END
+
+=== PROMPT
+Résume en deux phrases : « La part du fret ferroviaire en France stagne autour de 9 %, contre 18 % en Allemagne. Les opérateurs invoquent le coût des sillons et la priorité donnée aux trains de voyageurs sur un réseau saturé ; l'État met en avant les 4 milliards d'euros investis dans les lignes capillaires depuis 2020. »
+=== THINK
+Deux phrases, donc deux idées seulement, alors que le texte en porte trois : le constat chiffré, l'explication des opérateurs, la réponse de l'État.
+
+Première phrase : le constat avec la comparaison allemande, puisque c'est le chiffre qui porte tout le reste. Deuxième phrase : le désaccord sur les causes, en un seul énoncé à deux volets.
+
+Attention à ne pas trancher. Le paragraphe ne dit pas qui a raison ; j'écris donc « les opérateurs attribuent » et « l'État met en avant », jamais « malgré les investissements ».
+
+J'allais supprimer les 4 milliards pour gagner de la place. Non, plutôt couper la date de 2020 : sans le montant, la réponse de l'État devient creuse.
+
+Le découpage est arrêté, je rédige le résumé.
+=== ANSWER
+Le fret ferroviaire français plafonne autour de 9 % du transport de marchandises, soit la moitié du niveau allemand. Les opérateurs attribuent ce retard au coût des sillons et à la priorité accordée aux trains de voyageurs sur un réseau saturé, tandis que l'État met en avant les 4 milliards d'euros investis dans les lignes capillaires.
+=== END
+
+=== PROMPT
+Fasse in zwei Sätzen zusammen: "Seit 2019 ist die Zahl der Lastenräder in deutschen Großstädten auf das Vierfache gestiegen. Händler führen das auf kommunale Kaufprämien zurück, Verkehrsforscher dagegen vor allem auf den Ausbau geschützter Radwege, der das Fahren mit schwerer Ladung im Mischverkehr erst zumutbar mache."
+=== THINK
+Zwei Sätze für drei Bausteine: die Zahl, die Erklärung der Händler, die Erklärung der Forscher.
+
+Also Satz eins für den Befund, Satz zwei für die beiden Deutungen nebeneinander.
+
+Ich wollte "wegen der Kaufprämien" schreiben. Nein, besser nicht: Der Text stellt zwei Erklärungen gegeneinander und entscheidet nicht. Eine Zusammenfassung, die eine davon übernimmt, verfälscht ihn.
+
+Das "Vierfache" muss bleiben, es ist der einzige harte Wert. Die Jahreszahl 2019 kann weg, wenn ich "seit 2019" durch "binnen weniger Jahre" ersetze - nein, das ist vager als nötig, die Jahreszahl kostet nur zwei Wörter.
+
+Die Struktur steht, ich schreibe die Zusammenfassung.
+=== ANSWER
+Seit 2019 hat sich die Zahl der Lastenräder in deutschen Großstädten vervierfacht. Händler erklären diesen Anstieg mit kommunalen Kaufprämien, Verkehrsforscher dagegen vor allem mit dem Ausbau geschützter Radwege, der das Fahren mit schwerer Ladung im Mischverkehr überhaupt erst zumutbar mache.
+=== END
+
+=== PROMPT
+用一句话总结：「过去五年，城市中心的便利店数量增长四成，传统菜市场减少三分之一。研究者认为这不是消费偏好突变，而是单身家庭增多与通勤时间延长共同作用的结果。」
+=== THINK
+只给一句话，就只能留一条因果骨架：现象加原因。
+
+现象里有两个数字。本想删掉一个以缩短句子，不对，这两个数字是对照关系，删掉任何一个，此消彼长的意思就看不出来了，必须都留。
+
+原因部分可以压缩成「家庭结构与通勤方式的变化」，但那样就丢了具体性，读者反而要再猜一遍。还是保留原词，改为删掉「研究者认为」这个提示语。
+
+否定部分「不是偏好突变」也值得留，它正是这段话的立论所在。
+
+取舍已经定下，现在把这句话完整地写出来。
+=== ANSWER
+过去五年城市中心便利店增加四成、传统菜市场减少三分之一，主因并非消费偏好突变，而是单身家庭增多与通勤时间延长的共同作用。
+=== END
+
+=== PROMPT
+次の文章を一文で要約してください。「在宅勤務の導入企業は三年で二倍になったが、完全在宅は一割にとどまる。多くの企業は週二日の出社を組み合わせる形に落ち着いており、通勤時間の削減よりも、会議を減らせる点を利点に挙げている。」
+=== THINK
+一文にまとめるので、残せるのは骨格だけ。要素は三つある。導入企業の増加、完全在宅の少なさ、そして利点の中身。
+
+最初は「二倍になった」を中心に据えようとした。いや、むしろ主役は「週二日出社に落ち着いた」のほうだ。増えたという話ではなく、どこに着地したかがこの文章の眼目になっている。
+
+数字は二倍と一割の両方を残したいが、一文では重い。導入の二倍は前提にすぎないので落とし、完全在宅一割は残す。
+
+利点が通勤ではなく会議である点は、意外性があるので必ず入れる。
+
+要素の取捨が決まったので、要約を書く。
+=== ANSWER
+在宅勤務は広がったものの完全在宅は一割にとどまり、多くの企業は週二日出社の併用型に落ち着いて、通勤時間の削減よりも会議を減らせる点を利点として挙げている。
+=== END
+
+=== PROMPT
+Ana, Bruno et Chloé boivent l'un du thé, l'un du café, l'un de l'eau. Ana ne boit pas de café, celui qui boit de l'eau est assis à côté de Bruno, et Chloé boit du thé. Qui boit quoi ?
+=== THINK
+Chloé boit du thé, c'est donné. Il ne reste que le café et l'eau pour Ana et Bruno.
+
+Ana ne boit pas de café, donc Ana boit l'eau et Bruno le café. Cela se résout en une ligne, ce qui m'inquiète : la deuxième contrainte n'aurait alors servi à rien.
+
+Reprenons-la. « Celui qui boit de l'eau est assis à côté de Bruno » : on n'est pas assis à côté de soi-même, donc cette phrase exclut que Bruno boive l'eau. Elle mène au même résultat par un autre chemin.
+
+Autrement dit, l'énoncé est redondant, pas contradictoire — et la redondance sert ici de vérification.
+
+Les deux chemins concordent, je peux répondre.
+=== ANSWER
+- Chloé : thé (donné par l'énoncé)
+- Ana : eau
+- Bruno : café
+
+Deux raisonnements indépendants donnent la même répartition. D'une part, Chloé prenant le thé et Ana ne prenant pas de café, il ne reste que l'eau pour Ana et le café pour Bruno. D'autre part, « celui qui boit de l'eau est assis à côté de Bruno » exclut Bruno lui-même, puisqu'on n'est pas assis à côté de soi : l'eau revient donc à Ana.
+
+La deuxième contrainte est redondante, ce qui permet de vérifier la solution plutôt que de la trouver.
+=== END
+
+=== PROMPT
+Wie messe ich mit einer 3-Liter- und einer 5-Liter-Kanne genau 4 Liter ab?
+=== THINK
+Zwei Kannen, kein Maßstrich. Alles, was ich tun kann: voll füllen, ganz ausleeren, von einer in die andere umfüllen, bis eine voll oder leer ist.
+
+Erster Versuch: die 3er füllen, in die 5er kippen, die 3er noch einmal füllen und nachgießen. In die 5er passen nur noch 2 Liter, also bleibt 1 Liter übrig. Das ist 1, nicht 4.
+
+Weiter: die 5er ausleeren, den einen Liter hineingeben, die 3er erneut füllen und dazugießen - 4 Liter in sechs Schritten.
+
+Geht es andersherum? Die 5er füllen, daraus die 3er randvoll machen, es bleiben 2 Liter. Die 3er leeren, die 2 Liter hineingeben, die 5er wieder füllen und die 3er auffüllen: dafür fehlt 1 Liter, also bleiben 4 Liter in der großen Kanne. Ebenfalls sechs Schritte, aber das Ergebnis steht an einer Stelle.
+
+Beide Wege führen zum Ziel, ich schreibe den kürzeren Ablauf auf.
+=== ANSWER
+Ein Weg in sechs Schritten, das Ergebnis steht am Ende in der 5-Liter-Kanne:
+
+1. 5er-Kanne ganz füllen (5 / 0).
+2. Daraus die 3er randvoll gießen (2 / 3).
+3. 3er-Kanne ausleeren (2 / 0).
+4. Die 2 Liter in die 3er umfüllen (0 / 2).
+5. 5er-Kanne wieder füllen (5 / 2).
+6. Aus der 5er die 3er auffüllen — es passt nur noch 1 Liter hinein, also bleiben **4 Liter** in der 5er-Kanne (4 / 3).
+
+Der umgekehrte Weg (immer die 3er füllen und in die 5er kippen) braucht ebenso sechs Schritte.
+=== END
+
+=== PROMPT
+三个盒子分别贴着「苹果」「橘子」「混合」，已知三个标签全都贴错了。只能从一个盒子里摸出一个水果，怎么判断全部？
+=== THINK
+关键在「全都贴错」这个条件，它比「可能贴错」强得多，等于给了每个盒子一条排除规则。
+
+从贴「混合」的盒子摸。它一定不是混合，所以里面只有一种水果，摸到什么就是什么。假设摸到苹果，它就是苹果盒。
+
+再看剩下两个。贴「苹果」的不能装苹果，苹果也已经确定，所以它装橘子或混合……
+
+不对，差点弄反。贴「橘子」的不能装橘子，那橘子只能进贴「苹果」的盒子；剩下的混合就归贴「橘子」的盒子。
+
+推理链已经闭合，可以把完整解法写出来了。
+=== ANSWER
+从贴着「混合」的盒子里摸一个，一次就够。
+
+因为标签全错，这个盒子必定不是混合，里面只有一种水果。假设摸到苹果：
+
+- 贴「混合」的 → 苹果
+- 贴「苹果」的 → 橘子（它不能装苹果，苹果又已确定；贴「橘子」的也不能装橘子，所以橘子只能落在这里）
+- 贴「橘子」的 → 混合
+
+若摸到的是橘子，把苹果和橘子对调即可。注意不能从贴「苹果」或「橘子」的盒子入手：它们可能是混合，摸出一个水果并不能确定内容。
+=== END
+
+=== PROMPT
+動画配信を月額千二百円の単体契約にするか、音楽込みで月額千八百円のセットにするか迷っています。
+=== THINK
+差額は月六百円、年間で七千二百円。音楽配信を単体で契約すると月千八十円なので、セットにすれば音楽が実質半額になる計算だ。
+
+数字だけならセットが得に見える。いや、その前提が怪しい。音楽を今どれだけ聴いているかを見ないと、半額でも使わなければ丸ごと損になる。
+
+判断材料は一つに絞れる。すでに別の音楽サービスに月千円払っているならセット、無料版で足りているなら単体のまま。
+
+年払い割引も気になるが、途中解約が効かなくなる点を見落としやすい。
+
+基準が一つに定まったので、答えを示す。
+=== ANSWER
+判断は一点だけで決まります。いま音楽配信に月額を払っているかどうかです。
+
+すでに別の音楽サービスに月千円前後を払っているなら、セットに乗り換えてください。差額は月六百円、年間七千二百円で、単体契約の月千八十円より安く済みます。
+
+無料版で足りているなら単体契約のままが正解です。使わない機能に年七千二百円を払うことになります。年払い割引は月換算では得ですが、途中解約の返金が効かなくなる点にご注意ください。
+=== END
+
+=== PROMPT
+Forfait A : 12 euros par mois, 50 Go, engagement de 24 mois. Forfait B : 19 euros, 200 Go, sans engagement. Lequel prendre si je consomme 30 Go ?
+=== THINK
+À 30 Go de consommation réelle, les 200 Go de B ne servent à rien. La question se réduit au prix et à l'engagement.
+
+Sur 24 mois : A coûte 288 euros, B en coûte 456. Soit 168 euros d'écart, pour une souplesse dont j'ignore si j'aurai besoin.
+
+Cette souplesse a tout de même une valeur : un déménagement, une offre concurrente à 7 euros dans six mois, et l'engagement coûte cher. La résiliation anticipée se paie, en général le quart des mensualités restantes.
+
+Non, plutôt chiffrer ce cas que le craindre : résilier A au 18e mois coûterait environ 18 euros, soit 234 euros en tout, contre 342 pour B sur la même durée. A gagne même dans le mauvais scénario.
+
+Le calcul penche nettement d'un côté, je conclus.
+=== ANSWER
+Prenez le forfait A.
+
+À 30 Go d'usage, les 200 Go de B ne vous apportent rien : vous payeriez 7 euros par mois pour de la data inutilisée, soit 168 euros sur deux ans (288 contre 456).
+
+L'argument de la souplesse ne résiste pas au chiffrage : en résiliant A au 18e mois, frais compris, vous auriez dépensé environ 234 euros, contre 342 pour B.
+
+Un seul cas changerait la réponse : une consommation qui approche régulièrement les 50 Go, où le hors forfait se facture cher.
+=== END
+
+=== PROMPT
+Mein sechs Jahre altes Fahrrad braucht neue Bremsen, Kette und Ritzel für 180 Euro. Ein neues Rad kostet 650 Euro. Reparieren oder ersetzen?
+=== THINK
+Erst die reine Rechnung: 180 Euro sind 28 Prozent des Neupreises. Als Faustregel gilt Reparatur bis etwa der Hälfte, also spricht die Zahl klar für Reparieren.
+
+Aber die Faustregel unterstellt, dass danach Ruhe ist. Bremsen, Kette und Ritzel sind Verschleißteile, nach der Reparatur also neu - ein gutes Zeichen, kein schlechtes.
+
+Ich wollte das Alter als Argument nehmen. Nein, besser auf den Rahmen schauen: Sechs Jahre sind für einen Alurahmen gar nichts. Entscheidend ist, ob Rahmen, Gabel und Laufräder in Ordnung sind - ein Riss an der Schweißnaht wäre der einzige echte K.-o.-Grund.
+
+Die Zahlen und der Zustand zeigen in dieselbe Richtung, ich entscheide.
+=== ANSWER
+Reparieren — sofern der Rahmen in Ordnung ist.
+
+Die 180 Euro sind 28 Prozent des Neupreises und liegen deutlich unter der üblichen Schwelle von etwa 50 Prozent. Betroffen sind zudem reine Verschleißteile: Bremsen, Kette und Ritzel werden ohnehin fällig, danach ist der Antrieb komplett neu.
+
+Prüfen Sie vorher nur drei Punkte: Risse an den Schweißnähten, Rost an den Ausfallenden, Schlag in den Laufrädern. Fällt einer davon negativ aus, lohnt der Neukauf. Andernfalls gewinnen Sie für 180 Euro mehrere Jahre.
+=== END
+
+=== PROMPT
+我在北京，同事在柏林，想约一个双方都在工作时间的会议，几点合适？
+=== THINK
+先确定时差。九月柏林还在夏令时，是 UTC+2，北京是 UTC+8，相差六小时。
+
+北京上午九点，柏林才凌晨三点，显然不行。反过来，柏林上午九点对应北京下午三点，可行。
+
+重叠区间大致是北京 15:00 到 19:00，对应柏林 09:00 到 13:00。
+
+不对，还要留出余量。北京 18:00 之后已经算加班，柏林 12:00 又是午餐时间。真正舒服的窗口只有北京 15:00 到 17:00。
+
+窗口已经收窄到位，可以给出建议。
+=== ANSWER
+建议约在北京时间 16:00，对应柏林时间 10:00。
+
+换算依据：九月柏林处于夏令时（UTC+2），与北京（UTC+8）相差六小时。可用区间是北京 15:00 至 17:00，再晚北京一方进入加班时段，再早柏林一方还没上班。
+
+有一点容易忽略：十月最后一个周日柏林改回冬令时，时差变成七小时。届时这场例会要顺延一小时，改到北京 17:00 才对应柏林 10:00。
+=== END
+
+=== PROMPT
+二十分の発表に、背景・手法・結果・考察をどう時間配分すればいいですか。
+=== THINK
+まず質疑の扱いを決める。二十分が発表のみなのか質疑込みなのかで前提が変わる。含むと仮定して、発表十五分、質疑五分で組む。
+
+均等に四分ずつ割りたくなる。いや、それでは背景が長すぎる。聴衆が知りたいのは結果であって、背景は結果を理解するための最小限でいい。
+
+背景三分、手法三分、結果六分、考察三分。手法を削るのが不安だが、細部は質疑で答えればよく、付録スライドに回せる。
+
+一分あたりスライド一枚が目安なので、本編は十五枚前後に収める。
+
+配分の根拠が固まったので、表にして示す。
+=== ANSWER
+質疑を含めて二十分と想定すると、発表十五分・質疑五分。内訳は次のとおりです。
+
+- 背景 3分 — 課題を一つに絞る。先行研究の網羅は不要
+- 手法 3分 — 何をどう測ったかだけ。詳細は付録へ
+- 結果 6分 — 最も時間を割く。図は一枚につき主張一つ
+- 考察 3分 — 限界と次の一手を明示する
+
+均等配分にしないのが要点です。聴衆の目的は結果であり、背景と手法はそれを理解する最小限で足ります。スライドは一分一枚、本編十五枚前後に収めてください。
+=== END
+
+=== PROMPT
+Comment renommer d'un coup tous les fichiers `IMG_*.JPG` d'un dossier en minuscules ?
+=== THINK
+Premier réflexe : `rename 'y/A-Z/a-z/' *.JPG`. Cela marche avec le rename de Perl, mais sur macOS et sur plusieurs distributions c'est celui d'util-linux, de syntaxe tout autre. Trop fragile.
+
+Une boucle shell alors, avec `${f,,}` pour passer en minuscules. Non, plutôt pas : cette syntaxe date de bash 4, et le bash livré avec macOS est resté en 3.2. `tr` est disponible partout.
+
+J'ajoute `-i` pour ne pas écraser un fichier déjà en minuscules sans prévenir, et `--` pour protéger des noms commençant par un tiret.
+
+Dernier piège : sur un système de fichiers insensible à la casse, ancien et nouveau nom peuvent être vus comme identiques. D'où un essai sur un seul fichier avant la boucle.
+
+La commande est portable et sûre, je la donne.
+=== ANSWER
+```sh
+for f in IMG_*.JPG; do
+  mv -i -- "$f" "$(echo "$f" | tr 'A-Z' 'a-z')"
+done
+```
+
+Trois précautions expliquent cette forme :
+
+- `tr` plutôt que `${f,,}`, qui exige bash 4 alors que macOS reste en bash 3.2 ;
+- `rename` évité, sa syntaxe différant selon la version, Perl ou util-linux ;
+- `-i` pour ne rien écraser silencieusement, `--` pour les noms commençant par un tiret.
+
+Essayez d'abord sur un seul fichier : un volume insensible à la casse peut voir les deux noms comme un seul.
+=== END
+
+=== PROMPT
+Meine Festplatte ist voll. Wie finde ich heraus, was den Platz belegt?
+=== THINK
+Der übliche Griff ist `du -sh *` im Home. Das zeigt nur die oberste Ebene und sagt nicht, wo tiefer unten der Übeltäter sitzt.
+
+Besser sortiert ausgeben: `du -h -d 1 ~ | sort -h -r | head -20`. Dabei begrenzt `-d 1` die Tiefe, und `sort -h` versteht K, M und G.
+
+Ich wollte gleich mit `find / -size +1G` einsteigen. Nein, besser andersherum: Meist liegt es nicht an einer Riesendatei, sondern an vielen mittelgroßen. Erst den größten Ordner finden, dann absteigen.
+
+Und der häufigste Sonderfall: Eine gelöschte Datei, die ein Prozess noch offen hält, gibt keinen Platz frei - sichtbar nur über `lsof | grep deleted`.
+
+Die Reihenfolge steht, ich schreibe die Schritte auf.
+=== ANSWER
+Von oben nach unten vorgehen, nicht gleich nach Riesendateien suchen:
+
+1. Größte Ordner einer Ebene, absteigend sortiert:
+```sh
+du -h -d 1 ~ | sort -h -r | head -20
+```
+Dann in den größten Treffer wechseln und wiederholen.
+
+2. Erst danach nach einzelnen großen Dateien:
+```sh
+find ~ -type f -size +1G -exec ls -lh {} +
+```
+
+3. Bleibt der Platz trotz Löschens belegt, hält ein Prozess die Datei noch offen:
+```sh
+lsof | grep deleted
+```
+Der Platz wird erst mit dem Neustart dieses Prozesses frei.
+
+Erfahrungsgemäß stecken die meisten Gigabyte in Caches und Container-Images, nicht in einer einzelnen Datei.
+=== END
+
+=== PROMPT
+服务日志有好几个 G，怎么快速找出昨天所有包含 timeout 的错误行？
+=== THINK
+直接 `grep -i timeout app.log` 会把 info 级别也带出来，而且几个 G 全扫一遍很慢。
+
+先缩范围。日志如果按天滚动，直接定位到昨天那个文件最省事，不用在全量里再按日期过滤。
+
+再想过滤顺序：
+```sh
+grep -i timeout app.log.2026-09-12 | grep ERROR
+```
+不对，顺序反了更快。先按 ERROR 过滤能淘汰掉九成以上的行，剩下的再匹配 timeout。
+
+最后别急着看内容，先用 `-c` 数一下；上万条就该按分钟聚合看分布。
+
+三步的顺序已经想清楚，下面写成具体命令。
+=== ANSWER
+分三步，不要一条命令扫全量。
+
+先定位到昨天的文件，再让最强的过滤条件排在前面：
+```sh
+grep ERROR app.log.2026-09-12 | grep -i timeout
+```
+先 ERROR 后 timeout，能淘汰绝大多数行，比反过来快得多。
+
+看内容之前先加 `-c` 数一下总量。上万条时，按分钟聚合看分布：
+```sh
+grep ERROR app.log.2026-09-12 | grep -i timeout | cut -c1-16 | uniq -c
+```
+=== END
+
+=== PROMPT
+ポート 8080 が使用中だと言われて起動できません。何が掴んでいるか調べる方法は。
+=== THINK
+まず掴んでいるプロセスを特定する。macOS なら `lsof -nP -i :8080`、Linux なら `ss -ltnp`。
+
+見つけたらすぐ `kill -9` したくなる。いや、それは最後の手段だ。何のプロセスか確かめないと、別のサービスを落としかねない。
+
+プロセスが見つからない場合もある。終了直後は TIME_WAIT でポートが残るし、Docker なら docker-proxy が掴んでいる。
+
+切り分けの順序が固まったので、手順を示す。
+=== ANSWER
+```sh
+lsof -nP -i :8080   # macOS
+ss -ltnp 'sport = :8080'  # Linux
+```
+
+出力の COMMAND と PID を確認してから止めてください。通常は `kill <PID>`（SIGTERM）で足り、応答がないときだけ `-9` を使います。
+
+見つからない場合は二つを疑います。直前に終了したサーバーの TIME_WAIT（数十秒待つか `SO_REUSEADDR` を有効化）か、Docker の docker-proxy（コンテナを停止）です。
+=== END
+
+=== PROMPT
+Je fais 8 km aller-retour chaque jour : vélo électrique ou abonnement de transport ?
+=== THINK
+Chiffrons. Un abonnement urbain tourne autour de 60 euros par mois. Un vélo électrique correct coûte 1 600 euros, plus 120 euros d'entretien annuel : l'amortissement se fait en un peu plus de deux ans et demi.
+
+Sur cinq ans, l'écart devient net : 3 600 euros pour l'abonnement contre 2 200 pour le vélo.
+
+Mais le calcul suppose que je roule toute l'année. Non, plutôt compter 70 % de trajets à vélo et des tickets à l'unité le reste du temps, soit une centaine d'euros par an.
+
+Deux points hors budget pèsent lourd : un rangement sécurisé, faute de quoi le vélo se fait voler dans l'année ; et le temps, 25 minutes pour 8 km, souvent moins qu'un bus avec correspondance.
+
+Le chiffrage et les contraintes concordent, je tranche.
+=== ANSWER
+Le vélo électrique, à une condition : disposer d'un local fermé pour le ranger.
+
+Sur cinq ans : 3 600 euros d'abonnement contre environ 2 200 pour le vélo (1 600 à l'achat, 120 d'entretien par an). L'amortissement intervient vers le trentième mois, même en comptant une centaine d'euros de tickets à l'unité par an.
+
+S'y ajoute le temps : 8 km, c'est environ 25 minutes de porte à porte, souvent moins qu'un bus avec correspondance.
+
+Sans rangement sécurisé des deux côtés, reprenez l'abonnement : le vol annule tout le bénéfice.
+=== END
+
+=== PROMPT
+"Er ist scheinbar krank" oder "Er ist anscheinend krank" - was ist der Unterschied?
+=== THINK
+Umgangssprachlich werden die beiden gleich verwendet, aber sie bedeuten das Gegenteil voneinander. Genau das macht den Fehler so tückisch: Der Satz bleibt verständlich und sagt trotzdem etwas anderes.
+
+"Anscheinend" heißt: Dem Anschein nach ist es so, und vermutlich stimmt es auch. "Scheinbar" heißt: Es sieht nur so aus, in Wirklichkeit ist es nicht so.
+
+"Er ist scheinbar krank" unterstellt also, dass er simuliert. Wer das nicht sagen will, schreibt "anscheinend".
+
+Ich wollte eine Eselsbrücke über die Wortlänge bauen. Nein, besser über die Bedeutung: In "scheinbar" steckt der Schein, also die Täuschung.
+
+Die Regel ist knapp und merkbar, ich formuliere sie aus.
+=== ANSWER
+Die beiden Wörter bedeuten das Gegenteil voneinander.
+
+- **anscheinend** = dem Anschein nach, und vermutlich zutreffend: "Er ist anscheinend krank" (er sieht krank aus, wahrscheinlich ist er es).
+- **scheinbar** = es sieht nur so aus, tatsächlich ist es nicht so: "Er ist scheinbar krank" (er täuscht die Krankheit vor).
+
+Wenn Sie eine Vermutung äußern wollen, schreiben Sie also *anscheinend*. Mit *scheinbar* unterstellen Sie, dass jemand simuliert.
+
+Merkhilfe: In *scheinbar* steckt der bloße Schein, also die Täuschung.
+=== END
+
+=== PROMPT
+简历最后要不要写「兴趣爱好」这一栏？
+=== THINK
+先问这一栏解决什么问题。简历的每一行都在争夺筛选者的几十秒，写进去就要换来一点判断依据。
+
+「爱好：阅读、旅游、音乐」这种写法几乎人人都有，等于没写，还占掉版面。
+
+所以第一反应是删掉。不对，也有该留的情况：爱好如果能佐证岗位能力，就有价值。马拉松能说明耐力和自律，开源项目能直接证明技术，长期带线上读书会能说明组织能力。
+
+判断标准落在一句话上：能不能引出一个具体事实和一个数字。不能，就删。
+
+判断标准已经立住，下面直接给出结论和例子。
+=== ANSWER
+默认删掉，除非爱好能佐证你申请的岗位能力。
+
+「阅读、旅游、音乐」这类写法人人都有，占了版面却提供不了判断依据，不如空出来写项目成果。
+
+值得保留的是这样的：连续三年完成马拉松（耐力与自律）、维护某个有五百星的开源项目（直接的技术证据）、组织过二十期线上读书会（组织能力）。
+
+判断标准只有一条：这一项能否引出一个具体事实加一个数字。做不到就删。
+=== END
+
+=== PROMPT
+納品が三日遅れます。取引先へのお詫びメールを短く書いてください。
+=== THINK
+遅延の連絡で最も大事なのは、謝罪そのものではなく新しい期日だ。相手が知りたいのは「いつ届くのか」と「その日は本当に守れるのか」の二点。
+
+原因はどこまで書くか。最初は詳しく説明しようと思った。いや、むしろ一文で足りる。長い説明は言い訳に読まれるし、相手の作業には関係がない。
+
+新しい期日には余裕を持たせる。三日と言って四日かかるのが最悪なので、確実に守れる日付を出す。
+
+再発防止を一言添えると、同じ連絡が続く不安を減らせる。
+
+構成が決まったので、メールを書く。
+=== ANSWER
+件名：納品日変更のお詫び（10月18日納品）
+
+株式会社青葉工業
+中村様
+
+いつもお世話になっております。
+
+このたびは、ご依頼の部材の納品が当初の10月15日から10月18日へと遅れる見込みとなり、誠に申し訳ございません。仕入先の検査工程で不適合が見つかり、代替ロットの手配に三日を要しております。
+
+10月18日の納品は確実にお守りいたします。今後は仕入先の在庫状況を週次で確認し、同様の遅延を防ぎます。
+
+ご迷惑をおかけし、重ねてお詫び申し上げます。
+
+大和精機株式会社　橋本
+=== END
