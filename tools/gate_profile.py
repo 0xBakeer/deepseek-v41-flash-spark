@@ -34,6 +34,16 @@ new prompts.
   python3 tools/gate_profile.py --topics python,sql,english --dry-run
   python3 tools/gate_profile.py --profile chat --thinking both --effort 60
 
+The verdict carries two numbers, because they answer different questions. The
+strict one -- N of M runs passed -- is the gate, and it is unforgiving on
+purpose: a 12-word fragment redrafted three times fails the row wherever it
+sits, the think block included. The second says how many runs finished the
+answer the prompt asked for -- the strict passes plus the misses whose only
+fault was that repeat. A keep-set that writes correct pages while redrafting a
+line behind the scenes and one that writes `* { }` to the cap both read as
+"6 of 11", and they are not the same result, so every miss is named as well:
+think-exit, guard, corrupt, content, repeat.
+
 Exit 0 only if every prompt passed. Stdlib only: no torch, no model load, and
 the checks import nothing, so tools/test_gate_profile.py runs them anywhere.
 """
@@ -499,6 +509,50 @@ def universal(reasoning: str, answer: str, finish_reason: str, thinking: bool) -
     return bad
 
 
+# The five shapes a failing run can have. `repeat` is last because it is the
+# narrowest, not because it is the least important: it is the one the strict
+# count cannot distinguish from wreckage.
+KINDS = ("think-exit", "guard", "corrupt", "content", "repeat")
+
+
+def classify(reasoning: str, answer: str, finish_reason: str, thinking: bool,
+             check_ok: bool) -> str:
+    """Which one of the five shapes a failing run has. One kind per row.
+
+      think-exit  reasoned and then wrote nothing -- a 200 with no content
+      guard       the server cut a loop off: its `[stopped:` note, or the
+                  `length` finish it sets when the degeneration window trips
+                  on text that is visibly repeating
+      corrupt     a character run no writer meant, `Tic‑‑‑‑Tac‑‑‑‑Toe`
+      content     the answer is not the thing the prompt asked for
+      repeat      the answer IS the thing the prompt asked for, the model chose
+                  to stop, and the only count against the row is the n-gram rule
+
+    `repeat` is tested last and can never take a row `content` would have had:
+    it requires the structural check to have PASSED and `content` requires it to
+    have failed. Everything the four named shapes do not describe -- a run
+    truncated at max_tokens, a request that never came back -- lands in
+    `content`, which is the honest reading of it: whatever else went wrong, the
+    thing that was asked for is not there.
+    """
+    if thinking and reasoning.strip() and not answer.strip():
+        return "think-exit"
+    if answer.lstrip().startswith(SERVER_NOTE):
+        return "guard"
+    # A `length` finish on its own is a run that hit max_tokens. A `length`
+    # finish on text that loops is the server's degeneration window, which cuts
+    # the generation and leaves no note when there is already content.
+    if finish_reason == "length" and (repeated_ngram(reasoning) or repeated_ngram(answer)):
+        return "guard"
+    if corrupt_run(reasoning) or corrupt_run(answer):
+        return "corrupt"
+    if (check_ok and finish_reason == "stop" and answer.strip()
+            and (reasoning.strip() or not thinking)
+            and (repeated_ngram(reasoning) or repeated_ngram(answer))):
+        return "repeat"
+    return "content"
+
+
 # =============================================================================
 # the prompt suites
 # =============================================================================
@@ -934,15 +988,28 @@ def _row(cells) -> str:
 
 
 def judge(p: dict, got: dict, thinking: bool) -> tuple:
-    """(passed, why). The universal failures come first and they are final: an
-    output that loops or stops early is not saved by containing the right number
-    of CSS declarations somewhere in the wreckage."""
+    """(passed, why, kind). The universal failures come first and they are
+    final: an output that loops or stops early is not saved by containing the
+    right number of CSS declarations somewhere in the wreckage.
+
+    The domain check runs on a failing row all the same -- not to rescue it, but
+    because whether the answer was the asked-for thing is the whole difference
+    between a redraft in the think block and a page of `* { }`. `kind` is "" on
+    a pass and one of KINDS on a failure.
+    """
     bad = universal(got["reasoning"], got["answer"], got["finish"], thinking)
-    if bad:
-        return False, "; ".join(bad)
     fn = CHECKS[p["check"]]
     ok, why = fn(got["answer"], p.get("want"))
-    return ok, why
+    if not bad:
+        return ok, why, "" if ok else "content"
+    kind = classify(got["reasoning"], got["answer"], got["finish"], thinking, ok)
+    reasons = "; ".join(bad)
+    # `repeat:` leads the line so these rows can be counted with grep, and what
+    # the check made of the answer is carried along: that is the evidence that
+    # the miss was a redraft and not wreckage.
+    if kind == "repeat":
+        return False, f"repeat: {reasons} — the answer itself is sound ({why})", kind
+    return False, reasons, kind
 
 
 def run(args, prompts, card) -> list:
@@ -956,19 +1023,39 @@ def run(args, prompts, card) -> list:
                 got = generate(args.url, card.get("id") or args.model, p["prompt"], thinking,
                                args.effort, args.max_tokens, args.api_key, args.timeout,
                                args.temperature, args.no_repeat_ngram, args.presence_penalty)
-                ok, why = judge(p, got, thinking)
+                ok, why, kind = judge(p, got, thinking)
             except (urlerror.URLError, OSError, ValueError, KeyError) as e:
                 got = {"reasoning": "", "answer": "", "finish": "error", "seconds": 0.0}
-                ok, why = False, f"request failed: {e}"
+                ok, why, kind = False, f"request failed: {e}", "content"
             row = {"name": p["name"], "topic": p["topic"], "check": p["check"],
                    "thinking": "on" if thinking else "off", "finish": got["finish"],
                    "reasoning_chars": len(got["reasoning"]), "answer_chars": len(got["answer"]),
-                   "seconds": got["seconds"], "ok": ok, "why": why}
+                   "seconds": got["seconds"], "ok": ok, "why": why, "kind": kind}
             rows.append(row)
             print(_row((row["name"], row["thinking"], row["finish"], f"{row['reasoning_chars']:,}",
                         f"{row['answer_chars']:,}", f"{row['seconds']:.0f}",
                         "PASS" if ok else "FAIL", why)), flush=True)
     return rows
+
+
+def tally(rows) -> tuple:
+    """(finished, {kind: n}). `finished` counts the runs that produced the
+    answer the prompt asked for: the strict passes, plus the misses whose only
+    fault was the n-gram rule. It is not a second gate and it never moves the
+    exit code -- it is the number that says whether the misses were wreckage."""
+    by = {k: 0 for k in KINDS}
+    for r in rows:
+        if not r["ok"]:
+            by[r.get("kind") or "content"] += 1
+    return sum(1 for r in rows if r["ok"]) + by["repeat"], by
+
+
+def finished_line(rows) -> str:
+    """The second sentence of the verdict, in stdout and in GATE.md alike."""
+    finished, by = tally(rows)
+    return (f"{finished} of {len(rows)} finished a correct answer (strict passes plus "
+            f"repeat-only misses); misses by kind: "
+            + ", ".join(f"{k} {by[k]}" for k in KINDS) + ".")
 
 
 def report(rows, name, topics, silent, args, card) -> str:
@@ -1007,6 +1094,8 @@ def report(rows, name, topics, silent, args, card) -> str:
                    + "; ".join(f"`{r['name']}` ({r['thinking']}) {r['why']}" for r in failed))
     else:
         out.append(f"**Verdict: PASS** — all {len(rows)} runs produced sound output.")
+    out.append("")
+    out.append(finished_line(rows))
     if silent:
         out.append("")
         out.append(f"This run gated {len(topics) - len(silent)} of the profile's {len(topics)} "
@@ -1094,6 +1183,7 @@ def main() -> int:
 
     print(f"{len(rows) - len(failed)} of {len(rows)} runs passed"
           + (f" — FAILED: {', '.join(sorted({r['name'] for r in failed}))}" if failed else ""))
+    print(finished_line(rows))
     return 1 if failed else 0
 
 

@@ -18,6 +18,7 @@ import ast
 import os
 import sys
 import tempfile
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gate_profile as G  # noqa: E402
@@ -615,6 +616,86 @@ check("thinking off does not require reasoning",
 check("the n-gram rule tolerates repeated boilerplate below three copies",
       G.repeated_ngram(("document.getElementById('a').addEventListener('click', function () "
                         "{ send('a'); }); ") * 2) is None)
+
+# =============================================================================
+# the failure kinds
+# =============================================================================
+# The strict rule is not up for negotiation: a fragment redrafted three times
+# fails the row. But five misses can be five empty answers or five finished
+# pages with a redraft behind them, and a single number cannot say which. Each
+# row below is judged through G.judge, so the classification is tested where it
+# actually runs.
+
+HTML_PROMPT = {"name": "html-page", "check": "html_page", "want": ["<title", "grid"]}
+
+# Fourteen words, three times over: it tiles the 12-word window exactly, which
+# is the think-block redraft the second number was written for.
+REDRAFT = ("I should give the board a fixed grid and the cells a hover state. " * 3)
+
+SERVER_CUT = ("[stopped: the model began repeating itself and was cut off before it produced "
+              "an answer. Lower the reasoning effort, or turn thinking off.]")
+
+
+def row(prompt, reasoning, answer, finish="stop", thinking=True):
+    """One row of a run, built the way run() builds it."""
+    got = {"reasoning": reasoning, "answer": answer, "finish": finish, "seconds": 1.0}
+    ok, why, kind = G.judge(prompt, got, thinking)
+    return {"name": prompt["name"], "topic": "html", "check": prompt["check"],
+            "thinking": "on" if thinking else "off", "finish": finish,
+            "reasoning_chars": len(reasoning), "answer_chars": len(answer),
+            "seconds": 1.0, "ok": ok, "why": why, "kind": kind}
+
+
+PASSED = row(HTML_PROMPT, "Grid first, then the win lines, then the reset button.", GOOD_HTML)
+check("a sound page passes and carries no kind",
+      PASSED["ok"] and PASSED["kind"] == "", PASSED["why"])
+
+THINK_EXIT = row(HTML_PROMPT, "I thought about the grid, the win lines and the reset button.", "")
+check("reasoning with no answer is kind think-exit",
+      not THINK_EXIT["ok"] and THINK_EXIT["kind"] == "think-exit", THINK_EXIT["why"])
+
+GUARD = row(HTML_PROMPT, "I keep. I write. " * 20, SERVER_CUT, finish="length")
+check("the server's cut-off note is kind guard",
+      not GUARD["ok"] and GUARD["kind"] == "guard", GUARD["why"])
+LENGTH_LOOP = row(HTML_PROMPT, REDRAFT, GOOD_HTML, finish="length")
+check("a length finish on looping text is kind guard too",
+      LENGTH_LOOP["kind"] == "guard", LENGTH_LOOP["why"])
+
+CORRUPT = row(HTML_PROMPT, "Grid first, then the win lines.",
+              GOOD_HTML.replace("Tic-Tac-Toe", "Tic‑‑‑‑Tac‑‑‑‑Toe"))
+check("a corrupted character run is kind corrupt",
+      not CORRUPT["ok"] and CORRUPT["kind"] == "corrupt", CORRUPT["why"])
+
+CONTENT = row(HTML_PROMPT, "Grid first, then the win lines.",
+              GOOD_HTML.replace("<!doctype html>\n", ""))
+check("a finished answer that is the wrong shape is kind content",
+      not CONTENT["ok"] and CONTENT["kind"] == "content", CONTENT["why"])
+CONTENT_LOOP = row(HTML_PROMPT, REDRAFT, STYLE_LOOP)
+check("a redraft over a broken page is content, not repeat",
+      CONTENT_LOOP["kind"] == "content", CONTENT_LOOP["why"])
+
+REPEAT = row(HTML_PROMPT, REDRAFT, GOOD_HTML)
+check("a redraft behind a correct page is kind repeat",
+      REPEAT["kind"] == "repeat", REPEAT["why"])
+check("a repeat-only miss still FAILS the strict rule", not REPEAT["ok"], REPEAT["why"])
+check("a repeat-only miss says so first, so it can be grepped",
+      REPEAT["why"].startswith("repeat:"), REPEAT["why"])
+
+KIND_ROWS = [PASSED, THINK_EXIT, GUARD, CORRUPT, CONTENT, REPEAT]
+SENTENCE = ("2 of 6 finished a correct answer (strict passes plus repeat-only misses); "
+            "misses by kind: think-exit 1, guard 1, corrupt 1, content 1, repeat 1.")
+check("the verdict counts the finished answers and names every miss",
+      G.finished_line(KIND_ROWS) == SENTENCE, G.finished_line(KIND_ROWS))
+check("every failing row has exactly one kind, and they add up",
+      sum(G.tally(KIND_ROWS)[1].values()) == sum(1 for r in KIND_ROWS if not r["ok"]))
+
+_args = types.SimpleNamespace(thinking="on", effort=45, max_tokens=16000,
+                              url="http://127.0.0.1:8000/v1", only=None)
+MD = G.report(KIND_ROWS, "frontend", ["html"], [], _args,
+              {"id": "keepset", "max_model_len": 32768})
+check("the GATE.md verdict still leads with the strict count",
+      "**Verdict: FAIL** — 5 of 6 runs failed" in MD)
+check("the GATE.md section carries the second sentence", SENTENCE in MD)
 
 # =============================================================================
 # the suite
