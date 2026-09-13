@@ -885,7 +885,8 @@ def model_card(base: str, api_key: str | None) -> dict:
 
 def generate(base: str, model: str, prompt: str, thinking: bool, effort: int,
              max_tokens: int, api_key: str | None, timeout: int,
-             temperature: float | None = None) -> dict:
+             temperature: float | None = None, no_repeat_ngram: int | None = None,
+             presence_penalty: float | None = None) -> dict:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -896,6 +897,12 @@ def generate(base: str, model: str, prompt: str, thinking: bool, effort: int,
     }
     if temperature is not None:
         body["temperature"] = temperature
+    # Both are per-request on this server. The n-gram guard exists for exactly the failure the
+    # saliency keep-set leaves: a fragment redrafted many times inside a long think block.
+    if no_repeat_ngram:
+        body["no_repeat_ngram"] = no_repeat_ngram
+    if presence_penalty is not None:
+        body["presence_penalty"] = presence_penalty
     req = urlrequest.Request(base + "/chat/completions", data=json.dumps(body).encode(),
                              headers={"Content-Type": "application/json",
                                       **({"Authorization": f"Bearer {api_key}"} if api_key else {})})
@@ -948,7 +955,7 @@ def run(args, prompts, card) -> list:
             try:
                 got = generate(args.url, card.get("id") or args.model, p["prompt"], thinking,
                                args.effort, args.max_tokens, args.api_key, args.timeout,
-                               args.temperature)
+                               args.temperature, args.no_repeat_ngram, args.presence_penalty)
                 ok, why = judge(p, got, thinking)
             except (urlerror.URLError, OSError, ValueError, KeyError) as e:
                 got = {"reasoning": "", "answer": "", "finish": "error", "seconds": 0.0}
@@ -1021,6 +1028,9 @@ def main() -> int:
                     help="thinking mode; `both` runs every prompt twice (default %(default)s)")
     ap.add_argument("--effort", type=int, default=45, help="reasoning effort, 1-100")
     ap.add_argument("--max-tokens", type=int, default=16000)
+    ap.add_argument("--no-repeat-ngram", type=int, default=None,
+                    help="ban repeating an n-gram already in the output; matches the harness's 12-word rule at 12")
+    ap.add_argument("--presence-penalty", type=float, default=None, help="OpenAI presence penalty, per request")
     ap.add_argument("--temperature", type=float, default=None,
                     help="passed through when given; the temperature-0 loop is reproducible here")
     ap.add_argument("--timeout", type=int, default=3600, help="seconds per request")
