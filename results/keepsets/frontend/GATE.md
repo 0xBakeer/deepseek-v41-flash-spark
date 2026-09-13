@@ -59,3 +59,35 @@ This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no p
 **Verdict: FAIL** — 5 of 10 runs failed: `yaml-anchors` (on) reasoning loops 5x on 'test: ["cmd", "curl", "-f", "http://localhost/health"] i'; `css-card` (on) reasoning loops 4x on 'dark) { :root { color-scheme: dark; --card-surface: #181'; `en-note` (on) reasoning loops 17x on 'fix must be proven to eliminate the symptom under the sa'; `js-debounce` (on) reasoning loops 6x on 'function debounce(fn, wait) { let timerid = null; let la'; `ts-groupby` (on) reasoning loops 20x on 'function groupby<t, k extends groupablekey<t>>( items: r'
 
 This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-13 18:14
+
+| | |
+|---|---|
+| profile | Frontend |
+| topics | html, css, javascript, typescript, english, technical, config, reasoning, reasoning_code |
+| prompts | 10 runs over 10 prompts |
+| thinking | on |
+| reasoning effort | 45 |
+| max tokens | 16,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| no prompts for | reasoning, reasoning_code — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `yaml-anchors` | on | stop | 21,544 | 961 | 271 | **FAIL** | reasoning loops 6x on 'service_role: shared x-common-healthcheck: &common-healt' |
+| `css-card` | on | stop | 4,694 | 1,792 | 87 | PASS | 39 declarations, 0 empty rules |
+| `en-explain` | on | stop | 12,960 | 1,367 | 223 | PASS | 2 paragraphs, 10 sentences |
+| `en-note` | on | stop | 6,851 | 1,044 | 118 | PASS | 3 paragraphs, 7 sentences |
+| `html-page` | on | stop | 4,201 | 3,613 | 103 | PASS | 48 declarations, 10 functions, 0 empty rules |
+| `js-debounce` | on | stop | 10,788 | 1,756 | 169 | **FAIL** | reasoning loops 3x on 'function debounced(...args) { lastargs = args; lastthis ' |
+| `tech-explain` | on | stop | 9,447 | 1,509 | 176 | PASS | 2 paragraphs, 8 sentences |
+| `ts-groupby` | on | length | 60,064 | 0 | 843 | **FAIL** | finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 17x on 'must be a property of the element type whose value is a' |
+| `reason-bat-ball` | on | stop | 870 | 528 | 26 | PASS | says 0.05 |
+| `reason-machines` | on | stop | 630 | 452 | 17 | PASS | says 5 minutes |
+
+**Verdict: FAIL** — 3 of 10 runs failed: `yaml-anchors` (on) reasoning loops 6x on 'service_role: shared x-common-healthcheck: &common-healt'; `js-debounce` (on) reasoning loops 3x on 'function debounced(...args) { lastargs = args; lastthis '; `ts-groupby` (on) finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 17x on 'must be a property of the element type whose value is a'
+
+This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
