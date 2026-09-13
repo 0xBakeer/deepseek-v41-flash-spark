@@ -737,3 +737,177 @@ U+2011, and the model enters a self-correction loop trying to repair it.
 Fault 2 — the think-exit register, which was never traced by any corpus in this repo — is recorded
 in `NOTES.md` (2026-09-12) and `LIMITATIONS.md`. It is a corpus fault, not a ranking one, and no
 gate has been run on the corpus written to close it.
+
+## v0.5.0-wip — 2026-09-13
+
+Measured 2026-09-13 00:55-20:45 on the same box and checkpoint. Every row is one request through
+the server, judged by `tools/gate_profile.py` — the successor to the gate of §4.1: free generation
+with thinking on, and a prompt passes only when the thing it asked for is in the output.
+Two runs of the same profile on the same prompts are the whole measurement — round one in the
+morning, the recipe in the evening — and both are appended in each profile's own `GATE.md`, with
+the run time in the heading, so any row below can be read back at its source.
+
+### 5.1 The recipe — rank by contribution, not by frequency; keep 0.40; `maxmin`; substitute; 256k
+
+Every keep-set in every tag before this one ranked experts by how **often** the router picked them.
+Ranked that way the model corrupts rare tokens at subword boundaries — `clearTimeout` written
+`cleartimeout`, `OSError` as `oenerror`, `.some` as `.s.s`, `color-scheme` as `color-s-s-mode`
+(`docs/keep-sets.md`, "Why coverage predicts whether long generations hold together") — then loops
+trying to repair what it wrote, and on some prompts never leaves the think block at all.
+
+Two controls put that where it belongs before anything was changed.
+
+* **The null** — no router mask, every one of the 384 experts a layer reachable, streamed from
+  NVMe. The three prompts that failed on every keep-set (`en-explain`, `js-debounce`,
+  `html-page`) all pass: 2 paragraphs and 9 sentences, 12 callables, 71 declarations and 15
+  functions, at 1,008-1,549 s per prompt (`results/keepsets/null-unmasked/GATE.md`, 10:38). The
+  failures are the keep-set's, not the checkpoint's, and this run is the ceiling every keep-set is
+  measured against.
+* **The unpruned model at `DSV41_TOPK=4`** — nothing pruned, four routed experts per token instead
+  of six. 1 of 3 passes: the page still passes, the explanation picks up a 3x repeat, and the
+  debounce corrupts `lastArgs` and `lastThis` at the subword boundary and loops on them
+  (`results/keepsets/null-topk4/GATE.md`, 12:22). Identifier handling depends on the whole top-6,
+  so a keep-set that serves code has to hold the true six for those tokens and not merely six good
+  ones. It is also the honest test of `drop` mode without pruning anything, because with
+  `norm_topk_prob` on the survivors are renormalised to the routed scale — the technical report and
+  DeepSeek-V3's equation 13 both keep the correction bias for selection only and normalise the
+  gating values over the selected set, which is what the engine does.
+
+So the router is faithful and the criterion was wrong. REAP (Lasby et al., Cerebras, ICLR 2026,
+[arXiv 2510.13999](https://arxiv.org/abs/2510.13999)) had already published that failure mode on
+Kimi-K2 — 384 routed experts, one shared, auxiliary-loss-free routing, this model's shape:
+LiveCodeBench 0.434 -> **0.082** at 75 % of experts kept and **0.000** at 50 % under frequency
+ranking, against 0.440 and 0.429 under saliency. Saliency is what an expert contributes rather
+than how often it is reached: `gate_weight(t, e) · ‖expert_e(x_t)‖₂`, summed here over the tokens
+routed to it (`docs/keep-sets.md`, "Frequency is not contribution"; the tracer stores the
+contribution norm itself, in fp32, because dividing it back out by the smallest gate weights put
+366 picks of the deepest three layers past fp16's range).
+
+The recipe is one line of environment, and nothing in the engine:
+
+```
+DSV41_PRUNE_SOURCE=saliency    # rank on saliency_<topic>, not counts_<topic>
+DSV41_PRUNE_RANK=maxmin        # each layer's slots to the worst-served selected topic
+PRUNE_KEEP=0.40 ARENA_GB=89.2  # 154 experts a layer; see the arithmetic below
+MAX_SEQ=262144                 # 256k, and thinking on for every run
+```
+
+`DSV41_PRUNE_MODE` is left unset, which is `substitute` — the default, unchanged to the bit.
+`PRUNE_KEEP=0.40` is `ceil(0.40 x 384) = 154` experts a layer (`tools/budget.py:keep_n`), so 6,160
+slots at 14,454,784 bytes each in the shipped `EXPERT_FORMAT=cb3` layout
+(`tools/budget.py:EXPERT_BYTES`) = **89.0 GB** of arena, which is the figure `env.example` already
+gives for this keep fraction, and the reason it does not fit in FP4. The budget model does not
+allow it: its largest keep at `MAX_SEQ=262144` is 0.350 (§4.5). It was run
+anyway, because the engine's own pre-flight accepted it, and it served all seven profiles without
+the memory watchdog stirring. What that proves is in §5.4.
+
+### 5.2 Seven narrow profiles, the same prompts, both rankings
+
+Round one is `counts` at `PRUNE_KEEP=0.36`, 139 experts a layer; the recipe is the block above. The
+topic column is the profile's own list in `tools/tune.py:PROFILES`, `reasoning` and
+`reasoning_code` included (neither carries a prompt, so no run gates them). Times are the gate
+headings in each profile's `GATE.md`, all 2026-09-13.
+
+| profile | topics | round one — frequency, keep 0.36 | recipe — contribution, keep 0.40 | gate record |
+|---|---|---|---|---|
+| Frontend | 9 | 6 of 10 (00:55) | **7 of 10** (18:14) | `results/keepsets/frontend/GATE.md` |
+| Backend | 9 | 4 of 10 (01:24) | **5 of 10** (18:42) | `results/keepsets/backend/GATE.md` |
+| Chat and explanation | 7 | 5 of 8 (03:12) | **6 of 8** (19:08) | `results/keepsets/chat_and_explanation/GATE.md` |
+| Medicine | 6 | 5 of 7 (03:25) | **6 of 7** (19:26) | `results/keepsets/medicine/GATE.md` |
+| Law and finance | 6 | 4 of 7 (03:48) | **5 of 7** (19:44) | `results/keepsets/law_and_finance/GATE.md` |
+| Data and research | 10 | **7 of 11** (04:24) | 5 of 11 (20:26) | `results/keepsets/data_and_research/GATE.md` |
+| Writing | 7 | 3 of 8 (06:07) | **5 of 8** (20:45) | `results/keepsets/writing/GATE.md` |
+| **all seven** | | **34 of 61** | **39 of 61** | |
+
+Six profiles up, one down. The strict count is the least interesting half of it, because the
+**kind** of miss changed. Counted row by row out of those same fourteen runs:
+
+| what a miss was | round one, 27 misses | recipe, 22 misses |
+|---|---|---|
+| no answer at all — server cut the generation off for repeating itself | 8 | 4 |
+| no answer at all — think-exit: reasoned, then produced nothing | 3 | 2 |
+| a finished answer, flagged only for a repeated 12-word window | 15 | **16** |
+| a finished answer that was structurally wrong | 1 (`css-card`, no `prefers-color-scheme`) | 0 |
+| a corrupted run inside one of those finished answers | 2 | **0** |
+
+Not one rare token corrupts under contribution ranking, where frequency wrote `ttimerid` and
+`color-s-s-mode`. The explanation prompt `en-explain` — which failed on **all ten** round-one
+profiles, including the three wide ones, and passed only with the router unmasked — passes on 5 of
+the 7 recipe runs. And the remaining 16 misses are one failure, not several: a fragment redrafted
+**3 to 10 times** inside a long think block, followed by a correct answer that the gate never sees
+as correct because the repeat rule fails the run first.
+
+Frontend was run three ways on the identical nine topics, which is the cleanest read on the
+criterion because nothing but the ranking moved:
+
+| Frontend, nine topics | passes | what failed |
+|---|---|---|
+| frequency, keep 0.36 (00:55) | 6 of 10 | 2 think-exits, `ttimerid` corruption, a card with no `prefers-color-scheme` |
+| contribution, keep 0.36 (17:19) | 5 of 10 | no corruption, no think-exit; five redrafts, one at 20x |
+| contribution, keep 0.40 (18:14) | **7 of 10** | one think-exit (`ts-groupby`), two redrafts at 6x and 3x |
+
+`css-card` passes at 0.40 and had never passed on a pruned keep-set before: it fails in every
+other gate record in `results/keepsets/` that ran it — Frontend at 00:55 and 17:19, the ad-hoc
+eight-topic set, Programming broadly, Everything. Contribution ranking is what removes the
+corruption and the exit failures; the extra 15 experts a layer are what turn "finishes cleanly"
+into "passes".
+
+### 5.3 What was refuted, each with the number that refuted it
+
+Every one of these was run on the real server, not reasoned about.
+
+| tried | result |
+|---|---|
+| `DSV41_PRUNE_MODE=drop` — zero the weight of a non-resident pick instead of substituting | **0 of 6** on Frontend at keep 0.36 with thinking on, including a page that passes under `substitute`. With `norm_topk_prob` on this is top-*k′* routing with about four survivors of six, and a shared-expert-only fallthrough on roughly a token in twenty. Kept as a documented negative result. |
+| the unpruned model at `DSV41_TOPK=4` | **1 of 3**; the same identifier corruption with nothing pruned (§5.1) |
+| `no_repeat_ngram=8` | does not reach the think-exit; banning an 8-gram leaves the model free to redraft in different words (NOTES.md, 2026-09-12 20:00) |
+| `frequency_penalty=0.3` | fixes prose and destroys code on the 900-token gate — the penalty grows with a token's count, and CSS repeats `px` and digits dozens of times (NOTES.md, 2026-09-12 03:50-05:30) |
+| `presence_penalty` (flat per distinct token) | does not corrupt code and does not fix prose either; both penalties stay at 0 |
+| `reasoning_effort=10` | **worse**: 59,766 characters of deliberation and no answer at all |
+| `temperature=0` | "I'll write the code now.", then "Let me write." to the token cap, answer length **0** |
+
+The first two are questions about the keep-set and the last five are settings on the request. The
+five are all closed the same way: this is not a sampling problem, and no sampler setting reaches
+it.
+
+The profile list itself was refuted the same way. In round one "Programming, broadly" with fifteen
+topics passed **4 of 16**, "Many languages" with fourteen passed **2 of 15** — every natural-language
+prompt failed — and "Everything", all 37, passed **4 of 39**
+(`results/keepsets/programming__broadly/GATE.md`, `many_languages/GATE.md`, `everything/GATE.md`).
+Six to ten topics serve on this box and fourteen and up do not, so the two wide bundles became four
+narrow ones (Frontend and Systems programming; European languages and World languages) and
+Everything is no longer offered as a profile. The topic screen still lets anyone select all 37 by
+hand and shows what it costs.
+
+### 5.4 What this proves and what it does not
+
+**Proven.** On this box, at this checkpoint, contribution ranking removes two whole failure classes
+that frequency ranking produced — token corruption and the think-exit — and 154 experts a layer at
+`MAX_SEQ=262144` load and serve. Seven profiles, 61 prompts, 34 -> 39.
+
+**256k is proven for short prompts only.** No request in any of these gates prefilled anything like
+262,144 tokens; the longest prompt in the whole suite is 58 words (`xl-en-fr`,
+`tools/gate_profile.py:PROMPTS`). The reserve the budget model keeps back is for exactly the case
+none of these runs exercised, which is why it puts this box's
+ceiling at 0.350 and this configuration is above it. A long-prefill memory test is running as this
+is written, and `env.example` keeps the previous defaults (`PRUNE_KEEP=0.39`, `ARENA_GB=87`,
+`MAX_SEQ=32768`, an empty `DSV41_PRUNE_RANK` and `DSV41_PRUNE_SOURCE`) until it lands. Nothing here
+justifies raising `tools/budget.py:VALIDATED_MAX_SEQ` above the 131,072 that was measured on
+2026-09-12.
+
+**One profile regressed and it is not explained.** Data and research went 7 -> 5 of 11. Every one
+of its six misses is a finished answer flagged for a redraft — none corrupt, none fail to close —
+so the profile got better in kind and worse in count, and the count is what a user sees.
+
+**One prompt regressed within a profile: Go.** Backend's `go-handler` passed round one at 115 lines
+(01:24) and under the recipe was cut off by the server's repeat guard after looping 12x inside the
+think block (18:42), while `java-service` went the other way, from cut off to 88 lines. One prompt
+each way on one profile is not a pattern yet; it is open.
+
+**The remaining failure class is not a loop.** Sixteen of the 22 recipe misses are a fragment
+redrafted 3 to 10 times inside a long think block and then a correct answer. `repeated_ngram` in
+`tools/gate_profile.py` fails a run when any 12-word window appears three times, and the harness
+cannot tell a model that drafted a function signature four ways before choosing one from a model
+that has stopped making progress. Both are worth knowing about and only one is a defect. Until the
+gate can separate them, these runs are counted as failures, which is the conservative direction but
+makes the 39 a floor rather than a measurement.

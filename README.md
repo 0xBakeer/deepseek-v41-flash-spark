@@ -160,6 +160,18 @@ from 0.657 at four selected topics to 0.410 at eighteen — while under `maxmin`
 it 0.06 (measured 2026-09-12). [`docs/tune.md`](docs/tune.md) has the screen, the arithmetic behind
 every number on it, and how to add topics of your own.
 
+**Added 2026-09-13 — the recipe the profiles were last measured on.** How a keep-set is *ranked*
+turned out to matter more than which topics are in it. Ranking by how much each expert contributes
+instead of how often the router picks it, and spending the largest budget this box will hold, takes
+seven narrow profiles from 34 to 39 of 61 prompts on the generation harness, removes the rare-token
+corruption entirely and cuts the think blocks that never close. It needs three settings —
+`DSV41_PRUNE_SOURCE=saliency`, `DSV41_PRUNE_RANK=maxmin` and `PRUNE_KEEP=0.40` with
+`ARENA_GB=89.2` (154 experts a layer, an 89.0 GB arena) — and `MAX_SEQ=262144` served all seven
+profiles, for short prompts only. [`RESULTS.md`](RESULTS.md) §5 has every run, both controls and
+what was refuted. **[`env.example`](env.example) still ships the previous defaults**
+(`PRUNE_KEEP=0.39`, `ARENA_GB=87`, `MAX_SEQ=32768`, no rank and no source): the long-prefill memory
+test that would justify moving them has not landed.
+
 ## Two ways to run it
 
 Both are the same server and both read the same `./.env` (copy [`env.example`](env.example)).

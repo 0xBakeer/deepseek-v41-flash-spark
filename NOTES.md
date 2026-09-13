@@ -2560,3 +2560,32 @@ self-correction loop trying to repair what it just wrote. Not attributed.
 Also measured today: 131,072 context prefilled and generated from, so `tools/budget.py`
 `VALIDATED_MAX_SEQ` is 131,072 rather than 32,768, and the old 64k-watchdog anecdote that set the
 32,768 mark is superseded.
+
+### 2026-09-13 -- the criterion was wrong: rank on contribution, not on frequency
+
+Full write-up, every run and both controls: `RESULTS.md` §5. Two things carry forward from it.
+
+**Frequency and contribution are not the same measurement, and this repo used the wrong one for
+four tags.** Every keep-set before today ranked experts by how often the router picked them. The
+same keep-set ranked by `gate_weight(t, e) x ‖expert_e(x_t)‖₂` -- what an expert actually adds --
+stops corrupting rare tokens at subword boundaries and stops failing to close think blocks, on the
+identical topics at the identical 139 experts a layer (`results/keepsets/frontend/GATE.md`, 00:55
+against 17:19). REAP (arXiv 2510.13999) had published the same thing on Kimi-K2, which has this
+model's routing shape: LiveCodeBench 0.434 -> 0.082 at 75 % kept under frequency, 0.440 under
+saliency. An expert the router reaches for constantly whose output barely moves the residual stream
+tops a frequency ranking and is worth almost nothing in the arena, and that is what the budget was
+being spent on. `DSV41_PRUNE_SOURCE=saliency` is the switch; the ranking rules see 384 non-negative
+numbers either way and cannot tell which measurement produced them.
+
+**Why `drop` mode failed, which is worth remembering before anyone proposes it again.** The
+intuition is sound -- a substituted expert injects a signal the model never trained to receive, so
+zeroing a non-resident pick should be gentler than replacing it. It is not, because with
+`norm_topk_prob` on the survivors are renormalised to the routed scale. Dropping two of six picks
+is therefore **top-k' routing with k' = 4 at full weight**, not an attenuation toward the shared
+expert, and on roughly a token in twenty nothing survives at all and the token falls through to the
+shared expert alone. Measured: 0 of 6 on Frontend at keep 0.36, including a page that passes under
+`substitute` (`docs/keep-sets.md`, "Why coverage predicts whether long generations hold
+together", and the `DSV41_PRUNE_MODE` block in `env.example`). The unpruned model at
+`DSV41_TOPK=4` says the same thing with nothing pruned -- 1 of 3, identifiers corrupting with every
+expert available (`results/keepsets/null-topk4/GATE.md`). Six experts of which two are wrong beat
+four right ones here. `substitute` stays the default and `drop` stays a documented negative result.

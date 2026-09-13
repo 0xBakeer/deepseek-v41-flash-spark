@@ -281,3 +281,41 @@ length zero. Refuted as workarounds, each measured: temperature 0, `no_repeat_ng
 (lexical breakdown). The fix attempted is a new `think` corpus kind and a hand-written
 `reasoning_code` topic (8 records, 3,543 tokens), traced 2026-09-12. **No gate has been run on a
 keep-set containing it, so it is not known to work.**
+
+## 2026-09-13 — what the recipe of `RESULTS.md` §5 leaves open
+
+The seven narrow profiles were re-gated on contribution ranking at `PRUNE_KEEP=0.40` (§5.2). They
+went 34 -> 39 of 61, the rare-token corruption is gone and the think blocks mostly close. Four
+things it did not settle, each of which a reader should know before trusting the 39.
+
+**The harness cannot tell a redraft from a loop.** `repeated_ngram` in `tools/gate_profile.py`
+fails a run when any 12-word window appears **three** times. Sixteen of the recipe's 22 misses are
+exactly that and nothing else: a fragment redrafted 3 to 10 times inside a long think block,
+followed by a finished, correct answer. A model that writes a function signature four ways before
+picking one and a model that has stopped making progress produce the same flag. Three was chosen so
+that a four-word think-block cycle ("I keep. I write.") tiles a 12-word window exactly, which it
+still does — but at effort 45 with thinking on, deliberation that revisits its own draft is normal,
+and the threshold has not been re-derived for that register. Until it is, these runs are counted as
+failures: the conservative direction, and it makes 39 of 61 a floor rather than a measurement.
+
+**One Go prompt regressed and it is not explained.** Backend's `go-handler` passed round one at 115
+lines (`results/keepsets/backend/GATE.md`, 01:24) and under the recipe was cut off by the server's
+repeat guard after looping 12x in the think block (same file, 18:42). `java-service` moved the
+other way in the same pair of runs, from cut off to 88 lines. One prompt each way in one profile is
+not a pattern, and nothing in the recipe is Go-specific, so it is open rather than attributed.
+
+**256k is unproven for long prompts.** Every profile run in §5.2 declares `max_model_len 262,144`
+and no
+request in any of them prefilled more than a 58-word prompt (`tools/gate_profile.py:PROMPTS`). The
+memory the budget model reserves is for the long-prefill case exactly, which is why it caps this box
+at keep 0.350 at that context (`RESULTS.md` §4.5) and why 0.40 is above its own ceiling. The engine
+pre-flight accepts it and the watchdog did not fire in seven profiles of short prompts; that is the
+whole of the evidence. `tools/budget.py:VALIDATED_MAX_SEQ` stays at 131,072 and `env.example` keeps
+`PRUNE_KEEP=0.39` / `ARENA_GB=87` / `MAX_SEQ=32768` until the long-prefill test lands.
+
+**Data and research regressed, 7 -> 5 of 11.** It is the one profile the strict count moves against
+(`results/keepsets/data_and_research/GATE.md`, 04:24 against 20:26). Every one of its six misses is
+a finished answer flagged for a redraft — none corrupts a token, none fails to close, none is
+structurally wrong — so the profile improved in kind and lost in count, and the count is what a user
+reads. Whether ten topics is simply one too many for this box at this keep fraction is untested: no
+narrower variant of it has been gated.
