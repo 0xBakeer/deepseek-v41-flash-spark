@@ -737,8 +737,8 @@ def block_forward(st: SeqState, w: LayerWeights, experts: ExpertLoader, args: Ar
     `expert_cache` maps expert id -> (w1,w2,w3) for experts already dequantized in this layer.
 
     `record_norms(out_norms)` is optional and receives, after the routed loop, a [T, topk] fp32
-    tensor aligned with `indices`: the L2 norm of each pick's expert output BEFORE its gate weight
-    is applied. It is what REAP (Lasby et al., arXiv 2510.13999) multiplies by the gate weight to
+    tensor aligned with `indices`: the L2 norm of each pick's weighted contribution, i.e.
+    gate_weight * ||expert_e(x_t)||. It is what REAP (Lasby et al., arXiv 2510.13999) multiplies by the gate weight to
     score an expert by the magnitude it contributes rather than by how often it is picked. A second
     unweighted forward would double the cost of the trace, so the norm is taken off the weighted
     contribution the loop already computes and divided by the weight -- see the loop.
@@ -783,7 +783,10 @@ def block_forward(st: SeqState, w: LayerWeights, experts: ExpertLoader, args: Ar
             # (Cheaper still: g * ||expert(x)|| IS ||contrib||, so expert_stats multiplying the
             # two back together is a round trip -- kept apart because the two factors are the
             # frequency-vs-magnitude decomposition, and a trace should record both.)
-            out_norms[idx, top] = contrib.norm(dim=-1) / weights[idx, top].clamp_min(1e-20)
+            # The bounded quantity: ||g * expert(x)|| is exactly REAP's g * ||expert(x)||, so store it
+            # as is. Dividing by g first overflowed fp16 on 366 picks in layers 37-39 of the first
+            # saliency trace (2026-09-13) -- the deep layers' small gate weights, not large outputs.
+            out_norms[idx, top] = contrib.norm(dim=-1)
     if record_norms is not None:
         record_norms(out_norms)
     out += expert_ffn(y, w.sh_w1, w.sh_w2, w.sh_w3, args.swiglu_limit).float()

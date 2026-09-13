@@ -205,14 +205,13 @@ def main():
                 rec_cat.extend([s["category"]] * indices.size(0))
                 rec_tok.extend(s["ids"])
 
-            def record_norms(out_norms):
-                # fp16, like `weights`: these are ranked per layer and summed over thousands of
-                # tokens, so three decimal digits are far more than the ranking can use, and the
-                # array is the same size as `indices`. Counted, not clamped, if any norm leaves
-                # fp16's range -- a saturated value would quietly distort the sum it lands in.
-                half = out_norms.to(torch.float16).cpu().numpy()
-                big_norm[0] += int((~np.isfinite(half)).sum())   # counted host-side: one sync, not two
-                rec_norm.append(half)
+            def record_norms(contrib_norms):
+                # fp32: [tokens, topk] x 4 bytes is a few KB a sequence, and the first fp16 attempt
+                # overflowed on 366 picks in the deepest three layers (2026-09-13). Still counted if
+                # anything is non-finite, so a broken layer is named rather than summed in silence.
+                arr = contrib_norms.to(torch.float32).cpu().numpy()
+                big_norm[0] += int((~np.isfinite(arr)).sum())
+                rec_norm.append(arr)
 
             R.block_forward(st, w, experts, args, expert_cache, record, record_norms)
         n_uniq = len(expert_cache)
@@ -220,14 +219,14 @@ def main():
         torch.cuda.empty_cache() if dev.startswith("cuda") else None
 
         if big_norm[0]:
-            log(f"layer {L}: WARNING {big_norm[0]} expert-output norms overflowed fp16; "
-                f"their saliency is inf and the layer's ranking cannot be trusted")
+            log(f"layer {L}: WARNING {big_norm[0]} contribution norms are not finite; "
+                f"the layer's saliency ranking cannot be trusted")
         np.savez_compressed(os.path.join(a.out, "trace", f"layer{L}.npz"),
                             indices=np.concatenate(rec_idx), weights=np.concatenate(rec_w),
-                            # [tokens, topk], aligned with `indices`: ||expert_e(x_t)|| before the
-                            # gate weight. weight * out_norm is REAP's saliency (arXiv 2510.13999),
-                            # which tools/expert_stats.py sums into `saliency_<topic>`.
-                            out_norms=np.concatenate(rec_norm),
+                            # [tokens, topk], aligned with `indices`: ||gate_weight * expert_e(x_t)||,
+                            # REAP's saliency per pick (arXiv 2510.13999), which
+                            # tools/expert_stats.py sums into `saliency_<topic>`.
+                            contrib_norms=np.concatenate(rec_norm),
                             scores=(np.concatenate(rec_scores) if a.save_scores else np.zeros(0, np.float16)),
                             category=np.array(rec_cat), token=np.array(rec_tok, dtype=np.int32))
         torch.save({"layer": L, "states": [{"h": st.h.cpu(), "pre_mix": st.pre_mix.cpu(),

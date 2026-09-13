@@ -42,14 +42,27 @@ def load(trace_dir: str):
         d = {"idx": z["indices"].astype(np.int64), "w": z["weights"].astype(np.float32), "cat": z["category"]}
         # `out_norms` arrived with the saliency tracer (2026-09-13). A trace taken before it has
         # every other array and must still process: the layer simply gets no saliency histogram.
-        if "out_norms" in z.files and z["out_norms"].shape == d["idx"].shape:
-            d["norm"] = z["out_norms"].astype(np.float32)
+        if "contrib_norms" in z.files and z["contrib_norms"].shape == d["idx"].shape:
+            # gate_weight * ||expert(x)||, stored bounded and in fp32 since 2026-09-13
+            d["sal"] = z["contrib_norms"].astype(np.float32)
+        elif "out_norms" in z.files and z["out_norms"].shape == d["idx"].shape:
+            # The first saliency tracer stored ||expert(x)|| = ||contrib|| / weight in fp16, which
+            # overflowed on a few hundred picks in the deepest layers. weight * out_norm recovers
+            # ||contrib|| where it is finite; where it is not, the pick is clamped to the layer's
+            # largest finite contribution and counted, so a keep-set can still be built from the
+            # trace while the number of clamped picks stays on the record.
+            sal = d["w"] * z["out_norms"].astype(np.float32)
+            bad = ~np.isfinite(sal)
+            if bad.any():
+                sal[bad] = sal[~bad].max() if (~bad).any() else 0.0
+                d["clamped"] = int(bad.sum())
+            d["sal"] = sal
         layers[L] = d
     meta = json.load(open(os.path.join(trace_dir, "meta.json")))
     return layers, meta
 
 
-def saliency_hist(idx: np.ndarray, w: np.ndarray, norm: np.ndarray) -> np.ndarray:
+def saliency_hist(idx: np.ndarray, sal: np.ndarray) -> np.ndarray:
     """REAP's saliency (Lasby et al., Cerebras, ICLR 2026, arXiv 2510.13999) as a 384-wide
     histogram: for expert e, the total of `gate_weight(t, e) * ||expert_e(x_t)||` over the tokens
     routed to it -- the magnitude it actually contributed to the residual stream.
@@ -68,7 +81,7 @@ def saliency_hist(idx: np.ndarray, w: np.ndarray, norm: np.ndarray) -> np.ndarra
     loss-free routing, the same shape as this model -- and found frequency-based pruning collapses
     (LiveCodeBench 0.434 -> 0.082 at 75 % kept, 0.000 at 50 %) where saliency holds (0.440/0.429).
     """
-    return np.bincount(idx.reshape(-1), weights=(w * norm).reshape(-1), minlength=N_EXP)
+    return np.bincount(idx.reshape(-1), weights=sal.reshape(-1), minlength=N_EXP)
 
 
 def coverage_curve(counts: np.ndarray):
@@ -126,9 +139,9 @@ def main():
 
     per_layer = {}
     glob_counts = {}
-    no_norms = [L for L in Ls if "norm" not in layers[L]]
+    no_norms = [L for L in Ls if "sal" not in layers[L]]
     if no_norms:
-        print(f"note: {len(no_norms)} of {len(Ls)} layers carry no `out_norms` (layers "
+        print(f"note: {len(no_norms)} of {len(Ls)} layers carry no `contrib_norms`/`out_norms` (layers "
               f"{no_norms[0]}-{no_norms[-1]}): they were traced before tools/expert_trace.py "
               f"recorded expert-output norms, so they get no saliency_* histogram and "
               f"DSV41_PRUNE_SOURCE=saliency will refuse this file. Re-trace to use it.")
@@ -144,17 +157,19 @@ def main():
         # block uniqueness (union over 6 consecutive tokens)
         bl = [len(np.unique(idx[t:t + 6])) for t in range(0, n_tok - 5, 6)]
         per_layer[L]["block6_unique_mean"] = float(np.mean(bl))
-        nrm = layers[L].get("norm")
+        nrm = layers[L].get("sal")
+        if layers[L].get("clamped"):
+            per_layer[L]["saliency_clamped_picks"] = layers[L]["clamped"]
         if nrm is not None:
             # The mixed histogram, next to `counts`: what the whole corpus's routing contributed.
-            per_layer[L]["saliency"] = saliency_hist(idx, layers[L]["w"], nrm)
+            per_layer[L]["saliency"] = saliency_hist(idx, nrm)
         for c in cats:
             m = layers[L]["cat"] == c
             cat_counts = np.bincount(idx[m].reshape(-1), minlength=N_EXP)
             if nrm is not None:
                 # One per topic, next to counts_<topic> and read the same way: the engine's
                 # DSV41_PRUNE_SOURCE picks which of the two families ranks the keep-set.
-                per_layer[L][f"saliency_{c}"] = saliency_hist(idx[m], layers[L]["w"][m], nrm[m])
+                per_layer[L][f"saliency_{c}"] = saliency_hist(idx[m], nrm[m])
             # the histogram itself, not just its coverage curve: the engine's pruned mode ranks
             # experts per category, and reading it from here means a checkout does not need the
             # raw per-layer trace arrays (tens of MB) to reproduce a keep-set.

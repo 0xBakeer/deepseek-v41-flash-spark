@@ -142,7 +142,7 @@ want = np.zeros(N_EXP)
 for t in range(idx.shape[0]):
     for k in range(TOPK):
         want[int(idx[t, k])] += float(w[t, k]) * float(nrm[t, k])
-got = S.saliency_hist(idx.astype(np.int64), w.astype(np.float32), nrm.astype(np.float32))
+got = S.saliency_hist(idx.astype(np.int64), w.astype(np.float32) * nrm.astype(np.float32))
 check("saliency_hist is the token-by-token sum of weight x output norm",
       np.allclose(got, want, rtol=1e-6, atol=1e-9), f"max |diff| {np.abs(got - want).max():.3e}")
 check("  and puts nothing anywhere else",
@@ -169,9 +169,7 @@ check("  writing saliency_<topic> beside counts_<topic>",
 check("  and the mixed saliency histogram", "saliency" in L0 and "counts" in L0)
 check("  the per-topic histogram is the aggregation above",
       np.allclose(np.asarray(L0["saliency_quiet"]),
-                  S.saliency_hist(idx[cat == "quiet"].astype(np.int64),
-                                  w[cat == "quiet"].astype(np.float32),
-                                  nrm[cat == "quiet"].astype(np.float32)), rtol=1e-6, atol=1e-9))
+                  S.saliency_hist(idx[cat == "quiet"].astype(np.int64), w[cat == "quiet"].astype(np.float32) * nrm[cat == "quiet"].astype(np.float32)), rtol=1e-6, atol=1e-9))
 check("  and the mixed one is the topics added up",
       np.allclose(np.asarray(L0["saliency"]),
                   sum(np.asarray(L0[f"saliency_{t}"]) for t in TOPIC_SPEC), rtol=1e-6, atol=1e-9))
