@@ -91,3 +91,37 @@ This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no p
 **Verdict: FAIL** — 3 of 10 runs failed: `yaml-anchors` (on) reasoning loops 6x on 'service_role: shared x-common-healthcheck: &common-healt'; `js-debounce` (on) reasoning loops 3x on 'function debounced(...args) { lastargs = args; lastthis '; `ts-groupby` (on) finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 17x on 'must be a property of the element type whose value is a'
 
 This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-14 01:22
+
+| | |
+|---|---|
+| profile | Frontend |
+| topics | html, css, javascript, typescript, english, technical, config, reasoning, reasoning_code, reasoning_design |
+| prompts | 10 runs over 10 prompts |
+| thinking | on |
+| reasoning effort | 45 |
+| max tokens | 16,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| no prompts for | reasoning, reasoning_code, reasoning_design — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `yaml-anchors` | on | stop | 5,919 | 2,341 | 105 | PASS | 31 keys, anchored |
+| `css-card` | on | stop | 12,190 | 1,946 | 192 | PASS | 45 declarations, 0 empty rules |
+| `en-explain` | on | stop | 5,099 | 1,035 | 100 | PASS | 2 paragraphs, 11 sentences |
+| `en-note` | on | stop | 12,893 | 1,165 | 171 | **FAIL** | repeat: reasoning loops 4x on 'symptom was, and what has to be true before it goes out' — the answer itself is sound (3 paragraphs, 7 sentences) |
+| `html-page` | on | stop | 6,982 | 4,152 | 141 | PASS | 62 declarations, 15 functions, 0 empty rules |
+| `js-debounce` | on | stop | 15,284 | 1,820 | 230 | **FAIL** | repeat: reasoning loops 3x on 'function debounce(fn, wait) { let timerid = null; let la' — the answer itself is sound (11 callables) |
+| `tech-explain` | on | stop | 8,143 | 1,532 | 163 | PASS | 2 paragraphs, 10 sentences |
+| `ts-groupby` | on | stop | 11,772 | 1,292 | 185 | **FAIL** | reasoning loops 4x on 'record<string, t[]> = {}; for (const item of items) { co' |
+| `reason-bat-ball` | on | stop | 949 | 450 | 26 | PASS | says 0.05 |
+| `reason-machines` | on | stop | 956 | 323 | 23 | PASS | says 5 minutes |
+
+**Verdict: FAIL** — 3 of 10 runs failed: `en-note` (on) repeat: reasoning loops 4x on 'symptom was, and what has to be true before it goes out' — the answer itself is sound (3 paragraphs, 7 sentences); `js-debounce` (on) repeat: reasoning loops 3x on 'function debounce(fn, wait) { let timerid = null; let la' — the answer itself is sound (11 callables); `ts-groupby` (on) reasoning loops 4x on 'record<string, t[]> = {}; for (const item of items) { co'
+
+9 of 10 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 0, guard 0, corrupt 0, content 1, repeat 2.
+
+This run gated 7 of the profile's 10 topics; reasoning, reasoning_code, reasoning_design carry no prompt, so a pass says nothing about them.
