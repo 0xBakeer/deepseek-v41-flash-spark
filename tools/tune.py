@@ -75,7 +75,7 @@ PROFILES = [
     # Under maxmin the two cost the other topics about 0.01 of coverage each.
     ("Frontend", "HTML, CSS, JavaScript, TypeScript, config, and the English around them",
      ["html", "css", "javascript", "typescript", "english", "technical", "config",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_design"], False, "maxmin"),
     ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
      ["python", "go", "java", "sql", "config", "technical", "english",
       "reasoning", "reasoning_code"], False, "maxmin"),
@@ -97,12 +97,16 @@ PROFILES = [
       "reasoning", "reasoning_code"], False, "maxmin"),
     # "Many languages" carried fourteen topics and passed 2 of 15 on its gate (2026-09-13) --
     # every natural-language prompt failed. Split by script family into two profiles of nine.
+    # With thinking off every one of these languages came out clean on the same keep-set; with it
+    # on, French, German, Chinese and Japanese corrupted a word and looped. The catalogue's
+    # deliberation was English-only, so `reasoning_lang` -- thinking IN the language -- is the
+    # topic that closes that gap (2026-09-14).
     ("European languages", "English, German, French, Spanish, Italian, Portuguese, translation",
      ["english", "german", "french", "spanish", "italian", "portuguese", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_lang"], False, "maxmin"),
     ("World languages", "English, Arabic, Chinese, Japanese, Russian, Turkish, translation",
      ["english", "arabic", "chinese", "japanese", "russian", "turkish", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_lang"], False, "maxmin"),
     ("Writing", "Journalism, marketing copy, essays, translation",
      ["english", "journalism", "marketing", "academic", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),
