@@ -19,9 +19,11 @@ Contract (see ``Engine``):
   instead -- ``GeneratorExit`` is raised at the pending ``yield`` -- so
   cache/arena cleanup belongs in a ``try/finally`` around the decode loop and
   the engine must be ready for the next request afterwards.
-* Optional ``grammar`` keyword: a decoding gate, passed only to an engine whose
-  ``supports_grammar`` is true and only when the request carries tools. The
-  engine owes it two calls, and nothing else:
+* Optional ``grammar`` keyword: a decoding gate, passed to any engine whose
+  ``supports_grammar`` is true. A request that carries tools gets the tool-call
+  grammar; one that does not gets the plain-text gate, which only keeps the DSML
+  bar out of a completion that has no legal use for it. The engine owes the gate
+  two calls, and nothing else:
 
       ``gate.observe(ids)``      every token the loop has settled on, in order,
                                  once (a burst at a time is fine).
@@ -40,8 +42,10 @@ Contract (see ``Engine``):
                                  masked out of its own row and is therefore
                                  rejected there.
 
-  The gate masks nothing until the model opens a tool-calls block, so an engine
-  may call both unconditionally. ``server/tool_grammar.py`` implements it.
+  The tool-call gate masks nothing until the model opens a tool-calls block
+  (beyond one token that has no legal use outside it), and the plain-text gate
+  masks that one token, so an engine may call both unconditionally.
+  ``server/tool_grammar.py`` implements them.
 * Optional ``context_margin`` (int, default 8 as read by the server): tokens
   the engine needs beyond ``len(prompt_ids) + max_tokens`` (DSpark draft
   block); the server clamps ``max_tokens`` so that

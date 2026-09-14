@@ -37,9 +37,28 @@ Three things make the grammar small and unambiguous:
   matcher allows exactly one thing: the end-of-turn token. That is what stops
   the spiral.
 
+There is one boundary the grammar alone cannot settle, and three rules here that
+do. ``</`` is a single token, it is legal value text (an HTML close tag), and it
+is also the first token of ``</｜DSML｜ parameter>``; once it has been emitted
+the DSML bar is a legal continuation, and a model whose router is under pressure
+sometimes takes it -- closing the parameter in the middle of the file it was
+writing, or, with no tool call in sight at all, leaving a stray tag in ordinary
+prose. So, on top of the grammar:
+
+1. **Inside a parameter value**: after a ``</``, the bar is masked while the
+   value looks like unbalanced markup (see :func:`markup_unbalanced`) and the
+   character before the ``</`` is not a newline. Text that has genuinely
+   finished a file ends the last line and closes on the next one, so the rule
+   cannot trap a legitimate close; ``…Hamburg</`` with an open ``<title>`` is an
+   HTML close tag and nothing else.
+2. **Outside the block, with tools in the request**: the bar may only follow the
+   ``<`` that opens the calls block, and is masked after anything else.
+3. **With no tools at all** (:class:`PlainTextGate`): the bar has no legal use
+   in the completion, and is masked everywhere.
+
 Nothing here is engine-specific: the engine sees an object with ``observe`` and
-``mask_rows`` (see ``server/engine_api.py``), and when a request has no tools it
-gets ``None`` and nothing changes.
+``mask_rows`` (see ``server/engine_api.py``), and a request with no tools gets
+the plain-text gate of rule 3.
 """
 
 from __future__ import annotations
@@ -47,6 +66,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict, deque
 from typing import Any, Dict, List, Optional, Sequence
@@ -294,6 +314,115 @@ def build_tool_grammar(tools: Sequence[Dict[str, Any]], *,
 
 
 # --------------------------------------------------------------------------
+# The `</` boundary: markup balance and where the decoded text is
+# --------------------------------------------------------------------------
+
+NEG_INF = float("-inf")
+
+BAR = "｜"        # U+FF5C, the one character every DSML token carries
+CLOSE_PREFIX = "</"
+
+#: elements that are closed by the tag itself and never by a `</name>`
+_VOID_ELEMENTS = frozenset(
+    "area base br col embed hr img input link meta param source track wbr".split())
+#: any one of these says "this value is a markup document", on its own
+_MARKUP_HINTS = ("<!doctype", "<html", "<?xml", "<svg")
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+#: `<name ...>`, `</name>` or `<name .../>`. Attributes stop at the first `>`, so an
+#: unquoted `>` inside one splits a tag in two -- see the heuristic note below.
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9:._-]*)([^<>]*?)(/?)>", re.DOTALL)
+
+
+def markup_unbalanced(value: str) -> bool:
+    """Does ``value`` read as markup with more elements opened than closed?
+
+    True when the text looks like markup at all -- a doctype, an ``<html>``,
+    ``<?xml``, ``<svg``, or at least two distinct tag names -- *and* the number
+    of openers that still owe a closing tag (so: not ``<name/>``, not a void
+    element, not inside a ``<!-- -->`` comment) is greater than the number of
+    ``</name`` closers.
+
+    This is a heuristic on purpose. Tags are found with one regex, so an
+    unquoted ``>`` inside an attribute, or a tag written across a comment
+    boundary, can be miscounted. It is only ever asked whether a close tag has
+    to wait for a newline, so a wrong "unbalanced" costs one newline and a wrong
+    "balanced" leaves things exactly as they were.
+    """
+    if "<" not in value:
+        return False
+    text = _COMMENT_RE.sub(" ", value)
+    opened = closed = 0
+    names = set()
+    for m in _TAG_RE.finditer(text):
+        name = m.group(2).lower()
+        names.add(name)
+        if m.group(1):                                  # </name>
+            closed += 1
+        elif m.group(4) or name in _VOID_ELEMENTS:      # <name/> or a void element
+            continue
+        else:
+            opened += 1
+    if opened <= closed:
+        return False
+    return len(names) >= 2 or any(h in text.lower() for h in _MARKUP_HINTS)
+
+
+class _ValueTracker:
+    """Follows the decoded text of the calls block: in a parameter value, or not.
+
+    A value starts right after the ``string="true">`` / ``string="false">`` that
+    ends a parameter opening tag -- a parameter name can hold neither a quote nor
+    U+FF5C, so those two strings occur nowhere else in the block's structure --
+    and it ends at the first U+FF5C, which cannot occur in a value at all (see
+    ``VALUE_CHAR``) and is therefore always the closing tag.
+
+    Only the current value's text is kept, in chunks; ``mark``/``restore`` make a
+    speculative walk over a draft block cheap (append, look, truncate).
+    """
+
+    __slots__ = ("in_value", "chunks", "win")
+
+    OPENERS = ('string="true">', 'string="false">')
+    _WIN = max(len(o) for o in OPENERS)
+
+    def __init__(self) -> None:
+        self.in_value = False
+        self.chunks: List[str] = []
+        self.win = ""
+
+    def feed(self, s: str) -> None:
+        i, n = 0, len(s)
+        while i < n:
+            if self.in_value:
+                j = s.find(BAR, i)
+                if j < 0:
+                    self.chunks.append(s[i:])
+                    return
+                # the bar can only be the closing tag: the value ends here
+                self.in_value = False
+                self.chunks = []          # a new list: an outstanding mark keeps the old one
+                self.win = ""
+                i = j + 1
+            else:
+                ch = s[i]
+                i += 1
+                self.win = (self.win + ch)[-self._WIN:]
+                if self.win.endswith(self.OPENERS):
+                    self.in_value = True
+                    self.chunks = []
+
+    def text(self) -> str:
+        return "".join(self.chunks)
+
+    def mark(self):
+        return (self.in_value, self.chunks, len(self.chunks), self.win)
+
+    def restore(self, mark) -> None:
+        self.in_value, self.chunks, n, self.win = mark
+        del self.chunks[n:]
+
+
+# --------------------------------------------------------------------------
 # The gate the engine sees
 # --------------------------------------------------------------------------
 
@@ -318,7 +447,9 @@ class ToolCallGrammar:
 
     def __init__(self, compiled, *, xgr, torch, eos_id: int, vocab_size: int,
                  decode, marker: str = TOOL_CALLS_MARKER, window: int = 64,
-                 max_rollback: int = 16, use_traverse: bool = True) -> None:
+                 max_rollback: int = 16, use_traverse: bool = True,
+                 bar_id: Optional[int] = None, close_prefix_id: Optional[int] = None,
+                 lt_ids: Sequence[int] = ()) -> None:
         self._compiled = compiled
         self._xgr = xgr
         self._torch = torch
@@ -336,8 +467,16 @@ class ToolCallGrammar:
         self._bitmask_dev = None
         self._tree = {}
         self._block_cpu = None
+        # the three ids the `</` rules need; None anywhere turns those rules off
+        self._bar_id = bar_id
+        self._close_prefix_id = close_prefix_id
+        self._lt_ids = frozenset(int(i) for i in lt_ids)
+        self._lt_tensor = {}          # device -> tensor of _lt_ids
+        self._value = _ValueTracker()
+        self._last_token: Optional[int] = None
         self.stats = {"activated": False, "mask_calls": 0, "mask_s": 0.0,
-                      "masked_rows": 0, "accept_fail": 0}
+                      "masked_rows": 0, "accept_fail": 0,
+                      "value_guard_masked": 0, "idle_masked": 0}
 
     # -- state ----------------------------------------------------------
     @property
@@ -366,12 +505,16 @@ class ToolCallGrammar:
             self._failed = True
             return
         self._matcher = m
+        self._value.feed(seed)
         self.stats["activated"] = True
         log.info("tool grammar active (seeded with %d chars)", len(seed))
 
     def observe(self, token_ids: Sequence[int]) -> None:
         """Take the tokens that are now final, in order."""
-        if self._failed or not token_ids:
+        if not token_ids:
+            return
+        self._last_token = int(token_ids[-1])
+        if self._failed:
             return
         if self._matcher is None:
             self._recent.extend(token_ids)
@@ -385,9 +528,10 @@ class ToolCallGrammar:
             if pos >= 0:
                 self._activate(tail[pos:])
             return
+        taken = 0
         for t in token_ids:
             if self._matcher.is_terminated():
-                return
+                break
             if not self._matcher.accept_token(int(t)):
                 # The mask should have made this impossible; if it happens the
                 # grammar is out of step with the stream and the honest move is
@@ -395,7 +539,22 @@ class ToolCallGrammar:
                 self.stats["accept_fail"] += 1
                 log.warning("tool grammar rejected an emitted token (%d); constraint dropped", int(t))
                 self._failed = True
-                return
+                break
+            taken += 1
+        if taken:
+            # the value guard reads this text; decoding a whole burst at once keeps
+            # multi-byte characters together and costs one detokenizer call per step
+            self._feed_text(list(token_ids)[:taken])
+
+    def _feed_text(self, ids: Sequence[int]) -> None:
+        """Append the decoded text of ``ids`` to the tracked block text."""
+        if self._bar_id is None:
+            return                      # the `</` rules are off; the text is not needed
+        try:
+            self._value.feed(self._decode(list(ids)))
+        except Exception as e:  # noqa: BLE001 - a detokenizer hiccup only costs the guard
+            log.warning("close-tag guard detokenize failed (%s); guard off for this request", e)
+            self._bar_id = None
 
     # -- masking --------------------------------------------------------
     def _stage(self, rows: int, device):
@@ -433,7 +592,7 @@ class ToolCallGrammar:
         never reads past the rejection point.
         """
         if not self.active:
-            return 0
+            return self._mask_idle(logits, block_ids)
         try:
             return self._mask_rows(logits, block_ids)
         except Exception as e:  # noqa: BLE001
@@ -446,6 +605,95 @@ class ToolCallGrammar:
             log.warning("tool grammar masking failed (%s); constraint dropped for this request", e)
             return 0
 
+    def _mask_idle(self, logits, block_ids) -> int:
+        """Rule 2: outside the block, U+FF5C may only follow the `<` that opens it.
+
+        The bar has exactly one legal use in a completion with tools -- the
+        ``<`` + ``｜DSML｜`` that starts the calls block -- so after any other
+        token it is a slip, and that slip is how ``</｜DSML｜ parameter>`` ends
+        up in ordinary prose. Only before the block: once the matcher exists the
+        grammar owns the distribution, and if it was dropped mid-block masking
+        the bar would take the closing tags with it.
+
+        Rows are checked on the device the logits live on, so the hot path adds
+        no host synchronisation. The count returned is the rows examined.
+        """
+        if (self._bar_id is None or self._matcher is not None or self._failed
+                or not self._lt_ids):
+            return 0
+        try:
+            view = logits if logits.dim() > 1 else logits.unsqueeze(0)
+            rows = int(view.shape[0])
+            col = view[:, self._bar_id]
+            if block_ids is None or rows == 1:
+                prev = self._last_token
+                if prev is not None and prev in self._lt_ids:
+                    return 0
+                col[:1] = NEG_INF
+                rows = 1
+            elif hasattr(block_ids, "reshape"):
+                ids = block_ids.reshape(-1)[:rows]
+                col.masked_fill_(~self._allowed_prev(ids, view.device), NEG_INF)
+            else:
+                prev = [int(t) for t in list(block_ids)[:rows]]
+                for i, t in enumerate(prev):
+                    if t not in self._lt_ids:
+                        col[i] = NEG_INF
+            # counted apart from the grammar's own masks, whose mask_s this is not
+            self.stats["idle_masked"] += rows
+            return rows
+        except Exception as e:  # noqa: BLE001 - never break decoding over the guard
+            self._bar_id = None
+            self.stats["error"] = f"{type(e).__name__}: {e}"
+            log.warning("idle bar mask failed (%s); rule dropped for this request", e)
+            return 0
+
+    def _allowed_prev(self, ids, device):
+        """[R] bool: is each preceding token one that may be followed by the bar?"""
+        t = self._lt_tensor.get(device)
+        if t is None:
+            t = self._torch.tensor(sorted(self._lt_ids), dtype=self._torch.int64,
+                                   device=device)
+            self._lt_tensor[device] = t
+        return (ids.reshape(-1, 1) == t.reshape(1, -1)).any(1)
+
+    def _value_guard(self, view, ids, rows) -> None:
+        """Rule 1: after a `</` in unbalanced markup, the bar cannot close the value.
+
+        ``ids[i]`` is the token row i follows (``self._last_token`` for a plain
+        single-row step), so the value text row i sees is what has been observed
+        plus the drafts ``ids[1..i]``; the tracker walks them and is put back
+        where it was. The newline in front of the ``</`` is the safety valve: a
+        value that has finished the file ends its last line and closes on the
+        next one, so a real parameter close is never masked.
+        """
+        if self._bar_id is None or self._close_prefix_id is None:
+            return
+        if ids is None:
+            if self._last_token != self._close_prefix_id:
+                return
+        elif not any(int(t) == self._close_prefix_id for t in ids[:rows]):
+            return                      # nothing in this block is a `</`: nothing to guard
+        mark = self._value.mark()
+        try:
+            for i in range(rows):
+                prev = self._last_token if ids is None else int(ids[i])
+                if i:
+                    self._value.feed(self._decode([prev]))
+                if prev != self._close_prefix_id or not self._value.in_value:
+                    continue
+                value = self._value.text()
+                if not value.endswith(CLOSE_PREFIX):
+                    continue
+                if len(value) >= 3 and value[-3] == "\n":
+                    continue            # a finished file closes on the next line
+                if not markup_unbalanced(value):
+                    continue
+                view[i, self._bar_id] = NEG_INF
+                self.stats["value_guard_masked"] += 1
+        finally:
+            self._value.restore(mark)
+
     def _mask_rows(self, logits, block_ids) -> int:
         t0 = time.perf_counter()
         xgr, torch = self._xgr, self._torch
@@ -454,6 +702,7 @@ class ToolCallGrammar:
             logits = logits.unsqueeze(0)
         bitmask = self._stage(rows, logits.device)
 
+        ids = None
         if rows == 1 or block_ids is None:
             rows = 1
             self._matcher.fill_next_token_bitmask(bitmask, 0)
@@ -493,6 +742,51 @@ class ToolCallGrammar:
             self._bitmask_dev[:rows].copy_(bitmask[:rows])
             dev_mask = self._bitmask_dev
         xgr.apply_token_bitmask_inplace(logits[:rows], dev_mask[:rows], vocab_size=self._vocab)
+        # ... and then rule 1, which the grammar cannot express: the bar is legal
+        # after a `</` inside a value, and that is exactly the drift being fixed.
+        self._value_guard(logits, ids, rows)
+        self.stats["mask_calls"] += 1
+        self.stats["masked_rows"] += rows
+        self.stats["mask_s"] += time.perf_counter() - t0
+        return rows
+
+
+class PlainTextGate:
+    """Rule 3: a request with no tools, where the DSML bar has no legal use.
+
+    Nothing the model may write in such a completion contains U+FF5C: there is
+    no calls block to open, so every occurrence of the bar is the same router
+    slip that leaks ``</｜DSML｜ parameter>`` into a page title. The gate keeps
+    no state -- it masks one column of every row it is handed -- and is shaped
+    like :class:`ToolCallGrammar` so the engine cannot tell them apart.
+    """
+
+    #: there is no grammar in force; the engine uses this to skip its own work
+    active = False
+
+    def __init__(self, bar_id: int) -> None:
+        self._bar_id = int(bar_id)
+        self.stats = {"plain": True, "mask_calls": 0, "mask_s": 0.0, "masked_rows": 0}
+
+    def observe(self, token_ids: Sequence[int]) -> None:
+        """Nothing to follow: the gate has no state."""
+
+    def mask_rows(self, logits, block_ids=None) -> int:
+        if self._bar_id is None:
+            return 0
+        t0 = time.perf_counter()
+        try:
+            if logits.dim() > 1:
+                rows = int(logits.shape[0])
+                logits[:, self._bar_id] = NEG_INF
+            else:
+                rows = 1
+                logits[self._bar_id] = NEG_INF
+        except Exception as e:  # noqa: BLE001 - losing the mask beats killing the request
+            self._bar_id = None
+            self.stats["error"] = f"{type(e).__name__}: {e}"
+            log.warning("plain-text bar mask failed (%s); dropped for this request", e)
+            return 0
         self.stats["mask_calls"] += 1
         self.stats["masked_rows"] += rows
         self.stats["mask_s"] += time.perf_counter() - t0
@@ -527,12 +821,55 @@ class ToolGrammarFactory:
         self._cache: "OrderedDict[str, Any]" = OrderedDict()
         self._cache_size = cache_size
 
+        # The three ids rules 1-3 are written in terms of. All three have to be
+        # single tokens for the rules to mean what they say; if any is not, the
+        # rules are off and the grammar alone does the work.
+        self.bar_id = self._one_id(tok, DSML)
+        self.close_prefix_id = self._one_id(tok, CLOSE_PREFIX)
+        self.lt_id = self._one_id(tok, "<")
+        self.lt_ids = self._lt_prefix_ids(tok)
+        if self.bar_id is None or self.close_prefix_id is None or not self.lt_ids:
+            log.warning("close-tag guard off: %r, %r and %r are not all single tokens "
+                        "in this tokenizer", DSML, CLOSE_PREFIX, "<")
+            self.bar_id = self.close_prefix_id = None
+            self.lt_ids = frozenset()
+
         vocab = self._encoded_vocab(tok)
         self._vocab_size = len(vocab)
         self._info = xgr.TokenizerInfo(vocab, xgr.VocabType.BYTE_LEVEL,
                                        vocab_size=self._vocab_size, stop_token_ids=[eos_id])
         self._compiler = xgr.GrammarCompiler(self._info, max_threads=8)
         self.compile_s = 0.0
+
+    @staticmethod
+    def _one_id(tok, text: str) -> Optional[int]:
+        """The id of ``text`` when the tokenizer spells it with exactly one token."""
+        try:
+            ids = list(tok.encode(text))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not encode %r: %s", text, e)
+            return None
+        return int(ids[0]) if len(ids) == 1 else None
+
+    @staticmethod
+    def _lt_prefix_ids(tok) -> frozenset:
+        """Ids whose text ends in ``<``: the only tokens the bar may follow.
+
+        ``<`` is a token of its own, but the calls block opens on its own line
+        and a tokenizer that merges the newlines into it would put a different
+        id in front of the bar. Ask the tokenizer how it spells each shape the
+        marker can start with, and keep the last id of each when its text really
+        does end in ``<``.
+        """
+        out = set()
+        for prefix in ("<", " <", "\n<", "\n\n<", "\n\n\n<", ">\n<"):
+            try:
+                ids = list(tok.encode(prefix))
+                if ids and tok.decode([int(ids[-1])]).endswith("<"):
+                    out.add(int(ids[-1]))
+            except Exception:  # noqa: BLE001 - a shape the tokenizer dislikes is not fatal
+                continue
+        return frozenset(out)
 
     @staticmethod
     def _encoded_vocab(tok) -> List[str]:
@@ -592,7 +929,18 @@ class ToolGrammarFactory:
             log.info("tool grammar:\n%s", ebnf)
         return ToolCallGrammar(cg, xgr=self._xgr, torch=self._torch, eos_id=self._eos_id,
                                vocab_size=self._vocab_size, decode=self._tok.decode,
-                               use_traverse=self._use_traverse)
+                               use_traverse=self._use_traverse, bar_id=self.bar_id,
+                               close_prefix_id=self.close_prefix_id, lt_ids=self.lt_ids)
+
+    def plain(self) -> Optional[PlainTextGate]:
+        """A gate for a request that carries no tools at all (rule 3).
+
+        None when the DSML bar is not a single token, in which case there is
+        nothing to mask and decoding is left alone.
+        """
+        if self.bar_id is None:
+            return None
+        return PlainTextGate(self.bar_id)
 
 
 def make_factory(tok, eos_id: int, *, enabled: bool = True, **kw) -> Optional[ToolGrammarFactory]:

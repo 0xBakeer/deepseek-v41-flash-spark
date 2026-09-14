@@ -515,10 +515,16 @@ class State:
             if pen.active:
                 gen_kwargs["penalties"] = pen
         # The gate constrains nothing until the model opens a tool-calls block, so it costs a
-        # dictionary lookup per step on a request that never calls a tool.
+        # dictionary lookup per step on a request that never calls a tool. A request with no
+        # tools (or with tool-call detection off) gets the plain-text gate instead: there is no
+        # block it could legally open, so the DSML bar has no legal use in its completion at all
+        # and a drifting router cannot leak a DSML tag into the text.
         gate = None
-        if tools and detect_tool_calls and self.grammars is not None and sampling["tool_grammar"]:
-            gate = self.grammars.for_tools(tools)
+        if self.grammars is not None and sampling["tool_grammar"]:
+            if tools and detect_tool_calls:
+                gate = self.grammars.for_tools(tools)
+            else:
+                gate = self.grammars.plain()
         if gate is not None:
             gen_kwargs["grammar"] = gate
         if ignore_eos:

@@ -26,8 +26,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from tool_grammar import (  # noqa: E402
-    BLOCK_CLOSE, TOOL_CALLS_MARKER, ToolCallGrammar, ToolGrammarFactory,
-    build_tool_grammar, dsml_safe,
+    BLOCK_CLOSE, NEG_INF, TOOL_CALLS_MARKER, PlainTextGate, ToolCallGrammar,
+    ToolGrammarFactory, _ValueTracker, build_tool_grammar, dsml_safe,
+    markup_unbalanced,
 )
 
 D = "｜DSML｜"
@@ -216,6 +217,100 @@ def test_builder_flat_and_openai_shapes():
 
 
 # ---------------------------------------------------------------------------
+# the `</` boundary: markup balance, the value tracker, the plain-text gate
+# ---------------------------------------------------------------------------
+
+PAGE = ('<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<title>Lumen</title>\n</head>\n<body>\n<img src="a.png">\n'
+        '<p>Hamburg</p>\n</body>\n</html>\n')
+
+
+def test_markup_balanced_page_is_balanced():
+    assert markup_unbalanced(PAGE) is False
+    # ... and every prefix that still owes a closing tag is not
+    assert markup_unbalanced(PAGE[:PAGE.index("Lumen") + len("Lumen")]) is True
+
+
+def test_markup_void_and_self_closing_elements_do_not_count():
+    assert markup_unbalanced('<div><br><img src="x"><hr></div>') is False
+    assert markup_unbalanced('<svg><circle r="1"/><rect x="0"/></svg>') is False
+    assert markup_unbalanced("<div><br><span>") is True
+
+
+def test_markup_comments_are_not_tags():
+    assert markup_unbalanced("<html><body><!-- <div><div><div> --></body></html>") is False
+
+
+def test_markup_needs_to_look_like_markup_at_all():
+    for value in ["",
+                  "just a sentence about a < b and c > d",
+                  '{"a": 1, "b": "<3", "c": [1, 2]}',
+                  "def f(x):\n    return x < 3 and x > 1\n",
+                  "<p>one paragraph</p>",
+                  "<div>one tag name is not a document"]:
+        assert markup_unbalanced(value) is False, value
+    # a single tag name is enough when it is the document element itself
+    assert markup_unbalanced("<html>and then nothing") is True
+
+
+def test_value_tracker_follows_the_value():
+    t = _ValueTracker()
+    t.feed(TOOL_CALLS_MARKER + f'>\n<{D} invoke name="w">\n<{D} parameter name="q" string="true">')
+    assert t.in_value and t.text() == ""
+    t.feed("<title>Lumen</")
+    assert t.text() == "<title>Lumen</"
+    mark = t.mark()                      # a speculative walk over drafts ...
+    t.feed("title></head>")
+    assert t.text() == "<title>Lumen</title></head>"
+    t.restore(mark)                      # ... and back where it started
+    assert t.in_value and t.text() == "<title>Lumen</"
+    t.feed(f"{D} parameter>\n")          # the bar can only be the closing tag
+    assert not t.in_value and t.text() == ""
+    t.feed(f'<{D} parameter name="n" string="false">42')
+    assert t.in_value and t.text() == "42"
+
+
+class _FakeLogits:
+    """A [R, V] logits stand-in that records the assignments made to it."""
+
+    def __init__(self, rows: int = 1, cols: int = 256, dims: int = 2) -> None:
+        self.shape = (rows, cols) if dims == 2 else (cols,)
+        self._dims = dims
+        self.assigned = []
+
+    def dim(self):
+        return self._dims
+
+    def __setitem__(self, key, value):
+        self.assigned.append((key, value))
+
+
+def test_plain_text_gate_masks_the_bar_in_every_row():
+    gate = PlainTextGate(128825)
+    assert gate.active is False
+    gate.observe([1, 2, 3])                       # a no-op, and must stay one
+    rows = _FakeLogits(6)
+    assert gate.mask_rows(rows, None) == 6
+    assert rows.assigned == [((slice(None), 128825), NEG_INF)]
+    one = _FakeLogits(1, dims=1)
+    assert gate.mask_rows(one) == 1
+    assert one.assigned == [(128825, NEG_INF)]
+    assert gate.stats["masked_rows"] == 7 and gate.stats["mask_calls"] == 2
+    assert gate.stats["mask_s"] >= 0.0
+
+
+def test_plain_text_gate_drops_itself_rather_than_the_request():
+    class Boom(_FakeLogits):
+        def __setitem__(self, key, value):
+            raise RuntimeError("this tensor does not take assignments")
+
+    gate = PlainTextGate(7)
+    assert gate.mask_rows(Boom(2)) == 0
+    assert "error" in gate.stats
+    assert gate.mask_rows(_FakeLogits(2)) == 0    # and stays off for the rest of the request
+
+
+# ---------------------------------------------------------------------------
 # matcher: what the grammar allows, the checkpoint's parser accepts
 # ---------------------------------------------------------------------------
 
@@ -392,15 +487,20 @@ def test_matcher_bounds_the_number_of_calls():
 # ---------------------------------------------------------------------------
 
 def test_gate_stays_out_of_prose():
+    """The grammar itself never engages on prose -- only rule 2's single column."""
     if env() is None:
         return
+    import torch
     tok, enc, eos, factory = env()
     gate = factory.for_tools(TOOLS)
     prose = "Sure. Let me look that up for you; I will call the search tool now."
     for t in tok.encode(prose):
         gate.observe([t])
         assert not gate.active, "the grammar engaged on ordinary prose"
-    assert gate.mask_rows(_FakeLogits(), None) == 0
+    logits = torch.zeros(1, factory.vocab_size)
+    gate.mask_rows(logits, None)
+    assert int(logits.isinf().sum()) == 1, "an inactive gate masked more than the DSML bar"
+    assert bool(logits[0, factory.bar_id].isinf())
 
 
 def test_gate_activates_on_the_marker_and_tracks_the_block():
@@ -532,12 +632,132 @@ def test_masked_decode_loop_reproduces_a_valid_block():
         assert [c["function"]["name"] for c in parsed["tool_calls"]] == ["web_search", "get_weather"]
 
 
-class _FakeLogits:
-    """Enough of a tensor for the inactive early-out."""
-    shape = (1, 1)
+# ---------------------------------------------------------------------------
+# the `</` boundary, with the real tokenizer behind it
+# ---------------------------------------------------------------------------
 
-    def dim(self):
-        return 2
+VALUE_PAGE = ('<!DOCTYPE html><html><head><title>Lumen</title></head>'
+              '<body><p>Hamburg</p></body></html>\n')
+
+
+def _gate_in_value(factory, tok, value):
+    """A gate that has watched the block opened and `value` written into a parameter."""
+    gate = factory.for_tools(TOOLS)
+    head = (TOOL_CALLS_MARKER + ">\n" + f'<{D} invoke name="web_search">\n'
+            + f'<{D} parameter name="query" string="true">' + value)
+    gate.observe(tok.encode(head))
+    assert gate.active, "the gate did not engage on the marker"
+    return gate
+
+
+def test_the_three_ids_are_single_tokens():
+    if env() is None:
+        return
+    tok, enc, eos, factory = env()
+    assert factory.bar_id is not None, "the DSML bar is not one token; the rules are off"
+    assert factory.close_prefix_id is not None, "`</` is not one token; the rules are off"
+    assert factory.lt_id in factory.lt_ids and factory.lt_ids, factory.lt_ids
+    assert tok.decode([factory.bar_id]) == D
+    assert tok.decode([factory.close_prefix_id]) == "</"
+
+
+def test_guard_masks_the_bar_after_an_unclosed_tag():
+    """`<title>Lumen</` may only continue as an HTML close tag."""
+    if env() is None:
+        return
+    import torch
+    tok, enc, eos, factory = env()
+    bar, close = factory.bar_id, factory.close_prefix_id
+    title = tok.encode("title")
+    gate = _gate_in_value(factory, tok, "<!DOCTYPE html><html><head><title>Lumen")
+    gate.observe([close])
+    logits = torch.zeros(1, factory.vocab_size)
+    gate.mask_rows(logits, None)
+    assert bool(logits[0, bar].isinf()), "the parameter close was reachable mid-document"
+    assert not bool(logits[0, title[0]].isinf()), "the HTML close tag was masked as well"
+    assert gate.stats["value_guard_masked"] == 1, gate.stats
+
+    # the same inside a draft block: row i is guarded against block_ids[i]
+    gate = _gate_in_value(factory, tok, "<!DOCTYPE html><html><head><title>Lumen")
+    ids = torch.tensor([tok.encode("Lumen")[-1], close, title[0]], dtype=torch.int64)
+    logits = torch.zeros(3, factory.vocab_size)
+    gate.mask_rows(logits, ids)
+    assert bool(logits[1, bar].isinf()), "the draft row after `</` was left reachable"
+    assert not bool(logits[1, title[0]].isinf())
+    assert gate.stats["value_guard_masked"] == 1, gate.stats
+    # masking left the gate's own state where it found it
+    assert gate._value.text().endswith("<title>Lumen"), gate._value.text()
+
+
+def test_guard_lets_the_close_through_after_a_newline():
+    """A value that has finished the file closes on the next line, and may."""
+    if env() is None:
+        return
+    import torch
+    tok, enc, eos, factory = env()
+    gate = _gate_in_value(factory, tok, VALUE_PAGE)
+    gate.observe([factory.close_prefix_id])
+    logits = torch.zeros(1, factory.vocab_size)
+    gate.mask_rows(logits, None)
+    assert not bool(logits[0, factory.bar_id].isinf()), "a legitimate parameter close was trapped"
+    assert gate.stats["value_guard_masked"] == 0, gate.stats
+
+
+def test_idle_bar_mask_allows_only_the_open_angle():
+    """Rule 2: outside the block the bar may only follow `<`."""
+    if env() is None:
+        return
+    import torch
+    tok, enc, eos, factory = env()
+    bar = factory.bar_id
+    gate = factory.for_tools(TOOLS)
+    gate.observe(tok.encode("Here is the plan."))
+    logits = torch.zeros(1, factory.vocab_size)
+    assert gate.mask_rows(logits, None) == 1
+    assert int(logits.isinf().sum()) == 1 and bool(logits[0, bar].isinf())
+    gate.observe([factory.lt_id])
+    logits = torch.zeros(1, factory.vocab_size)
+    assert gate.mask_rows(logits, None) == 0
+    assert int(logits.isinf().sum()) == 0, "the block could not be opened"
+
+    # a draft block, through both the host list and the device tensor path
+    ids = [tok.encode(" plan")[0], factory.lt_id, tok.encode("x")[0]]
+    a, b = (torch.zeros(3, factory.vocab_size), torch.zeros(3, factory.vocab_size))
+    ga, gb = factory.for_tools(TOOLS), factory.for_tools(TOOLS)
+    for g in (ga, gb):
+        g.observe(tok.encode("Here is the plan."))
+    assert ga.mask_rows(a, ids) == 3
+    assert gb.mask_rows(b, torch.tensor(ids, dtype=torch.int64)) == 3
+    assert torch.equal(a.isinf(), b.isinf()), "the list and tensor paths disagree"
+    assert int(a.isinf().sum()) == 2
+    assert bool(a[0, bar].isinf()) and not bool(a[1, bar].isinf()) and bool(a[2, bar].isinf())
+
+
+def test_masked_decode_loop_writes_a_whole_page_into_a_value():
+    """The speculative loop writes a full HTML page as a parameter value, guard included."""
+    if env() is None:
+        return
+    tok, enc, eos, factory = env()
+    page = ('<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+            '<title>Lumen</title>\n</head>\n<body>\n<h1>Lumen</h1>\n'
+            '<p>Hamburg</p>\n</body>\n</html>\n')
+    text = block(invoke("web_search", param("query", page)))
+    target = tok.encode(text) + [eos]
+    seed = text[:text.index(TOOL_CALLS_MARKER) + len(TOOL_CALLS_MARKER)]
+    gate = factory.for_tools(TOOLS)
+    gate.observe(tok.encode(seed))
+    assert gate.active, "the gate did not engage on the marker"
+    already = len(tok.encode(seed))
+    out = _masked_greedy_loop(gate, tok, eos, target[already:], factory.vocab_size, steps=2000)
+    assert out and out[-1] == eos, "the loop did not stop at the end of turn"
+    assert tok.decode(out) == tok.decode(target[already:]), tok.decode(out)[:200]
+    assert gate.stats["accept_fail"] == 0, gate.stats
+    # the guard fired inside the page, and the parameter still closed at the end
+    assert gate.stats["value_guard_masked"] >= 1, gate.stats
+    if enc is not None:
+        parsed = enc.parse_message_from_completion_text(text + enc.eos_token, thinking_mode="chat")
+        got = json.loads(parsed["tool_calls"][0]["function"]["arguments"])["query"]
+        assert got == page, got[:200]
 
 
 def main() -> int:
