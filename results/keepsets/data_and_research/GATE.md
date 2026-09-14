@@ -61,3 +61,38 @@ This run gated 8 of the profile's 10 topics; reasoning, reasoning_code carry no 
 **Verdict: FAIL** — 6 of 11 runs failed: `acad-abstract` (on) reasoning loops 4x on 'review latency is positively associated with higher defe'; `yaml-anchors` (on) reasoning loops 6x on 'test: ["cmd", "curl", "-f", "http://localhost/health"] i'; `en-note` (on) reasoning loops 9x on 'need to be sure the fix addresses the root cause and tha'; `py-walk` (on) reasoning loops 3x on 'try: scanditer = os.scandir(top) except oerror as err: i'; `r-summary` (on) reasoning loops 5x on 'summarise_measurements <- function(file, group_col = "gr'; `sql-window` (on) reasoning loops 3x on "customer's three most recent orders with a running total"
 
 This run gated 8 of the profile's 10 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-14 03:56
+
+| | |
+|---|---|
+| profile | Data and research |
+| topics | python, rlang, sql, latex, academic, technical, english, config, reasoning, reasoning_code |
+| prompts | 11 runs over 11 prompts |
+| thinking | on |
+| reasoning effort | 45 |
+| max tokens | 16,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| no prompts for | reasoning, reasoning_code — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `acad-abstract` | on | stop | 6,538 | 1,493 | 110 | PASS | 4 paragraphs, 11 sentences |
+| `yaml-anchors` | on | stop | 2,896 | 2,159 | 70 | PASS | 30 keys, anchored |
+| `en-explain` | on | stop | 7,462 | 1,303 | 144 | **FAIL** | repeat: reasoning loops 3x on '95 % hit rate can leave a system slower than no cache' — the answer itself is sound (2 paragraphs, 10 sentences) |
+| `en-note` | on | length | 6,086 | 139 | 92 | **FAIL** | finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 9x on 'i can write three paragraphs. i can include a closing. i' |
+| `latex-note` | on | stop | 224 | 1,115 | 21 | PASS | 3 environments |
+| `py-walk` | on | stop | 4,076 | 2,837 | 88 | PASS | 6 defs |
+| `r-summary` | on | stop | 8,341 | 1,713 | 150 | PASS | 53 lines |
+| `sql-window` | on | stop | 7,143 | 712 | 100 | **FAIL** | repeat: reasoning loops 3x on 'desc rows between unbounded preceding and current row ) ' — the answer itself is sound (select, join, window) |
+| `tech-explain` | on | stop | 6,511 | 1,580 | 127 | PASS | 2 paragraphs, 9 sentences |
+| `reason-bat-ball` | on | stop | 987 | 548 | 26 | PASS | says 0.05 |
+| `reason-machines` | on | stop | 1,931 | 532 | 37 | PASS | says 5 minutes |
+
+**Verdict: FAIL** — 3 of 11 runs failed: `en-explain` (on) repeat: reasoning loops 3x on '95 % hit rate can leave a system slower than no cache' — the answer itself is sound (2 paragraphs, 10 sentences); `en-note` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 9x on 'i can write three paragraphs. i can include a closing. i'; `sql-window` (on) repeat: reasoning loops 3x on 'desc rows between unbounded preceding and current row ) ' — the answer itself is sound (select, join, window)
+
+10 of 11 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 0, guard 1, corrupt 0, content 0, repeat 2.
+
+This run gated 8 of the profile's 10 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.

@@ -59,3 +59,37 @@ This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no p
 **Verdict: FAIL** — 5 of 10 runs failed: `yaml-anchors` (on) reasoning loops 7x on 'block of environment variables and one healthcheck defin'; `en-explain` (on) reasoning loops 3x on '"why a cache with a 95 % hit rate can leave a'; `go-handler` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 12x on "i'll write `timeout time.dduration`? no. i'll write `tim"; `py-walk` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 19x on 'let me be careful. let me be careful. let me be careful.'; `sql-window` (on) reasoning loops 3x on "each customer's three most recent orders with a running "
 
 This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-14 03:36
+
+| | |
+|---|---|
+| profile | Backend |
+| topics | python, go, java, sql, config, technical, english, reasoning, reasoning_code |
+| prompts | 10 runs over 10 prompts |
+| thinking | on |
+| reasoning effort | 45 |
+| max tokens | 16,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| no prompts for | reasoning, reasoning_code — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `yaml-anchors` | on | stop | 19,348 | 1,186 | 258 | **FAIL** | repeat: reasoning loops 4x on 'one block of environment variables and one healthcheck d' — the answer itself is sound (30 keys, anchored) |
+| `en-explain` | on | stop | 8,982 | 1,400 | 145 | **FAIL** | repeat: reasoning loops 3x on '95% hit rate can leave a system slower than no cache at' — the answer itself is sound (2 paragraphs, 7 sentences) |
+| `en-note` | on | stop | 12,368 | 961 | 182 | **FAIL** | repeat: reasoning loops 4x on 'i’m rolling back the release that went out this afternoo' — the answer itself is sound (4 paragraphs, 5 sentences) |
+| `go-handler` | on | stop | 18,474 | 2,083 | 252 | **FAIL** | repeat: reasoning loops 3x on 'http.statusunprocessableentity, "validation_failed", err' — the answer itself is sound (77 lines) |
+| `java-service` | on | stop | 26,964 | 1,259 | 402 | **FAIL** | repeat: reasoning loops 5x on '} private static final class entry<v> { final v value; f' — the answer itself is sound (39 lines) |
+| `py-walk` | on | stop | 38,016 | 1,290 | 547 | **FAIL** | repeat: reasoning loops 3x on 'for dirpath, dirnames, filenames in os.wwalk(root, onerr' — the answer itself is sound (2 defs) |
+| `sql-window` | on | stop | 18,734 | 623 | 255 | **FAIL** | repeat: reasoning loops 8x on "customer's three most recent orders with a running total" — the answer itself is sound (select, join, window) |
+| `tech-explain` | on | stop | 9,284 | 1,198 | 166 | PASS | 2 paragraphs, 6 sentences |
+| `reason-bat-ball` | on | stop | 590 | 496 | 21 | PASS | says 0.05 |
+| `reason-machines` | on | stop | 657 | 413 | 16 | PASS | says 5 minutes |
+
+**Verdict: FAIL** — 7 of 10 runs failed: `yaml-anchors` (on) repeat: reasoning loops 4x on 'one block of environment variables and one healthcheck d' — the answer itself is sound (30 keys, anchored); `en-explain` (on) repeat: reasoning loops 3x on '95% hit rate can leave a system slower than no cache at' — the answer itself is sound (2 paragraphs, 7 sentences); `en-note` (on) repeat: reasoning loops 4x on 'i’m rolling back the release that went out this afternoo' — the answer itself is sound (4 paragraphs, 5 sentences); `go-handler` (on) repeat: reasoning loops 3x on 'http.statusunprocessableentity, "validation_failed", err' — the answer itself is sound (77 lines); `java-service` (on) repeat: reasoning loops 5x on '} private static final class entry<v> { final v value; f' — the answer itself is sound (39 lines); `py-walk` (on) repeat: reasoning loops 3x on 'for dirpath, dirnames, filenames in os.wwalk(root, onerr' — the answer itself is sound (2 defs); `sql-window` (on) repeat: reasoning loops 8x on "customer's three most recent orders with a running total" — the answer itself is sound (select, join, window)
+
+10 of 10 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 0, guard 0, corrupt 0, content 0, repeat 7.
+
+This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.

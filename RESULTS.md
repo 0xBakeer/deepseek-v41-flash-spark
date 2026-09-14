@@ -947,3 +947,19 @@ finish in 2–4k tokens where they looped before. So the 513-expert tail swap th
 three rows bought World three. The profiles record that: `reasoning_lang` in World, not in
 European. Both language profiles remain the weakest in the catalogue with thinking on; with
 thinking off every language in both has passed on the same keep-sets.
+
+### 2026-09-14 06:20 — Backend and Data and research at keep 0.36 (the 256k memory point)
+
+Same recipe (saliency, `maxmin`, substitute), thinking on, effort 45, max 16,000 tokens.
+
+| profile | keep 0.40 (2026-09-13) | keep 0.36, strict | keep 0.36, finished | misses by kind |
+|---|---|---|---|---|
+| Backend | 5 of 10 | 3 of 10 | **10 of 10** | 7 repeat, 0 exit, 0 guard, 0 corrupt |
+| Data and research | 5 of 11 | **8 of 11** | 10 of 11 | 2 repeat, 1 guard |
+
+Backend at 0.36 produced a correct answer on every prompt for the first time — the Go and Python
+guard kills of the 0.40 run are gone — but seven deliberations restated themselves 3–8× before
+answering, at 18–38k reasoning tokens a prompt against 4–9k where they do not loop. Correct and
+slow. Data and research went the other way and is the second-best profile in the catalogue at
+this keep. With Frontend (7 of 10 strict, 9 of 10 finished) this makes three of the four code-bearing
+profiles measured at the keep that serves a filled 256k context.
