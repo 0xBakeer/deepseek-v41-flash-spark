@@ -987,3 +987,21 @@ the earlier run: at a `</` boundary the pruned router drifts from the HTML close
 model's own `</｜DSML｜…>` close marker, which inside a tool call ends the argument. Whole-page
 generation with thinking on is a long generation, and long generations are where this keep-set
 fails; the same profile passes 7 of 10 (9 finished) on the shorter gate prompts.
+
+### 2026-09-14 08:10 — the close-marker guard, verified live on the Frontend keep-set at 0.36
+
+`server/tool_grammar.py` now keeps the model's own tool-call end marker out of a `</` the value
+did not mean: inside a parameter value the marker is masked after `</` while the markup is
+unbalanced and the `</` does not follow a newline; outside a calls block the marker is legal only
+after a bare `<`; with no tools it is never legal. Same keep-set, same brief, same server otherwise:
+
+| channel | before | after |
+|---|---|---|
+| plain chat, thinking off | one `</｜DSML｜ parameter>` in the page title | zero markers, `<title>…</title>` closed |
+| coding agent, tool call, thinking on | write closed after `<title>…Hamburg` (172 bytes) | five consecutive whole-page writes of ~4,200 tokens each, 12.5 KB, no marker, no `</</` |
+
+What the guard does not fix is behaviour: the coding agent rewrote its clean file five times,
+each time announcing the previous one had "arrived corrupted", until the 30-minute cap; and one of
+two plain-chat runs with thinking off returned a stylesheet with no markup. Those are the
+keep-set's long-generation faults (§5.4), not the transport. The grammar is on by default from
+this commit; `DSV41_TOOL_GRAMMAR=0` turns both the constraint and the guard off.

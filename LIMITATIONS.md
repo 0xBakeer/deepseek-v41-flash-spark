@@ -339,3 +339,8 @@ generation with thinking on also runs long and hits the repetition guard. Measur
 keep-set at 0.36 produced a complete, well-designed page with thinking **off** in 158 s, and no
 page with thinking on across three attempts. Keep thinking off for long file generation on a
 pruned keep-set; the shorter gate prompts pass with it on.
+
+Update, same day: the truncation through the tool channel is fixed by the close-marker guard in
+`server/tool_grammar.py` (five consecutive whole-page writes on the same keep-set, none cut).
+The stray marker in plain chat is gone with it. The long-generation faults with thinking on — the
+plan that ends in a decision loop, the agent that rewrites a clean file — remain as described.

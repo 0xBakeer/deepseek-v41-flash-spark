@@ -472,7 +472,7 @@ class State:
         if getattr(engine, "supports_grammar", False):
             self.grammars = make_factory(
                 tok, engine.eos_token_id if self.eos_id is None else self.eos_id,
-                enabled=os.environ.get("DSV41_TOOL_GRAMMAR", "0") == "1")  # off until the end-to-end gates on real weights have run; see NOTES 2026-09-11
+                enabled=os.environ.get("DSV41_TOOL_GRAMMAR", "1") == "1")  # on by default: the close-marker guard depends on it
 
     def stop_ids(self) -> Set[int]:
         ids = {self.engine.eos_token_id}
