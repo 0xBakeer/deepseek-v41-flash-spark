@@ -1011,3 +1011,10 @@ degenerate ("Lumen as lis Lumen a place", blurbs that are word salad) and its la
 into a third of the width — the thinking-on long-generation fault again, now visible as content
 instead of as a cut. The plain-chat page with thinking off remains the only one that reads and
 looks like the brief.
+
+Addendum, 08:45 — how often thinking off delivers the page. Five plain-chat runs of the same
+brief on the Frontend keep-set at 0.36 (temperature 0.6): three complete pages (12.4 KB, 13.0 KB,
+11.7 KB; dark mode, reduced motion and focus states present; 4 sections each), two that stopped
+after the stylesheet with no markup (9.4 KB and 10.5 KB). Three of five. None of the four runs
+after the guard carried a marker or a `</</`. The stylesheet-only stop is a content fault of the
+keep-set, not of the transport; it is the number to beat.
