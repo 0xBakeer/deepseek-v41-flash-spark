@@ -156,10 +156,6 @@ checked against what this box has free right now, and `r` to start the server wi
 
 *The profile screen: a named bundle per row, with the verdict its generation gate returned and the keep fraction it was measured at.*
 
-![The topic screen of ./tune.sh](docs/img/tui-topics.png)
-
-*The topic screen: coverage per topic with the text each was traced on, and the budget panel against the memory this box has free right now.*
-
 `a` on either screen opens **Weight Atlas by alesha-pro** on the same keep-sets. It exports this
 checkout's routing trace into the files that page reads and serves the vendored build
 (`tools/atlas/`, MIT) on `127.0.0.1` and a free port: the whole expert field as one grid, 40 layers

@@ -82,6 +82,10 @@ view with the Frontend bundle applied, at the keep fraction Frontend was gated a
 this engine has loaded and prefilled from became **131,072**, and `./tune.sh` marks that length now
 rather than 32k — `tools/budget.py` `VALIDATED_MAX_SEQ`.)
 
+![The topic screen of ./tune.sh with the Frontend profile applied](img/tui-topics.png)
+
+*The same screen at 256k: coverage per topic with the text each was traced on, and the budget panel against the memory this box has free right now.*
+
 ## Has it been gated?
 
 Coverage — the bars in the topic view — measures routing. Whether the output holds together is a
@@ -112,6 +116,10 @@ name. The exception is a keep-set that carries no histograms of that family at a
 can be switched and the line goes on warning. When the box cannot hold the keep fraction the gate
 ran at, the line says so too, because what is about to be started is then not the configuration
 that was measured.
+
+![The profile screen of ./tune.sh with the context selector at 128k](img/tui-context-tight.png)
+
+*Stepping the context back to 128k lifts the largest keep fraction that fits to 38 %, which six of the profiles are then budgeted at — still under the 40 % their gate ran at, and tight on memory.*
 
 A shipped profile is budgeted at the keep fraction its gate ran at, not at the smallest one that
 reaches the coverage target. Those are far apart under the ranking pair the box is run with:
@@ -200,6 +208,10 @@ whatever fired during those 300 tokens and scores as though it were well served.
 keep-set has no hollow bars left — every one of its 39 topics was traced on about 3,000 tokens —
 so the render above shows none; a keep-set you build yourself will, until the evidence is levelled.
 
+![The topic screen of ./tune.sh with the cursor on an unselected topic](img/tui-topics-cursor.png)
+
+*A selected topic is drawn in its coverage colour and an unselected one stays muted, so the bar states read as the selection: reasoning_lang, at 0.82, is the weakest topic in this keep-set and not one Frontend carries.*
+
 What coverage is *not* is a recommendation. It says how much of a topic's measured routing the
 budget keeps, and under the ranking pair the box is run with that number is above 0.85 at a keep
 fraction nothing has ever generated a sentence at. Which keep fraction to choose is settled by the
@@ -280,6 +292,10 @@ ones; under `sum` it is the second-strongest thing on the screen.
 That is the trade the screen is built around. Press `m` to snap the keep fraction to the
 smallest one that serves every selected topic, and read the arena off the panel. The 27 GB
 between the two rows above is context window and prefill room.
+
+![The topic screen of ./tune.sh after pressing m](img/tui-fit.png)
+
+*After `m` on the Frontend selection: the keep fraction snapped to 12 %, an arena of 27 GB rather than the 80 GB the gated 36 % needs, and the key line saying that no keep-set below 36 % has been through a generation gate.*
 
 > **Not measured yet.** There is one path by which topic choice could touch step time after all.
 > Speculative decoding verifies a block of six tokens, and that block touches about 21 *distinct*

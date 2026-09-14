@@ -147,6 +147,10 @@ eleven cards that need other captures are not drawn.
 The export always reads the topic catalogue (`results/keepsets/topics/coverage.json`), whatever
 `--stats` the screen itself is on: the page is the trace, not the current selection.
 
+![The Weight Atlas popup over the topic screen of ./tune.sh](img/tui-atlas.png)
+
+*The popup `a` leaves over whichever screen was up: the port the kernel picked, the ssh-tunnel line for a box reached over ssh, and any key to close it.*
+
 ## Profiles from a file
 
 The profiles on the first screen are the ten built into `tools/tune.py` plus whatever these two
@@ -467,6 +471,10 @@ they came from:
 
 A profile with no record says `no generation gate has been run on these topics` in place of the
 last two lines; one this keep-set is missing topics for says which ones instead.
+
+![The output of ./tune.sh --profiles](img/cli-profiles.png)
+
+*The first five profiles of `--profiles`, printed with the same flags the screen was opened with.*
 
 ### `--print` and `--write`
 
