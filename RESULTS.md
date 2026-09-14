@@ -1005,3 +1005,9 @@ each time announcing the previous one had "arrived corrupted", until the 30-minu
 two plain-chat runs with thinking off returned a stylesheet with no markup. Those are the
 keep-set's long-generation faults (§5.4), not the transport. The grammar is on by default from
 this commit; `DSV41_TOOL_GRAMMAR=0` turns both the constraint and the guard off.
+
+Addendum, 08:20: rendered, the tool-channel page is structurally whole but its prose is
+degenerate ("Lumen as lis Lumen a place", blurbs that are word salad) and its layout collapsed
+into a third of the width — the thinking-on long-generation fault again, now visible as content
+instead of as a cut. The plain-chat page with thinking off remains the only one that reads and
+looks like the brief.
