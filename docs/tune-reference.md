@@ -30,8 +30,8 @@ job, a bare `./tune.sh` behaves as `--print`.
 | `--keep F` | `PRUNE_KEEP`, else `0.39` | the fraction of each layer's 384 routed experts that stays resident. Applying a profile replaces it: a shipped one sets the keep fraction its generation gate ran at, a profile from a file the smallest one that reaches the coverage target |
 | `--max-seq N` | `MAX_SEQ`, else `32768` | context length the KV cache is sized for |
 | `--format cb3\|fp4` | `EXPERT_FORMAT`, else `cb3` | the arena's expert layout, which sets the slot size |
-| `--rank sum\|max\|maxmin` | `DSV41_PRUNE_RANK`, else `sum` | how several selected topics are combined into one ranking of the same budget, which decides *which* experts the keep fraction holds. Shown on both screens next to the keep fraction, and written out with it. Applying a shipped profile sets it to `maxmin`; a profile from a file names no rule and leaves it alone |
-| `--source counts\|saliency` | `DSV41_PRUNE_SOURCE`, else `counts` | which measurement the experts are ranked by: `counts` is routing frequency, `saliency` is the summed `gate_weight x ||expert output||` (REAP, arXiv 2510.13999). Orthogonal to `--rank` — the rules are the same, the numbers they rank are not. Shown beside the rank and written out with it; a `coverage.json` traced before 2026-09-13 carries no `saliency_<topic>` histograms and the tool then finds no topics at all. See [`docs/keep-sets.md`](keep-sets.md#frequency-is-not-contribution) |
+| `--rank sum\|max\|maxmin` | `DSV41_PRUNE_RANK`, else `sum` | how several selected topics are combined into one ranking of the same budget, which decides *which* experts the keep fraction holds. Shown on both screens next to the keep fraction, and written out with it. Applying a profile with a gate record sets the rule that record was measured with (`maxmin` for all ten shipped ones); a profile from a file names no rule and leaves it alone |
+| `--source counts\|saliency` | `DSV41_PRUNE_SOURCE`, else `counts` | which measurement the experts are ranked by: `counts` is routing frequency, `saliency` is the summed `gate_weight x ||expert output||` (REAP, arXiv 2510.13999). Orthogonal to `--rank` — the rules are the same, the numbers they rank are not. Shown beside the rank and written out with it. Applying a profile with a gate record switches to the family that record was measured on, reloading the index so the bars and the budget move with it; where the keep-set carries no histograms of that family, nothing switches and the mismatch is named. A `coverage.json` traced before 2026-09-13 carries no `saliency_<topic>` histograms and the tool then finds no topics at all. See [`docs/keep-sets.md`](keep-sets.md#frequency-is-not-contribution) |
 | `--transient-slots N` | `TRANSIENT_SLOTS`, else `8` | prefill slots outside the LRU; the arena is sized to hold these too |
 | `--keep-free-gb F` | `KEEP_FREE_GB`, else `6.0` | host memory the launcher is told to leave free |
 | `--coverage-target F` | `DSV41_COVERAGE_TARGET`, else `0.85` | the coverage every selected topic should reach; sets the bar colours and what `m` fits to |
@@ -353,6 +353,25 @@ at or above the coverage target, then `good` at 0.75, `uneven` at 0.65, `spread 
 each followed by `· untested`; `needs a bigger box` when no keep fraction that fits reaches it, and
 `not in this keep-set` when none of its topics is in the file at all.
 
+#### What applying a profile sets
+
+A profile with a gate record applies **the whole configuration that record was measured in**: its
+topics, the keep fraction, the ranking rule and the histogram family. The last two matter as much
+as the first two — a keep fraction reproduced without its pair holds a different set of experts, so
+`--print` and `--write` would otherwise emit a recipe that is not the one the counts on the screen
+came from. Switching the family reloads the index, so the coverage bars, the budget panel and the
+written `.env` all describe the keep-set that was gated, and the gate line stops naming a pair
+because there is no longer one to name.
+
+Where the loaded keep-set carries no histograms of the record's family, nothing switches: writing
+`DSV41_PRUNE_SOURCE=saliency` for a file that has only `counts_<topic>` produces a configuration
+the engine refuses three minutes into a load. The keep fraction and the rule are still taken, the
+gate line goes on naming the pair, and `--profile` says on stderr that what follows is not the
+keep-set that was gated.
+
+A profile from a file names no pair and changes neither. An explicit `--rank` or `--source` on the
+command line is overridden by a record, the same way `--rank` already was by a profile's own rule.
+
 #### Which keep fraction a profile is budgeted at
 
 A profile with a gate record is budgeted at **the keep fraction that record was measured at**,
@@ -434,9 +453,10 @@ EXPERT_TOPICS=coding
 # 6,000 experts resident (39.1%), 102.0 GB resident, 15.0 GB free after load — ok
 ```
 
-With `--profile` instead of `--topics`, the keep fraction and the ranking pair are the ones that
-profile's gate record was measured at, so the block below reproduces a measured configuration
-rather than one derived from a coverage target:
+With `--profile` instead of `--topics`, the keep fraction **and the ranking pair** are the ones that
+profile's gate record was measured with, whatever the environment says, so the block below
+reproduces a measured configuration rather than one assembled out of a coverage target and two
+defaults:
 
 ```
 $ ./tune.sh --profile backend --print

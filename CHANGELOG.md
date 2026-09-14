@@ -197,9 +197,15 @@ Until now that was two numbers in a file and a three-minute wait to find out.
   histograms under `sum`; under the `saliency`/`maxmin` pair the box is run with, every topic in
   the shipped keep-set is above it at keep 0.12 — a third of the smallest keep fraction anything
   has ever been generated at. `--profile backend --print` now emits the configuration Backend was
-  measured in. Coverage remains a true measurement of routing and is no longer read as a
-  recommendation: where the coverage target asks for a keep fraction below anything gated, the
-  screen says so.
+  measured in — the keep fraction **and the ranking pair**, since a keep fraction reproduced
+  without `DSV41_PRUNE_RANK` and `DSV41_PRUNE_SOURCE` holds a different set of experts. Applying a
+  profile with a record switches the histogram family too and reloads the index, so the bars, the
+  budget panel and the written `.env` all describe the keep-set that was gated; where the loaded
+  keep-set has no histograms of that family, nothing is switched — that would be a configuration
+  the engine refuses at load — and the mismatch is named on the gate line and on stderr. A profile
+  from a file names no pair and changes neither. Coverage remains a true measurement of routing and
+  is no longer read as a recommendation: where the coverage target asks for a keep fraction below
+  anything gated, the screen says so.
 - **The screen says which keep fraction holds a filled 256k**, on both views, because that is a
   fact about this box that nothing else on the screen implies — the KV cache is 1.0 GB at 256k and
   the prefill is what runs out.

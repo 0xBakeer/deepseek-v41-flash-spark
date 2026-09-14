@@ -747,10 +747,50 @@ class State:
         if rank != self.rank:
             self.rank, self._profiles = rank, None     # and so does every profile's coverage
 
+    def set_source(self, source) -> bool:
+        """Switch the histogram family the whole screen is read off -- and
+        therefore what `.env` will say. One index reads one family, so this
+        reloads it; everything derived from it goes with it.
+
+        False when the loaded keep-set cannot be ranked that way, and then
+        nothing moves. Writing a source the file has no histograms for would
+        produce a configuration the engine refuses three minutes into a load
+        (`engine/v41_engine.py`: "needs a coverage.json that has them"), which is
+        worse than the disagreement it was meant to fix -- and the disagreement
+        is still on the screen, on the gate line, where it names the pair."""
+        if source == self.source:
+            return True
+        if source not in B.SOURCES or not self.stats_path or not self.index:
+            return False
+        try:
+            idx = B.TopicIndex(self.stats_path, source)
+        except (OSError, ValueError):
+            return False
+        if not idx.topics:
+            return False
+        self.index, self.source, self._profiles = idx, source, None
+        self.sel &= set(idx.topics)
+        self.cursor = self.scroll = 0
+        return True
+
     def apply_profile(self, pr):
-        self.sel = set(pr["topics"])
+        """Take everything the profile fixes. For a shipped one that is the
+        whole configuration its generation gate was run in -- the topics, the
+        keep fraction, the ranking rule AND the histogram family -- because a
+        keep fraction reproduced without its pair is a different set of experts,
+        and what `--print` emits then is not what was measured. A profile from a
+        file names no pair and leaves both alone."""
+        g = pr.get("gate") or {}
+        # The record's family, where this keep-set can be ranked by it. Where it
+        # cannot, nothing moves and the gate line goes on naming the pair.
+        if g.get("source"):
+            self.set_source(g["source"])
+        if pr["topics"]:
+            self.sel = set(pr["topics"]) & (set(self.index.topics) if self.index else set())
+        else:
+            self.sel = set()
         self.keep = pr["keep"]
-        self.set_rank(pr["rank"])
+        self.set_rank(g.get("rank") or pr["rank"])
 
     def plan(self):
         return B.plan(self.host, self.index, tuple(sorted(self.sel)), self.keep,
@@ -1927,12 +1967,15 @@ def main() -> int:
     ap.add_argument("--rank", default=B.rank_from_env(), metavar="RULE",
                     help="how several topics are combined into one ranking: "
                          f"{' | '.join(B.RANKS)} (default %(default)s, from DSV41_PRUNE_RANK). "
-                         "A profile that names a rule overrides it.")
+                         "A profile that names a rule overrides it, and --profile on a profile "
+                         "with a gate record uses the rule that record was measured with.")
     ap.add_argument("--source", default=B.source_from_env(), metavar="WHICH",
                     help="which measurement ranks the experts: "
                          f"{' | '.join(B.SOURCES)} (default %(default)s, from DSV41_PRUNE_SOURCE). "
                          "counts is routing frequency; saliency is gate weight x expert-output "
-                         "norm, and needs a coverage.json with saliency_<topic> histograms.")
+                         "norm, and needs a coverage.json with saliency_<topic> histograms. "
+                         "--profile on a profile with a gate record switches to the family that "
+                         "record was measured on, where this keep-set carries it.")
     ap.add_argument("--transient-slots", type=int,
                     default=int(os.environ.get("TRANSIENT_SLOTS") or B.TRANSIENT_SLOTS_DEFAULT),
                     help="prefill slots outside the LRU; the arena is sized to hold these too")
@@ -2031,6 +2074,15 @@ def main() -> int:
             print(f"{match[0]['name']}: this keep-set carries none of its topics", file=sys.stderr)
             return 2
         st.apply_profile(match[0])
+        gate_ = match[0].get("gate") or {}
+        if gate_.get("source") and gate_["source"] != st.source:
+            # The one case where what is about to be printed is not the
+            # configuration the profile was measured in. Said out loud rather
+            # than left to be noticed in a diff of .env.
+            print(f"{match[0]['name']}: gated on {gate_['rank']}/{gate_['source']}, and "
+                  f"{short_path(sp_)} carries no {gate_['source']}_<topic> histograms — what "
+                  f"follows ranks {st.source} and is not the keep-set that was gated",
+                  file=sys.stderr)
 
     if a.profiles:
         print(f"{short_path(sp_)} — {len(index.topics) if index else 0} topics, "

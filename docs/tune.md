@@ -105,9 +105,13 @@ call, which is why both are on the row.
 
 The gate line under each profile names the run: its date, the keep fraction it measured, and the
 ranking pair. When that pair is not the one the screen is set to, it is named in the line — the
-bars above and the counts on the right then describe two different keep-sets. When the box cannot
-hold the keep fraction the gate ran at, the line says so too, because what is about to be started
-is then not the configuration that was measured.
+bars above and the counts on the right then describe two different keep-sets. Applying the profile
+is what resolves that: it takes the pair as well as the keep fraction, the histograms are re-read
+off the family the record used, and the line stops naming a pair because there is no longer one to
+name. The exception is a keep-set that carries no histograms of that family at all, where nothing
+can be switched and the line goes on warning. When the box cannot hold the keep fraction the gate
+ran at, the line says so too, because what is about to be started is then not the configuration
+that was measured.
 
 A shipped profile is budgeted at the keep fraction its gate ran at, not at the smallest one that
 reaches the coverage target. Those are far apart under the ranking pair the box is run with:
@@ -152,9 +156,25 @@ worse and World languages better on the same night, which is why it ships in one
 ./tune.sh --profile frontend --print
 ```
 
-`--profile` selects the profile's topics **and the keep fraction its gate ran at**, so
-`--profile backend --print` emits the configuration Backend was measured in, not a configuration
-derived from a coverage target.
+`--profile` selects the profile's topics **and the whole configuration its gate ran in** — the keep
+fraction, the ranking rule and the histogram family — so `--profile backend --print` emits the
+recipe Backend was measured in rather than one assembled out of a coverage target and two defaults:
+
+```
+$ ./tune.sh --profile backend --print
+PRUNE_KEEP=0.36
+DSV41_PRUNE_RANK=maxmin
+DSV41_PRUNE_SOURCE=saliency
+ARENA_GB=81
+...
+```
+
+The pair is not decoration: a keep fraction reproduced without it holds a different set of experts.
+Switching the family reloads the histograms, so the bars, the budget panel and the written `.env`
+all describe the keep-set that was gated. If the loaded keep-set has no histograms of that family,
+nothing is switched — writing a source a file cannot be ranked by produces a configuration the
+engine refuses three minutes into a load — and the mismatch is said out loud instead, on the gate
+line and on stderr.
 
 ## Where the header's numbers come from
 

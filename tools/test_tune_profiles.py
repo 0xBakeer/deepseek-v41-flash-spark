@@ -353,6 +353,86 @@ check("a keep-set carrying none of a profile's topics says that instead",
           os.path.join(KEEPSETS, "general", "coverage.json")), STATS, 0.36, 32768,
           "cb3", []).profiles()}["Frontend"]["status"], "not in this keep-set")
 
+# --- --print emits the keep-set the profile was gated on ---------------------
+# The keep fraction alone does not name a set of experts: the ranking rule and
+# the histogram family pick which ones a fraction holds. A run reproduced with
+# the gated keep and the screen's default family is a different keep-set from
+# the one the counts on the screen were measured on, so applying a profile with
+# a record takes its whole pair.
+def run_clean(args, **env):
+    """Without whatever DSV41_* the shell running the tests happens to carry."""
+    e = {k: v for k, v in os.environ.items() if not k.startswith("DSV41_")}
+    e.update({"EXPERT_TOPICS": "", "PRUNE_KEEP": "0.39"}, **env)
+    return subprocess.run([sys.executable, os.path.join(ROOT, "tools/tune.py")] + args,
+                          capture_output=True, text=True, env=e)
+
+
+r = run_clean(["--stats", STATS, "--profile", "backend", "--print"])
+check("--profile prints the keep fraction its gate ran at", "PRUNE_KEEP=0.36" in r.stdout, True)
+check("  the rule that record was measured with", "DSV41_PRUNE_RANK=maxmin" in r.stdout, True)
+check("  and the histogram family it was measured on", "DSV41_PRUNE_SOURCE=saliency" in r.stdout,
+      True)
+check("  none of which came from the environment",
+      ("DSV41_PRUNE_RANK" in r.stderr or "DSV41_PRUNE_SOURCE" in r.stderr), False)
+check("  so the settings load", r.returncode, 0)
+# --source on the command line is overridden the same way --rank already was
+check("an explicit --source is overridden by the record",
+      "DSV41_PRUNE_SOURCE=saliency" in
+      run_clean(["--stats", STATS, "--source", "counts", "--profile", "backend",
+                 "--print"]).stdout, True)
+
+# in the screen, the same thing: applying takes the pair, and everything derived
+# from the histograms is re-read off the family that record used
+st_counts = T.State(host, B.TopicIndex(STATS, "counts"), STATS, 0.39, 32768, "cb3", [],
+                    rank="sum", source="counts")
+front = {p["name"]: p for p in st_counts.profiles()}["Frontend"]
+check("before applying, the screen names the pair that differs",
+      "on maxmin/saliency" in T.gate_line(front, st_counts, 96), True)
+st_counts.apply_profile(front)
+check("applying a gated profile takes its histogram family", st_counts.source, "saliency")
+check("  and its ranking rule", st_counts.rank, "maxmin")
+check("  and the index is re-read off that family", st_counts.index.source, "saliency")
+check("  so .env says what was measured",
+      {k: v for k, v in T.env_for(st_counts).items() if k.startswith("DSV41_")},
+      {"DSV41_PRUNE_RANK": "maxmin", "DSV41_PRUNE_SOURCE": "saliency"})
+check("  and the line no longer has a pair to warn about",
+      "maxmin/saliency" in T.gate_line({p["name"]: p for p in st_counts.profiles()}["Frontend"],
+                                       st_counts, 96), False)
+
+# a profile from a file names no pair and must leave both where they are
+st_file = T.State(host, B.TopicIndex(STATS, "counts"), STATS, 0.39, 32768, "cb3", [],
+                  rank="sum", source="counts",
+                  user_profiles=[("From a file", "no gate, no pair", ["html", "css"], None,
+                                  "results/keepsets/profiles.json", None)])
+st_file.apply_profile({p["name"]: p for p in st_file.profiles()}["From a file"])
+check("a profile from a file leaves the family alone", st_file.source, "counts")
+check("  and the rule", st_file.rank, "sum")
+
+# A keep-set that cannot be ranked the way the record was: nothing is switched,
+# because writing a family the file has no histograms for is a configuration the
+# engine refuses three minutes into a load. It is said out loud instead.
+thin = os.path.join(TMP, "counts-only")
+os.makedirs(thin, exist_ok=True)
+_cov = json.load(open(STATS))
+for _rows in _cov["per_layer"].values():
+    for _k in [k for k in _rows if k.startswith("saliency_")]:
+        del _rows[_k]
+json.dump(_cov, open(os.path.join(thin, "coverage.json"), "w"))
+r = run_clean(["--stats", os.path.join(thin, "coverage.json"), "--profile", "backend", "--print"])
+check("a keep-set with no saliency histograms is not written as saliency",
+      "DSV41_PRUNE_SOURCE=counts" in r.stdout, True)
+check("  and the keep fraction still comes from the record", "PRUNE_KEEP=0.36" in r.stdout, True)
+check("  with the mismatch on stderr, not left to be noticed later",
+      "is not the keep-set that was gated" in r.stderr, True)
+st_thin = T.State(host, B.TopicIndex(os.path.join(thin, "coverage.json"), "counts"),
+                  os.path.join(thin, "coverage.json"), 0.39, 32768, "cb3", [],
+                  rank="sum", source="counts")
+back = {p["name"]: p for p in st_thin.profiles()}["Backend"]
+st_thin.apply_profile(back)
+check("  the screen keeps the family it can serve", st_thin.source, "counts")
+check("  and goes on naming the pair the record used",
+      all("maxmin/saliency" in T.gate_line(back, st_thin, w) for w in (60, 80, 96, 140)), True)
+
 print()
 print(f"{len(fails)} failed" if fails else "all checks passed")
 sys.exit(1 if fails else 0)
