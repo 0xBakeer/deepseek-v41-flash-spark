@@ -56,3 +56,37 @@ This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no p
 4 of 4 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 0, guard 0, corrupt 0, content 0, repeat 0.
 
 This run gated 7 of the profile's 9 topics; reasoning, reasoning_code carry no prompt, so a pass says nothing about them.
+
+---
+
+# Generation gate — 2026-09-14 02:29
+
+| | |
+|---|---|
+| profile | World languages |
+| topics | english, arabic, chinese, japanese, russian, turkish, translation, reasoning, reasoning_code, reasoning_lang |
+| prompts | 10 runs over 10 prompts |
+| thinking | on |
+| reasoning effort | 45 |
+| max tokens | 16,000 |
+| server | `http://127.0.0.1:8000/v1`, model `deepseek-v4.1-flash`, max_model_len 262,144 |
+| no prompts for | reasoning, reasoning_code, reasoning_lang — these topics were NOT gated |
+
+| prompt | thinking | finish | reasoning | answer | s | | why |
+|---|---|---|---|---|---|---|---|
+| `ar-essay` | on | length | 46,930 | 0 | 703 | **FAIL** | finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 54x on 'نسبة الإصابة العالية قد تؤدي إلى "إبطاء" بسبب أن الذاكرة' |
+| `zh-essay` | on | stop | 2,075 | 524 | 111 | PASS | 68% han, 2 paragraphs, 8 sentences |
+| `en-explain` | on | stop | 6,624 | 1,305 | 126 | PASS | 2 paragraphs, 10 sentences |
+| `en-note` | on | stop | 2,500 | 1,229 | 57 | PASS | 3 paragraphs, 8 sentences |
+| `ja-essay` | on | length | 13,257 | 139 | 179 | **FAIL** | finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 16x on 'and "the cache\'s sh sh" and "the cache\'s sh sh" and "the' |
+| `ru-essay` | on | stop | 3,741 | 1,150 | 85 | PASS | 83% cyrillic, 2 paragraphs, 8 sentences |
+| `xl-en-fr` | on | stop | 30,463 | 1,118 | 478 | **FAIL** | repeat: reasoning loops 5x on "n'a été déclenchée, car le contrôle de santé testait le " — the answer itself is sound (2 paragraphs, 9 sentences, 4 markers) |
+| `tr-essay` | on | length | 1,667 | 139 | 28 | **FAIL** | finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 40x on 'stamped stamped stamped stamped stamped stamped stamped ' |
+| `reason-bat-ball` | on | stop | 688 | 447 | 22 | PASS | says 0.05 |
+| `reason-machines` | on | stop | 883 | 401 | 20 | PASS | says 5 minutes |
+
+**Verdict: FAIL** — 4 of 10 runs failed: `ar-essay` (on) finish_reason 'length'; think-exit: reasoned and then produced no answer; reasoning loops 54x on 'نسبة الإصابة العالية قد تؤدي إلى "إبطاء" بسبب أن الذاكرة'; `ja-essay` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 16x on 'and "the cache\'s sh sh" and "the cache\'s sh sh" and "the'; `xl-en-fr` (on) repeat: reasoning loops 5x on "n'a été déclenchée, car le contrôle de santé testait le " — the answer itself is sound (2 paragraphs, 9 sentences, 4 markers); `tr-essay` (on) finish_reason 'length'; server cut the generation off for repeating itself; reasoning loops 40x on 'stamped stamped stamped stamped stamped stamped stamped '
+
+7 of 10 finished a correct answer (strict passes plus repeat-only misses); misses by kind: think-exit 1, guard 2, corrupt 0, content 0, repeat 1.
+
+This run gated 7 of the profile's 10 topics; reasoning, reasoning_code, reasoning_lang carry no prompt, so a pass says nothing about them.

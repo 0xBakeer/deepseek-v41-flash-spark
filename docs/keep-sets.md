@@ -316,3 +316,8 @@ two rows that fail loudest (French and German deliberation) are exactly the ones
 that tail. Read a topic's traced token count and its `n80` (experts holding 80 % of its mass)
 before adding it to a bundle: `reasoning_lang` needs 8 a layer where `reasoning_design` needs 1,
 and the latter is the one that helped Frontend.
+
+The same swap, gated on the World bundle the same night, went the other way: 3 of 10 at keep 0.40
+without the topic, 6 of 10 at 0.36 with it (Chinese and Russian deliberation now finish; Arabic,
+Japanese and Turkish still loop). Which direction a tail reshuffle takes is not readable off the
+coverage screen; only a gate says. The topic ships in World and not in European.

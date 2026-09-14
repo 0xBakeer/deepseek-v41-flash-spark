@@ -100,16 +100,17 @@ PROFILES = [
     # With thinking off every one of these languages came out clean on the same keep-set; with it
     # on, French, German, Chinese and Japanese corrupted a word and looped. The catalogue's
     # deliberation was English-only, so `reasoning_lang` -- thinking IN the language -- was added
-    # and gated (2026-09-14): European went from 6 of 10 to 3 of 10. A small, spread topic under
-    # `maxmin` swaps about thirteen experts a layer out of the tail (513 of 5,560 at keep 0.36),
-    # and the tail is where the deliberation in these languages routes. It is not in the bundle.
-    # Thinking on in a non-English language is the open item; thinking off is served.
+    # and gated at keep 0.36 (2026-09-14). A small, spread topic under `maxmin` swaps about
+    # thirteen experts a layer out of the tail (513 of 5,560), and the two bundles took that in
+    # opposite directions: European went from 6 of 10 to 3 of 10 (fr/de still loop, pt/es fell),
+    # World from 3 of 10 to 6 of 10 (zh and ru now finish). So the topic ships in World only.
+    # Thinking on in a non-English language remains the weakest row; thinking off is served.
     ("European languages", "English, German, French, Spanish, Italian, Portuguese, translation",
      ["english", "german", "french", "spanish", "italian", "portuguese", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),
     ("World languages", "English, Arabic, Chinese, Japanese, Russian, Turkish, translation",
      ["english", "arabic", "chinese", "japanese", "russian", "turkish", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_lang"], False, "maxmin"),
     ("Writing", "Journalism, marketing copy, essays, translation",
      ["english", "journalism", "marketing", "academic", "translation",
       "reasoning", "reasoning_code"], False, "maxmin"),

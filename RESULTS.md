@@ -937,3 +937,13 @@ topic), decisive for the rows that route there. The two language profiles ship w
 What this leaves: languages other than English are served with thinking **off** (4 of 4 on the
 same keep-set, §5.4); with thinking on they are the open item, and it is not closed by a corpus
 of that shape.
+
+### 2026-09-14 03:40 — World languages with `reasoning_lang`: 6 of 10, the opposite direction
+
+Same bundle shape, same keep 0.36, same night: **6 of 10 strict, 7 of 10 finished** (ar think-exit
+at 47k tokens, ja and tr guard-cut on a looping fragment, xl-en-fr repeat-looped with a sound
+answer). The 0.40 record without the topic was 3 of 10; Chinese and Russian deliberation now
+finish in 2–4k tokens where they looped before. So the 513-expert tail swap that cost European
+three rows bought World three. The profiles record that: `reasoning_lang` in World, not in
+European. Both language profiles remain the weakest in the catalogue with thinking on; with
+thinking off every language in both has passed on the same keep-sets.
