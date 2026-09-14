@@ -1018,3 +1018,8 @@ brief on the Frontend keep-set at 0.36 (temperature 0.6): three complete pages (
 after the stylesheet with no markup (9.4 KB and 10.5 KB). Three of five. None of the four runs
 after the guard carried a marker or a `</</`. The stylesheet-only stop is a content fault of the
 keep-set, not of the transport; it is the number to beat.
+
+Correction, 09:20 — the 03:40 addendum says that with thinking off "every language in both has
+passed". Not so for European: the thinking-off run in `results/keepsets/european_languages/GATE.md`
+(2026-09-13 23:07) passed German and Italian and failed French and Spanish on the language-marker
+check, 2 of 4. World languages was the 4 of 4. The figures in the World addendum are unchanged.

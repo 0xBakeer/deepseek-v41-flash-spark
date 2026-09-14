@@ -321,3 +321,7 @@ The same swap, gated on the World bundle the same night, went the other way: 3 o
 without the topic, 6 of 10 at 0.36 with it (Chinese and Russian deliberation now finish; Arabic,
 Japanese and Turkish still loop). Which direction a tail reshuffle takes is not readable off the
 coverage screen; only a gate says. The topic ships in World and not in European.
+
+Correction, later the same day: "most of them in layers 36–39" overstates it. Recomputed from the
+shipped file, those four layers hold 98 of the 513 swapped experts — the most per layer, not a
+majority. The 513 and the 3-to-28-a-layer range stand.
