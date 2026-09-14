@@ -1,8 +1,11 @@
 # DeepSeek-V4.1-Flash on a single NVIDIA DGX Spark
 
-> **Status: WORK IN PROGRESS.** It serves, it is correct, and it is slow. One benchmark row
-> exists, the container image has never been run, and nothing here has been repeated on a
-> second day. Read [LIMITATIONS.md](LIMITATIONS.md) before you quote anything from it.
+> **Status: v0.5.0 (2026-09-14).** Measured, with the limits stated. Ten profiles have a
+> generation gate with thinking on; at the keep fraction that holds a filled 256k context the
+> code-bearing profiles finish 9 to 10 of 10 prompts, and every number is dated in
+> [RESULTS.md](RESULTS.md). Languages other than English with thinking on, and long generations
+> in general, are the open items; [LIMITATIONS.md](LIMITATIONS.md) is what does not work. The
+> measurements were taken from this checkout on the box, not from the container image.
 
 Serve **DeepSeek-V4.1-Flash** — 510 GB on disk, 15,360 routed FP4 experts, Engram n-gram
 memory, CSA2/CED sparse attention, a DSpark drafter — on **one** GB10 box (sm_121a, 128 GB

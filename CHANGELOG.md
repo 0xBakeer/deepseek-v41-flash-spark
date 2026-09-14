@@ -102,7 +102,7 @@ so there is no measured long generation and no thinking-mode figure in this repo
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
 
-## 0.5.0-wip — 2026-09-12 (unreleased)
+## 0.5.0 — 2026-09-14
 
 **Choosing what the box is good at becomes a thing you can see.** About 40 % of the routed experts
 fit in memory at once, and which 40 % decides both what the model is good at and whether it loads.
