@@ -963,3 +963,27 @@ answering, at 18–38k reasoning tokens a prompt against 4–9k where they do no
 slow. Data and research went the other way and is the second-best profile in the catalogue at
 this keep. With Frontend (7 of 10 strict, 9 of 10 finished) this makes three of the four code-bearing
 profiles measured at the keep that serves a filled 256k context.
+
+### 2026-09-14 07:20 — the design test: a whole page from the Frontend keep-set at 0.36
+
+The brief: a single-file landing page for a small bookshop (header, hero, three books, two events,
+about, footer; embedded CSS, dark mode, reduced motion, focus states, 400 px). Four attempts on the
+same keep-set (saliency, `maxmin`, 139 experts a layer):
+
+| channel | thinking | result |
+|---|---|---|
+| coding agent, tool call | on, effort 45 | write closed after `<title>…Hamburg` (172 bytes); retry ran to 32,000 tokens in a parameter format the strict parser rejects |
+| plain chat | on, effort 45 | 15,241 reasoning tokens, guard cut, no answer — a 40k-character design plan, then a "Maybe add X? Skip." loop |
+| plain chat | on, effort 20 | 9,386 reasoning tokens; the answer was a stylesheet with no markup |
+| plain chat | **off** | **11.7 KB page in 158 s**; dark mode, reduced motion, focus-visible present; holds at 400 px with no horizontal scroll |
+
+The thinking-off page is a considered design — paper ground, serif display with one italic accent
+word, small-caps labels, one red rule, three-column shelf, a darker events band — and its defects
+are all in the text: the about paragraph repeats itself, the hours line is nonsense, one
+`</title>` came out as the DSML tool-call end-parameter marker, and `sans-serif` as `ser-serif`.
+
+That marker is the mechanism behind the tool-call failures and behind the `</</p>` corruption of
+the earlier run: at a `</` boundary the pruned router drifts from the HTML close tag to the
+model's own `</｜DSML｜…>` close marker, which inside a tool call ends the argument. Whole-page
+generation with thinking on is a long generation, and long generations are where this keep-set
+fails; the same profile passes 7 of 10 (9 finished) on the shorter gate prompts.

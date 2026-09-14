@@ -328,3 +328,14 @@ before it had been under 300 tokens. The budget model's verdict of "over" for th
 was correct and the fork's 1M-context claim for the same expert count does not transfer to this
 engine's prefill. Measured points: 0.36 / 81 GB serves a filled 256k; 0.40 / 89.2 GB serves prompts
 under roughly 80k tokens by the reserve arithmetic, unmeasured between.
+
+## 2026-09-14 — close-tag boundaries and the tool-call channel
+
+On a pruned keep-set, a `</` inside generated markup can continue as the model's tool-call
+end-parameter marker instead of the HTML tag (seen as `</｜DSML｜ parameter>` in a page title, and as
+a Write call that closed after `<title>…`). Through a coding agent that means truncated or
+malformed writes of long files; in plain chat it is a stray token in the page. Whole-page
+generation with thinking on also runs long and hits the repetition guard. Measured: the Frontend
+keep-set at 0.36 produced a complete, well-designed page with thinking **off** in 158 s, and no
+page with thinking on across three attempts. Keep thinking off for long file generation on a
+pruned keep-set; the shorter gate prompts pass with it on.
