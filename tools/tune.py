@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import curses
+import functools
 import glob
+import http.server
 import importlib.util
 import json
 import math
@@ -30,8 +32,12 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
+import time
+import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import atlas_export as AX  # noqa: E402
 import budget as B  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -626,6 +632,9 @@ class State:
         self.asking = None          # a one-line prompt: {"label", "buf"}
         self.msg = ""
         self.problem = ""           # a profiles file that could not be read
+        # The port Weight Atlas is being served on, while its popup is up. None
+        # is "no popup"; the server itself outlives the popup (ATLAS).
+        self.atlas = None
 
     @property
     def visible(self):
@@ -857,6 +866,11 @@ def put(w, y, x, s, attr=0, maxw=None):
 
 MIN_H, MIN_W = 20, 70
 
+# The bar in the top-left corner, on both screens. It names the repository rather than the
+# model because a box can hold several checkouts of several recipes, and the handle because
+# the owner asked for it to be there.
+TITLE = " deepseek-v41-flash-spark · 0xbakeer "
+
 
 def gate_line(pr, st: "State", width: int) -> str:
     """The third row of a profile: where its number on the right came from.
@@ -889,14 +903,143 @@ def gate_line(pr, st: "State", width: int) -> str:
     return line
 
 
+# --- Weight Atlas -----------------------------------------------------------
+# The thing this screen budgets is 15,360 experts, and the one thing it cannot do is show
+# them. Weight Atlas -- `tools/atlas/`, MIT, by alesha-pro, https://atlas.alesha.pro -- draws
+# exactly that: one column per expert, one row per layer, coloured by how much of the output
+# each expert carried, with any topic as a slice and any keep-set as an outline over it. `a`
+# exports this checkout's routing trace into the three files that page reads and serves the
+# vendored build.
+#
+# The socket binds 127.0.0.1 on a port the kernel picks, and the thread serving it is a
+# daemon, so nothing is reachable from the network and nothing outlives this process. On a
+# headless box the way in is an ssh tunnel, which is why the popup says the tunnel command.
+
+ATLAS_LABEL = "Weight Atlas by alesha-pro"
+ATLAS_KEY = f"a  {ATLAS_LABEL}"       # the legend entry, in one place so it cannot drift
+ATLAS_ROOT = os.path.join(ROOT, "tools", "atlas")
+
+
+class _QuietFiles(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler logs every request to stderr, which on a curses screen
+    arrives as garbage in the middle of the budget panel."""
+
+    def log_message(self, *a):        # noqa: A003
+        pass
+
+
+class AtlasServer:
+    """The vendored build, on loopback, for as long as this process lives."""
+
+    def __init__(self, root: str = None):
+        self.root = root or ATLAS_ROOT
+        self.port = None
+        self._srv = None
+        self._opened = False
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/"
+
+    def start(self) -> int:
+        """Bind and serve. Port 0 asks the kernel for a free one; 127.0.0.1 is not a default
+        to be relied on but the whole security model of this feature."""
+        if self.port:
+            return self.port
+        handler = functools.partial(_QuietFiles, directory=self.root)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        srv.daemon_threads = True
+        self._srv = srv
+        self.port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return self.port
+
+    def open_once(self) -> None:
+        """Open a browser the first time, where there is one. Never fatal: on a headless box
+        this raises, or silently opens nothing, and the popup is the real answer anyway."""
+        if self._opened or not self.port:
+            return
+        self._opened = True
+        if sys.platform != "darwin" and not (os.environ.get("DISPLAY")
+                                             or os.environ.get("WAYLAND_DISPLAY")):
+            return
+        try:
+            webbrowser.open(self.url)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def stop(self) -> None:
+        if self._srv is not None:
+            try:
+                self._srv.shutdown()
+                self._srv.server_close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._srv, self.port = None, None
+
+
+ATLAS = AtlasServer()
+
+
+def atlas_popup(w, st: State) -> None:
+    """The box `a` draws over whichever screen is up. It is the only place the port is said,
+    so it is drawn last, centred, and it stays until the next keypress."""
+    port = st.atlas
+    if not port:
+        return
+    h, W = w.getmaxyx()
+    lines = [ATLAS_LABEL,
+             "",
+             f"served on http://127.0.0.1:{port}/",
+             f"on a remote box: ssh -L {port}:127.0.0.1:{port} <host>",
+             "",
+             "any key to close"]
+    inner = min(max(len(s) for s in lines) + 4, max(10, W - 4))
+    lines = [clip(s, inner - 4) for s in lines]
+    x = max(0, (W - inner - 2) // 2)
+    y = max(0, (h - len(lines) - 2) // 2)
+    put(w, y, x, "┌" + "─" * inner + "┐", C["accent"])
+    for i, s in enumerate(lines):
+        put(w, y + 1 + i, x, "│  " + s.ljust(inner - 2) + "│",
+            (C["bright"] | curses.A_BOLD) if i == 0 else C["muted"])
+    put(w, y + 1 + len(lines), x, "└" + "─" * inner + "┘", C["accent"])
+    w.noutrefresh()
+    curses.doupdate()
+
+
+def open_atlas(w, st: State) -> None:
+    """`a`, on either screen. Export if the data is stale, serve, and put the port up.
+
+    Pressing it a second time while the server is up is not a second server: the same port
+    comes back, because the popup is the only way to see a port that was already chosen."""
+    if ATLAS.port is None:
+        if not os.path.exists(os.path.join(ATLAS_ROOT, "index.html")):
+            st.msg = f"{ATLAS_LABEL}: tools/atlas/ is not in this checkout"
+            return
+        try:
+            if AX.is_stale():
+                # The export reads a 13 MB coverage file and writes 5.6 MB; that is about two
+                # seconds of a frozen screen, and a frozen screen that says nothing reads as
+                # a hang, so it says what it is doing before it starts.
+                st.msg = f"{ATLAS_LABEL}: exporting the routing trace, about two seconds…"
+                draw(w, st)
+                AX.export(profiles=PROFILES)
+            ATLAS.start()
+        except Exception as e:  # noqa: BLE001
+            st.msg = f"{ATLAS_LABEL}: {type(e).__name__}: {e}"
+            return
+        ATLAS.open_once()
+    st.msg = ""
+    st.atlas = ATLAS.port
+
+
 def draw_easy(w, st: State):
     """Name the job, not the experts. Each row is a bundle of topics with the
     budget it needs on this box, computed from the coverage file in use."""
     h, W = w.getmaxyx()
-    title = " DeepSeek-V4.1-Flash "
-    put(w, 0, 0, title, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
+    put(w, 0, 0, TITLE, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
     hostline = f"{st.host.name[:28]} · {st.host.total_gb:.1f} GB · {st.host.available_gb:.1f} free"
-    put(w, 0, max(len(title) + 2, W - len(hostline) - 1), hostline, C["muted"])
+    put(w, 0, max(len(TITLE) + 2, W - len(hostline) - 1), hostline, C["muted"])
     if st.host.busy:
         put(w, 1, 0, f" already running here: {st.host.busy} — this box holds one at a time",
             C["bad"] | curses.A_BOLD)
@@ -997,11 +1140,14 @@ def draw_easy(w, st: State):
         put(w, h - 1, 1, st.msg.ljust(W - 2)[:W - 2], C["warn"] | curses.A_BOLD)
     else:
         for keys in (
-            "↑↓ choose · ←→ context · enter apply and inspect · v topic view · b brief · w write · "
-            "r RUN · q quit",
-            "↑↓ choose · ←→ context · enter inspect · v topics · b brief · w write · r RUN · q quit",
-            "↑↓ choose · ←→ context · enter inspect · v topics · b brief · r RUN · q quit",
-            "↑↓ ←→ · enter inspect · v topics · b brief · r RUN · q quit",
+            f"↑↓ choose · ←→ context · enter apply and inspect · v topic view · b brief · "
+            f"{ATLAS_KEY} · w write · r RUN · q quit",
+            f"↑↓ choose · ←→ context · enter inspect · v topics · b brief · {ATLAS_KEY} · "
+            f"r RUN · q quit",
+            f"↑↓ choose · ←→ context · enter inspect · v topics · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ choose · ←→ context · enter · v topics · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ ←→ · enter · v topics · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ ←→ · {ATLAS_KEY} · r RUN · q quit",
             "↑↓ ←→ · enter inspect · v topics · r RUN · q quit",
         ):
             if len(keys) <= W - 2:
@@ -1015,7 +1161,8 @@ def draw(w, st: State):
     w.erase()
     h, W = w.getmaxyx()
     if h >= MIN_H and W >= MIN_W and st.view == "easy":
-        return draw_easy(w, st)
+        draw_easy(w, st)
+        return atlas_popup(w, st)
     if h < MIN_H or W < MIN_W:
         put(w, 0, 0, f"window is {W}x{h}; this needs at least {MIN_W}x{MIN_H}", C.get("warn", 0))
         put(w, 1, 0, "resize, or use ./tune.sh --list / --print", C.get("muted", 0))
@@ -1027,10 +1174,9 @@ def draw(w, st: State):
     rx = split + 3                          # right pane x
 
     # --- header
-    title = " DeepSeek-V4.1-Flash "
-    put(w, 0, 0, title, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
+    put(w, 0, 0, TITLE, C["bright"] | curses.A_REVERSE | curses.A_BOLD)
     hostline = f"{st.host.name[:28]} · {st.host.total_gb:.1f} GB · {st.host.available_gb:.1f} free · {st.fmt} experts"
-    put(w, 0, max(len(title) + 2, W - len(hostline) - 1), hostline, C["muted"])
+    put(w, 0, max(len(TITLE) + 2, W - len(hostline) - 1), hostline, C["muted"])
     if st.host.busy:
         put(w, 1, 0, f" already running here: {st.host.busy} — this box holds one at a time",
             C["bad"] | curses.A_BOLD)
@@ -1260,11 +1406,15 @@ def draw(w, st: State):
         put(w, h - 1, 1, st.msg.ljust(W - 2)[:W - 2], C["warn"] | curses.A_BOLD)
     else:
         for keys in (
-            "↑↓ topic  space select  ←→ adjust  tab pane  a all  n none  / filter  "
-            "m fit  f format  s save  v profiles  w write  r RUN  q quit",
-            "↑↓ space ←→ tab · a all · n none · / filter · m fit · f format · s save · v profiles · r RUN · q quit",
-            "↑↓ space ←→ tab · / filter · m fit · s save · v profiles · r RUN · q quit",
-            "↑↓ space ←→ tab · / filter · m fit · v profiles · r RUN · q quit",
+            f"↑↓ topic  space select  ←→ adjust  tab pane  A all  n none  / filter  "
+            f"m fit  f format  s save  v profiles  {ATLAS_KEY}  w write  r RUN  q quit",
+            f"↑↓ space ←→ tab · A all · n none · / filter · m fit · f format · s save · "
+            f"v profiles · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ space ←→ tab · A all · / filter · m fit · s save · v profiles · {ATLAS_KEY} · "
+            f"r RUN · q quit",
+            f"↑↓ space ←→ tab · m fit · s save · v profiles · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ space ←→ tab · / filter · {ATLAS_KEY} · r RUN · q quit",
+            f"↑↓ space ←→ tab · {ATLAS_KEY} · r RUN · q quit",
             "space ←→ tab · v profiles · r RUN · q quit",
         ):
             if len(keys) <= W - 2:
@@ -1272,6 +1422,7 @@ def draw(w, st: State):
         put(w, h - 1, 1, keys[:W - 2], C["muted"])
     w.noutrefresh()
     curses.doupdate()
+    atlas_popup(w, st)          # over the top of whatever was just drawn
 
 
 # --- interaction ------------------------------------------------------------
@@ -1335,6 +1486,11 @@ def loop(w, st: State) -> str | None:
         if k == -1:          # the once-a-second wake-up: just redraw
             continue
         st.msg = ""   # a message lasts until the next key
+        if st.atlas:
+            # the popup is modal by the cheapest possible means: it takes one key and goes,
+            # whichever key it was, and the server it is about stays up
+            st.atlas = None
+            continue
         vis = st.visible
         st.cursor = max(0, min(st.cursor, len(vis) - 1)) if vis else 0
 
@@ -1401,6 +1557,8 @@ def loop(w, st: State) -> str | None:
                     return "write"
             elif k in (ord("b"), ord("B")):
                 st.msg = write_brief(st)
+            elif k == ord("a"):
+                open_atlas(w, st)
             continue
         if k == ord("/"):
             st.typing = True
@@ -1419,10 +1577,13 @@ def loop(w, st: State) -> str | None:
         elif k == ord(" ") and vis:
             t = vis[st.cursor]
             st.sel.symmetric_difference_update({t})
-        elif k == ord("a"):
+        elif k == ord("A"):
+            # `a` is Weight Atlas on both screens, so select-all is the shifted one
             st.sel |= set(vis)
         elif k == ord("n"):
             st.sel -= set(vis)
+        elif k == ord("a"):
+            open_atlas(w, st)
         elif k in (curses.KEY_RIGHT, curses.KEY_LEFT):
             d = 1 if k == curses.KEY_RIGHT else -1
             if st.pane == 2:
@@ -2000,6 +2161,12 @@ def main() -> int:
                     help="the one-line description --save-profile gives the profile")
     ap.add_argument("--brief", action="store_true",
                     help="print the task of adding a topic to this keep-set, as Markdown, and exit")
+    ap.add_argument("--atlas", action="store_true",
+                    help=f"what `a` does, without a terminal: export the routing trace if it "
+                         f"is stale, serve {ATLAS_LABEL} (tools/atlas/) on 127.0.0.1 and a free "
+                         f"port, print the URL, and keep serving until Ctrl-C")
+    ap.add_argument("--atlas-export", action="store_true",
+                    help="write the Weight Atlas data files and exit, serving nothing")
     ap.add_argument("--list", action="store_true", help="print the topics and exit")
     ap.add_argument("--print", dest="show", action="store_true", help="print the environment and exit")
     ap.add_argument("--write", action="store_true", help="write the selection into .env and exit")
@@ -2012,6 +2179,41 @@ def main() -> int:
         # the very disagreement between screen and engine this flag exists for.
         print(f"unknown rank {a.rank!r} (DSV41_PRUNE_RANK): {' | '.join(B.RANKS)}", file=sys.stderr)
         return 2
+    # Weight Atlas needs none of the host, the keep-set or the profiles, so it is answered
+    # before any of them is read -- and on a box with no coverage.json at all it still says
+    # something useful, which is that there is nothing to draw.
+    if a.atlas_export or a.atlas:
+        stats = a.stats or AX.STATS_DEFAULT
+        try:
+            if a.atlas_export or AX.is_stale(stats=stats):
+                print(f"exporting {short_path(stats)} for {ATLAS_LABEL}…", file=sys.stderr)
+                r = AX.export(stats=stats)
+                print(f"{short_path(r['insights'])}  {r['bytes'] / 1e6:.1f} MB · "
+                      f"{r['layers']} x {r['experts']} · {r['topics']} topic slices · "
+                      f"{r['prune_sets']} keep-sets", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"{type(e).__name__}: {e}", file=sys.stderr)
+            return 2
+        if not a.atlas:
+            return 0
+        if not os.path.exists(os.path.join(ATLAS_ROOT, "index.html")):
+            print("tools/atlas/ is not in this checkout; see tools/atlas/UPSTREAM.md",
+                  file=sys.stderr)
+            return 2
+        port = ATLAS.start()
+        # flushed: this blocks for as long as somebody wants the page open, and a URL that
+        # is still in a buffer when the reader needs it is not a URL.
+        print(f"{ATLAS_LABEL} on {ATLAS.url}", flush=True)
+        print(f"on a remote box: ssh -L {port}:127.0.0.1:{port} <host>", flush=True)
+        print("Ctrl-C to stop", flush=True)
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print()
+        ATLAS.stop()
+        return 0
+
     if a.source not in B.SOURCES:
         # same reasoning as --rank: it defaults from the environment, and a file
         # that says `salience` must stop the tool rather than be served frequency
@@ -2040,7 +2242,8 @@ def main() -> int:
     sel = [t.strip() for t in a.topics.split(",") if t.strip()]
     unknown = [t for t in sel if not index or t not in index.topics] if sel else []
     interactive = sys.stdout.isatty() and not (a.list or a.show or a.write or a.render or a.profiles
-                                               or a.brief or a.save_profile)
+                                               or a.brief or a.save_profile or a.atlas
+                                               or a.atlas_export)
     if unknown and not interactive:
         # a script asked for something this keep-set cannot serve: say so and stop
         where = short_path(sp_) if sp_ else "any coverage.json in the checkout"
@@ -2181,6 +2384,7 @@ def main() -> int:
         return 0 if p.verdict != "over" else 1
 
     action = curses.wrapper(loop, st)
+    ATLAS.stop()          # whatever `a` started dies with the screen it was started from
     if action is None:
         return 0
     env = env_for(st)

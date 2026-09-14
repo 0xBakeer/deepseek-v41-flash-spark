@@ -11,7 +11,7 @@ the server from the same screen.
 The screen opens on **profiles** — named bundles of topics, the job rather than the experts:
 
 ```
- DeepSeek-V4.1-Flash                                        NVIDIA GB10 · 130.6 GB · 117.0 free
+ deepseek-v41-flash-spark · 0xbakeer                        NVIDIA GB10 · 130.6 GB · 117.0 free
 
  W H A T   S H O U L D   T H I S   B O X   B E   G O O D   A T ?
  39 topics · context ◂ 32k ▸ · 256k needs keep 36 %                               6 more below
@@ -32,7 +32,7 @@ The screen opens on **profiles** — named bundles of topics, the job rather tha
 
  Frontend · 10 topics · 5,560 of 15,360 experts in memory · 80 GB
  weakest of them: javascript at 0.94 coverage
- ↑↓ choose · ←→ context · enter inspect · v topics · b brief · w write · r RUN · q quit
+ ↑↓ choose · ←→ context · enter · v topics · a  Weight Atlas by alesha-pro · r RUN · q quit
 ```
 
 Three rows each. The name, with the gate verdict at the right edge; the description, with what the
@@ -46,7 +46,7 @@ applies it and starts the server; `v` moves between the two views at any time. H
 view with the Frontend bundle applied, at the keep fraction Frontend was gated at:
 
 ```
- DeepSeek-V4.1-Flash                          NVIDIA GB10 · 130.6 GB · 117.0 free · cb3 experts
+ deepseek-v41-flash-spark · 0xbakeer          NVIDIA GB10 · 130.6 GB · 117.0 free · cb3 experts
 
  T O P I C S                                          B U D G E T
  39 available · 10 selected · 23 below
@@ -75,7 +75,7 @@ view with the Frontend bundle applied, at the keep fraction Frontend was gated a
  C O N T E X T
  ◂   32k ▸  cache has room for 3.7M
  weakest selected topic  javascript 0.94     enough at 12 % — no gate below 36 %
- ↑↓ space ←→ tab · / filter · m fit · s save · v profiles · r RUN · q quit
+ ↑↓ space ←→ tab · m fit · s save · v profiles · a  Weight Atlas by alesha-pro · r RUN · q quit
 ```
 
 (The render above was taken with the context selector at 32k. On 2026-09-12 the longest context
@@ -289,9 +289,28 @@ between the two rows above is context window and prefill room.
 > can, and it has not been run. Until it is, treat the paragraph above as the mechanism, not a
 > measurement.
 
+## `a` — the same keep-sets, drawn
+
+The screen budgets 15,360 experts and can never show you one. `a`, on either view, opens
+**Weight Atlas by alesha-pro** ([github.com/alesha-pro/atlas](https://github.com/alesha-pro/atlas),
+MIT, vendored in `tools/atlas/`) on this checkout's own trace: the whole expert field as a 40 × 384
+grid, a column per expert and a row per layer, coloured by REAP saliency — the same numbers the
+bars on this screen are computed from. Any of the 39 topics can be taken as a slice of it, and each
+of the ten shipped profiles is an outline over the grid, holding the same experts at the same keep
+fraction its generation gate was run at. It is the one view in which "Frontend at keep 36 %" is a
+shape rather than a list of 5,560 ids.
+
+The first press exports the data (about two seconds; `tools/atlas/models/`, ~5.6 MB, generated and
+not committed) and starts a static server bound to `127.0.0.1` on a port the kernel picks, which
+dies with the screen. The popup says the port and the `ssh -L` line for a box you are on over ssh.
+`./tune.sh --atlas` does all of it without a terminal, and `--atlas-export` writes the files
+without serving them. What the page is, what was patched into it and why are in
+[`tools/atlas/UPSTREAM.md`](../tools/atlas/UPSTREAM.md).
+
 ## Without a terminal
 
 ```bash
+./tune.sh --atlas                         # serve Weight Atlas on this keep-set, no terminal needed
 ./tune.sh --render 30x96                  # the screen as text, no terminal needed
 ./tune.sh --list                          # the topics this keep-set carries, with coverage
 ./tune.sh --topics python,html --print    # the environment that selection implies
@@ -367,6 +386,8 @@ python3 tools/test_budget.py         # the cost model against two loads this box
 python3 tools/test_tune_draw.py      # the screens render at seven sizes without colliding
 python3 tools/test_tune_profiles.py  # profiles, and the gate records behind them
 python3 tools/test_tune_brief.py     # the brief comes from the keep-set, and its commands are real
+python3 tools/test_atlas_export.py   # the Weight Atlas outlines are the engine's own keep-sets
+python3 tools/test_tune_atlas.py     # the `a` key: legend, popup, and a real loopback fetch
 ```
 
 `test_budget.py` cross-checks the slot sizes against the kernel's own constant, the KV formula

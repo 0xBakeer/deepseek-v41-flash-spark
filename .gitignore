@@ -34,3 +34,10 @@ results/*/state/
 !results/oneshots/
 !results/oneshots/*.html
 !results/oneshots/*.txt
+
+# tools/atlas/ is a vendored build of Weight Atlas (see tools/atlas/UPSTREAM.md). The
+# ~5 MB of routing data it draws is generated from results/keepsets/ by
+# tools/atlas_export.py whenever `a` is pressed in ./tune.sh, so it is not committed.
+tools/atlas/models/
+# the upstream clone the vendored build is reproduced from, when someone rebuilds it
+tools/atlas/upstream/atlas/

@@ -168,6 +168,34 @@ Until now that was two numbers in a file and a three-minute wait to find out.
   path; **not yet gated on the generation harness**, so the default is unchanged to the bit.
   `tools/test_route_modes.py` is the seventh torch-free check.
   [`docs/keep-sets.md`](docs/keep-sets.md#why-coverage-predicts-whether-long-generations-hold-together).
+- **`a` in `./tune.sh` draws the keep-set** (2026-09-14). The screen budgets 15,360 experts and
+  could never show one of them. **Weight Atlas by alesha-pro**
+  ([github.com/alesha-pro/atlas](https://github.com/alesha-pro/atlas), MIT,
+  [atlas.alesha.pro](https://atlas.alesha.pro)) draws a MoE model's expert field as one grid —
+  a column per expert, a row per layer, coloured by how much of the output each expert carried,
+  with any domain as a slice and any set as an outline over it — and that is exactly the shape
+  of what `results/keepsets/` measures. The built site is **vendored** at commit
+  `b57e75a583378fe073d106f122342718ec7f0887` under `tools/atlas/` (their `LICENSE` verbatim, the
+  upstream URL, the pinned commit, the rebuild steps and the 22-replacement patch it was built
+  from in [`tools/atlas/UPSTREAM.md`](tools/atlas/UPSTREAM.md)); it is somebody else's work and is
+  credited as such in [`CREDITS.md`](CREDITS.md). Pressing `a` on either screen exports this
+  checkout's routing trace into the three files that page reads and serves `tools/atlas/` from a
+  `ThreadingHTTPServer` bound to `127.0.0.1` on a port the kernel picks — never `0.0.0.0`, and the
+  socket dies with the screen — then puts the URL and an `ssh -L` line in a popup. `--atlas` does
+  the same without a terminal and `--atlas-export` writes the files and serves nothing. Because
+  `a` is now the atlas, **select-all on the topic screen moves to `A`**.
+  [`docs/tune.md`](docs/tune.md), [`docs/tune-reference.md`](docs/tune-reference.md).
+- **`tools/atlas_export.py`** — the trace in that page's schema, and nothing invented: the 40 × 384
+  REAP-saliency grid, routing share and per-token contribution, each of the 39 traced topics as its
+  own slice, and each of the ten shipped profiles both as a colour field and as an outline holding
+  the experts `tools/budget.py` would hand the engine at the keep fraction that profile's
+  generation gate was measured at. The weight inventory is architecture-derived with every measured
+  statistic left at 0, so the wall above the grid renders hatched rather than claiming a scan that
+  was never taken. Output is `tools/atlas/models/` (~5.6 MB, generated, gitignored) and is re-made
+  whenever `coverage.json`, `gates.json` or `tools/tune.py` is newer than it.
+  `tools/test_atlas_export.py` checks every outline against `TopicIndex.curves(...)` itself, and
+  `tools/test_tune_atlas.py` checks the key legend, the popup at seven window sizes and a real
+  fetch over a real loopback socket — two more checks that need no GPU, no checkpoint and no torch.
 
 ### Fixed
 - **The gate tool's default output directory did not name the directories the records are in.**

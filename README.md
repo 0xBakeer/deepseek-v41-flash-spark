@@ -152,6 +152,22 @@ checked against what this box has free right now, and `r` to start the server wi
 ./tune.sh --topics python,html --print    # the environment that selection implies
 ```
 
+![The profile screen of ./tune.sh](docs/img/tui-profiles.png)
+
+*The profile screen: a named bundle per row, with the verdict its generation gate returned and the keep fraction it was measured at.*
+
+![The topic screen of ./tune.sh](docs/img/tui-topics.png)
+
+*The topic screen: coverage per topic with the text each was traced on, and the budget panel against the memory this box has free right now.*
+
+`a` on either screen opens **Weight Atlas by alesha-pro** on the same keep-sets. It exports this
+checkout's routing trace into the files that page reads and serves the vendored build
+(`tools/atlas/`, MIT) on `127.0.0.1` and a free port: the whole expert field as one grid, 40 layers
+by 384 experts, coloured by how much of the output each expert carried, with any of the 39 topics
+as a slice and any of the ten shipped keep-sets outlined on it. `--atlas` does the same without a
+terminal. The page is somebody else's work, vendored and credited — see
+[`CREDITS.md`](CREDITS.md) and [`tools/atlas/UPSTREAM.md`](tools/atlas/UPSTREAM.md).
+
 Fewer topics do not make a step faster — a step reads the experts the token activates either
 way. What they buy is a smaller keep fraction for the same coverage, and that is a smaller arena.
 How much smaller is the ranking rule's answer, not a constant: under the default
@@ -286,12 +302,14 @@ Full API reference: [`docs/openai-api.md`](docs/openai-api.md) (operator's view)
 
 ## Reproduce the checks and the trace
 
-Four checks need nothing at all — no GPU, no checkpoint, no torch — so they run anywhere:
+Six checks need nothing at all — no GPU, no checkpoint, no torch — so they run anywhere:
 
 ```bash
 python3 tools/test_budget.py        # the memory model against two loads this box actually ran
 python3 tools/test_engine_kwargs.py # every launcher kwarg is a parameter the engine has
 python3 tools/test_tune_draw.py     # the tune screen renders at 7 sizes without colliding
+python3 tools/test_atlas_export.py  # the Weight Atlas outlines are the engine's own keep-sets
+python3 tools/test_tune_atlas.py    # the `a` key: legend, popup, and a real loopback fetch
 python3 server/test_server.py       # the HTTP layer against the mock engine
 ```
 

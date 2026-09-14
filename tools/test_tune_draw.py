@@ -167,6 +167,29 @@ check("the topic screen offers the save key", "s save" in render(st, 60, 200).ro
 st.view = "easy"
 check("the profile screen offers the brief key", "b brief" in render(st, 60, 200).row(59))
 
+# `a` opens Weight Atlas on both screens, so select-all is `A` -- a key that moved has to be
+# offered under its new name, or the screen teaches the old one. The label is the credit as
+# well as the key, so it is compared exactly. tools/test_tune_atlas.py covers the rest of it.
+st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+st.view = "advanced"
+line = render(st, 60, 200).row(59)
+check("the topic screen offers the atlas key", T.ATLAS_KEY in line, repr(line))
+check("  and select-all under its new name", "A all" in line, repr(line))
+st.view = "easy"
+line = render(st, 60, 200).row(59)
+check("the profile screen offers the atlas key", T.ATLAS_KEY in line, repr(line))
+
+# the title bar names the checkout and the handle, at every size and on both screens
+for view in ("easy", "advanced"):
+    for h, w in SIZES:
+        st = T.State(host, index, stats, 0.39, 32768, "cb3", [])
+        st.view = view
+        head = render(st, h, w).row(0)
+        if h < T.MIN_H or w < T.MIN_W:
+            continue
+        check(f"the {view} title bar at {w}x{h}", "deepseek-v41-flash-spark · 0xbakeer" in head,
+              repr(head))
+
 # --- the easy view, at every size and on every profile ----------------------
 for h, w in SIZES:
     for cursor in range(len(T.PROFILES)):

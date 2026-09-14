@@ -15,10 +15,12 @@ environment variable is read from `.env` as well as from the shell.
 ./tune.sh --list                   # the topics this keep-set carries, with coverage
 ./tune.sh --topics coding --print  # the environment that selection implies
 ./tune.sh --render 30x96           # the screen as text, no terminal needed
+./tune.sh --atlas                  # serve Weight Atlas on this keep-set, no terminal needed
 ```
 
 The interactive screen is used only when stdout is a terminal **and** none of `--list`, `--print`,
-`--write`, `--render`, `--profiles`, `--save-profile` or `--brief` was given. In a pipe or a CI
+`--write`, `--render`, `--profiles`, `--save-profile`, `--brief`, `--atlas` or `--atlas-export`
+was given. In a pipe or a CI
 job, a bare `./tune.sh` behaves as `--print`.
 
 ## Flags
@@ -45,6 +47,8 @@ job, a bare `./tune.sh` behaves as `--print`.
 | `--save-profile NAME` | — | keep the current selection under that name in the user profiles file, then exit |
 | `--describe TEXT` | the topic names | the one-line description `--save-profile` writes |
 | `--brief` | — | print the task of adding a topic to this keep-set, as Markdown, then exit |
+| `--atlas` | — | what `a` does, without a terminal: export the routing trace if it is stale, serve the vendored Weight Atlas build (`tools/atlas/`) on `127.0.0.1` and a port the kernel picks, print the URL and the ssh-tunnel line, and keep serving until `Ctrl-C`. Binds loopback only, and the socket dies with the process |
+| `--atlas-export` | — | write the Weight Atlas data files (`tools/atlas/models/`, ~5.6 MB, gitignored) and exit, serving nothing. Unlike `a` and `--atlas` it writes whether or not the export is stale |
 
 Without `--stats`, the file is chosen in this order:
 
@@ -68,6 +72,9 @@ pane says `this keep-set carries no per-topic histogram` and `--list` exits 1.
 `--print` is therefore usable as a check in a script: it exits non-zero exactly when the selection
 would not serve. Note that `TIGHT` exits 0 — it means the margin is under 3 GB, not that it fails.
 
+`--atlas` and `--atlas-export` exit 2 when the trace they read is missing, or when
+`tools/atlas/` is not in the checkout; `--atlas` otherwise exits 0 when it is stopped.
+
 A profiles file that cannot be read does not change any exit code. It costs the profiles in that
 file and nothing else: the problem goes to stderr, the tool starts on the built-in profiles, and
 `--list`, `--print` and `--write` behave exactly as they would have. `--brief` exits 0 whether or
@@ -82,8 +89,9 @@ After `r` in the interactive screen the exit code is `./start.sh`'s.
 | `↑` `↓`, `k` `j` | move the topic cursor |
 | `PgUp` `PgDn` | move it ten rows |
 | `space` | select or deselect the topic under the cursor |
-| `a` | select every topic currently visible (the filter applies) |
+| `A` | select every topic currently visible (the filter applies) |
 | `n` | deselect every visible topic |
+| `a` | open **Weight Atlas by alesha-pro** on this checkout's routing trace — see below |
 | `/` | start typing a filter; `Enter` keeps it, `Esc` clears it |
 | `Tab`, `Shift-Tab` | cycle the focused pane: topics, resident experts, context |
 | `←` `→` | adjust the focused slider. Context steps 4k, 8k, 16k, 32k, 64k, 128k, 256k; every other pane steps the keep fraction by 2 points between 6 % and 60 % |
@@ -110,6 +118,34 @@ above, and:
 | key | effect |
 |---|---|
 | `b` | write the topic task brief to `tune-brief.md` in the checkout, and say so on the key line |
+| `a` | open **Weight Atlas by alesha-pro** — the same key, the same server, on both screens |
+
+### `a` — Weight Atlas by alesha-pro
+
+[Weight Atlas](https://github.com/alesha-pro/atlas) (MIT, [atlas.alesha.pro](https://atlas.alesha.pro))
+draws a MoE model's expert field as one grid: a column per expert, a row per layer, coloured by how
+much of the output each expert carried. `a` shows this box's keep-sets on it.
+
+Pressing it:
+
+1. runs `tools/atlas_export.py` if the export is **stale** — missing, or older than
+   `results/keepsets/topics/coverage.json`, `results/keepsets/gates.json` or `tools/tune.py`. That
+   takes about two seconds and the key line says so while it runs. The output,
+   `tools/atlas/models/` (~5.6 MB), is generated and not committed;
+2. serves `tools/atlas/` — the vendored build — from a `ThreadingHTTPServer` in a daemon thread,
+   bound to `127.0.0.1` on a port the kernel picks. Never `0.0.0.0`, and it dies with the screen;
+3. opens a browser where there is one, and draws a popup with the URL, the ssh-tunnel line for a
+   box you are on over ssh, and `any key to close`. Pressing `a` again shows the same port.
+
+What is on the page: the 40 × 384 grid coloured by REAP saliency, each of the 39 traced topics as
+a slice (and as a ratio against every topic at once), routing share and mean contribution as
+alternative colourings, and each of the ten shipped profile keep-sets as an outline — the same
+expert ids `tools/budget.py` hands the engine, at the keep fraction that profile's generation gate
+was measured at. No weight scan is taken, so the weight wall above the grid is hatched and the
+eleven cards that need other captures are not drawn.
+
+The export always reads the topic catalogue (`results/keepsets/topics/coverage.json`), whatever
+`--stats` the screen itself is on: the page is the trace, not the current selection.
 
 ## Profiles from a file
 
@@ -520,6 +556,8 @@ python3 tools/test_budget.py         # the cost model against two loads this box
 python3 tools/test_tune_draw.py      # the screens render at seven sizes without colliding
 python3 tools/test_tune_profiles.py  # profiles from a file, including the files that are wrong
 python3 tools/test_tune_brief.py     # the brief comes from the keep-set, and its commands are real
+python3 tools/test_atlas_export.py   # the Weight Atlas outlines are the engine's own keep-sets
+python3 tools/test_tune_atlas.py     # the `a` key: legend, popup, and a real loopback fetch
 ```
 
 None of them needs a GPU, the checkpoint or torch. `test_tune_brief.py` checks every command the
