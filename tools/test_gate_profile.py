@@ -599,6 +599,10 @@ check("a numeric range with an ellipsis is not a corrupted run",
       G.corrupt_run("push 1..5, overflow 6...10 returns false") is None)
 check("an ellipsis between words is not a corrupted run", G.corrupt_run("wait...no, that fires twice") is None)
 check("five or more welded dots still are", G.corrupt_run("wait.....no") is not None)
+check("a leaked tool-call marker in a page is a corrupted run",
+      G.corrupt_run("<title>Lumen \u2014 Hamburg</\uff5cDSML\uff5c parameter>\n<body>") is not None)
+check("the leaked marker classifies as corrupt",
+      G.classify("", "<title>x</\uff5cDSML\uff5c parameter>", "stop", True, True) == "corrupt")
 
 bad = G.universal("I thought about the grid, the win lines and the reset button at length.",
                   "", "stop", True)

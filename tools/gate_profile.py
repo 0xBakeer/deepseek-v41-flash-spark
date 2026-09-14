@@ -445,6 +445,9 @@ def _is_rule_line(line: str, ch: str) -> bool:
     return bool(s) and s.count(ch) / len(s) >= 0.6
 
 
+_TOOL_MARK = "\uff5cDSML\uff5c"   # the fullwidth bars of the model's tool-call markup
+
+
 def corrupt_run(text: str):
     """A run of three or more identical non-alphanumeric characters that no
     writer meant.
@@ -458,7 +461,16 @@ def corrupt_run(text: str):
       where a separator or an operator cannot be.
     Whitespace is excluded outright: three blank lines are just three blank
     lines.
+
+    A third shape is not a run at all but is the same fault: the model's own
+    tool-call markup (`<｜DSML｜…>`) inside prose or a page. It leaks at a `</`
+    boundary in place of an HTML close tag -- `</｜DSML｜ parameter>` where
+    `</title>` belonged -- and no writer means it either.
     """
+    k = text.find(_TOOL_MARK)
+    if k >= 0:
+        line = text[text.rfind("\n", 0, k) + 1: (text.find("\n", k) + 1 or len(text) + 1) - 1]
+        return _TOOL_MARK, line.strip()[:60]
     for m in _RUN.finditer(text):
         ch, i, j = m.group(1), m.start(), m.end()
         if ch.isalnum() or ch.isspace():
