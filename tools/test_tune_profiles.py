@@ -78,7 +78,7 @@ check("  with nothing to report", problems, [])
 check("  the name", profs[0][0], "Arabic desk")
 check("  the description", profs[0][1], "Arabic and English, for a bilingual assistant")
 check("  the topics", profs[0][2], ["arabic", "english", "translation"])
-check("  never gated, whatever the file says", [p[3] for p in profs], [False, False])
+check("  owning no gate record, whatever the file says", [p[3] for p in profs], [None, None])
 check("  and where it came from", profs[0][4], T.short_path(good))
 check("  naming no ranking rule, so applying it leaves the one in force",
       [p[5] for p in profs], [None, None])
@@ -107,7 +107,8 @@ check("  every shipped profile is budgeted maxmin",
       sorted({m[5] for m in merged if m[4] == T.BUILT_IN}), ["maxmin"])
 check("  and the user's carries no rule of its own", merged[-1][5], None)
 
-by = {p["name"]: p for p in state(profs).profiles()}
+by_user = {p["name"]: p for p in state(profs).profiles()}
+by = by_user
 check("the screen shows a user profile", by["Arabic desk"]["topics"],
       ["arabic", "english", "translation"])
 check("  as untested, like every other one", "untested" in by["Arabic desk"]["status"], True)
@@ -235,6 +236,122 @@ check("an unknown topic on the command line still exits 2", r.returncode, 2)
 r = run(["--stats", STATS, "--topics", "", "--profiles-file", cli, "--profiles"])
 check("a saved profile shows up in --profiles", "From the CLI" in r.stdout, True)
 check("  marked as the user's", "(yours)" in r.stdout, True)
+
+# --- the generation gate, read back off the records --------------------------
+# Every count the profile screen shows comes out of a GATE.md, and the index
+# beside them says which run is which profile's record and what keep-set that
+# run measured. Neither can be checked by reading the screen, so it is checked
+# here: the record exists, it is the newest full run on exactly those topics,
+# and the numbers parse to what the file says in words.
+import gate_profile as G  # noqa: E402
+
+KEEPSETS = os.path.join(ROOT, "results", "keepsets")
+gates_index = T.read_gates_index()
+check("the gate index parses", len(gates_index) > 0, True)
+
+for name, _blurb, topics, record, _rank in T.PROFILES:
+    where = os.path.join(KEEPSETS, record, T.GATE_BASENAME)
+    check(f"{name}: its record is in the checkout", os.path.exists(where), True)
+    # gate_profile.py writes there by default, so the two have to agree or the
+    # next run of the gate starts a second, empty directory beside this one
+    check(f"{name}: the gate tool writes to that directory", G.slug(name), record)
+    g = T.gate_for(record, topics, gates_index)
+    check(f"{name}: it has a gate record", bool(g), True)
+    if not g:
+        continue
+    check(f"{name}: on exactly the topics it ships", sorted(g["topics"]), sorted(topics))
+    check(f"{name}: with a keep fraction", isinstance(g["keep"], float), True)
+    check(f"{name}: and the pair it was ranked with", (g["rank"], g["source"]),
+          ("maxmin", "saliency"))
+    check(f"{name}: strict is within the run count", 0 <= g["strict"] <= g["runs"], True)
+    # nothing newer in the same file describes the same bundle: a later full run
+    # on these topics would be the record, and this one would be history
+    later = [x for x in T.read_gate(where)
+             if not x["filtered"] and sorted(x["topics"]) == sorted(topics)]
+    check(f"{name}: nothing newer supersedes it", later[-1]["run"], g["run"])
+
+# the numbers, against what the file says in words
+backend = T.gate_for("backend", dict(zip([p[0] for p in T.PROFILES],
+                                         [p[2] for p in T.PROFILES]))["Backend"], gates_index)
+check("Backend's record is the 2026-09-14 run", backend["run"], "2026-09-14 03:36")
+check("  7 of 10 failed, so 3 passed strictly", (backend["strict"], backend["runs"]), (3, 10))
+check("  and all ten finished a correct answer", backend["finished"], 10)
+check("  at the keep fraction that holds a filled 256k", backend["keep"], T.SAFE_256K_KEEP)
+
+# A filtered re-run says the prompts it ran pass and nothing about the ones it
+# did not, so it can never be a profile's record.
+euro = os.path.join(KEEPSETS, "european_languages", T.GATE_BASENAME)
+check("a filtered re-run is in the file", any(x["filtered"] for x in T.read_gate(euro)), True)
+check("  and is not the record", T.gate_for("european_languages",
+      dict((p[0], p[2]) for p in T.PROFILES)["European languages"], gates_index)["run"],
+      "2026-09-13 22:05")
+# ... and a run on a different bundle is a different measurement: European
+# languages was gated WITH reasoning_lang on 2026-09-14 and ships without it.
+check("a run on other topics is not the record either",
+      T.gate_for("european_languages", ["english", "german"], gates_index), None)
+check("no record directory, no gate", T.gate_for(None, ["english"], gates_index), None)
+check("a file that is not a gate log yields nothing",
+      T.read_gate(os.path.join(KEEPSETS, "general", T.GATE_BASENAME)), [])
+check("the smallest keep fraction anything was gated at", T.gate_floor(gates_index),
+      T.SAFE_256K_KEEP)
+check("every index entry names a run that is in its file",
+      [k for k in gates_index
+       if k[1] not in {x["run"] for x in
+                       T.read_gate(os.path.join(KEEPSETS, k[0], T.GATE_BASENAME))}], [])
+
+# --- what the screen does with it -------------------------------------------
+# The keep fraction a shipped profile is budgeted at is the one its gate ran at,
+# not the one the coverage target implies. Under `saliency` those are three
+# times apart: every topic in the catalogue is above 0.85 at keep 0.12, which is
+# below anything that has ever been asked to generate a sentence.
+sal = B.TopicIndex(STATS, "saliency")
+st_sal = T.State(host, sal, STATS, 0.36, 32768, "cb3", [], rank="maxmin", source="saliency")
+by = {p["name"]: p for p in st_sal.profiles()}
+check("a shipped profile is budgeted at the keep it was gated at", by["Frontend"]["keep"], 0.36)
+check("  which the coverage target alone would not have chosen",
+      sal.keep_for(tuple(sorted(by["Frontend"]["topics"])), 0.85, rank="maxmin") < 0.2, True)
+check("  and the screen says both counts", by["Frontend"]["status"],
+      "7 of 10 strict · 9 finished")
+check("  with the strict count alone where nothing counted the rest",
+      by["Writing"]["status"], "5 of 8 strict")
+check("  a good finished count is not called a warning",
+      (by["Backend"]["status"], by["Backend"]["tone"]),
+      ("3 of 10 strict · 10 finished", "good"))
+line = T.gate_line(by["Frontend"], st_sal, 96)
+check("the gate line dates it", "gated 2026-09-14" in line, True)
+check("  and names the keep fraction", "keep 36 %" in line, True)
+check("  and does not repeat the pair when it is the screen's",
+      "maxmin/saliency" in line, False)
+other = T.State(host, B.TopicIndex(STATS), STATS, 0.36, 32768, "cb3", [], rank="maxmin")
+mismatch = {p["name"]: p for p in other.profiles()}["Frontend"]
+check("a screen ranking something else says so on every gate line",
+      all("maxmin/saliency" in T.gate_line(mismatch, other, w) for w in (60, 80, 96, 140)), True)
+
+# A profile whose topics this keep-set does not all carry is not the profile
+# that was gated. It still applies, with the topics that are there, but the
+# counts from a run of the whole bundle would be the most confident wrong number
+# on the screen, so it shows none.
+shipped = list(T.PROFILES)
+try:
+    T.PROFILES.append(("Frontend plus one", "the Frontend bundle and a topic that is not here",
+                       shipped[0][2] + ["not-a-topic"], shipped[0][3], "maxmin"))
+    partial = {p["name"]: p for p in
+               T.State(host, sal, STATS, 0.36, 32768, "cb3", [],
+                       rank="maxmin", source="saliency").profiles()}
+finally:
+    T.PROFILES[:] = shipped
+short = partial["Frontend plus one"]
+check("a profile short of a topic still applies", len(short["topics"]), len(shipped[0][2]))
+check("  naming what it could not use", short["missing"], ["not-a-topic"])
+check("  and shows no gate, because that is not what was gated", short["gate"], None)
+check("  so it reads untested", "untested" in short["status"], True)
+check("a profile from a file is untested too", "untested" in by_user["Arabic desk"]["status"], True)
+check("  and is budgeted from the coverage target, having no measured keep",
+      by_user["Arabic desk"]["gate"], None)
+check("a keep-set carrying none of a profile's topics says that instead",
+      {p["name"]: p for p in T.State(host, B.TopicIndex(
+          os.path.join(KEEPSETS, "general", "coverage.json")), STATS, 0.36, 32768,
+          "cb3", []).profiles()}["Frontend"]["status"], "not in this keep-set")
 
 print()
 print(f"{len(fails)} failed" if fails else "all checks passed")

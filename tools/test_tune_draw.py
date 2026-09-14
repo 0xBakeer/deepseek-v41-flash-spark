@@ -15,6 +15,7 @@ print(sys.pycache_prefix)"` says where to look.
 """
 import curses
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -57,9 +58,12 @@ def advanced(win, h, w):
     # overlapping -- the later write wins and the earlier row disappears --
     # so the test is that BOTH adjustable rows are still on screen, on
     # different lines, and neither is the footer.
+    # Told apart by what the arrows are wrapped around -- `◂ 36 % ▸` against
+    # `◂ 256k ▸` -- and not by whether a per cent sign appears anywhere on the
+    # row: the message beside the context arrows carries one too.
     arrows = [y for y, r in enumerate(rows) if r.lstrip().startswith("◂")]
-    pct = [y for y in arrows if "%" in rows[y]]
-    ctx = [y for y in arrows if "%" not in rows[y]]
+    pct = [y for y in arrows if re.match(r"◂\s*[\d.]+ %", rows[y].lstrip())]
+    ctx = [y for y in arrows if y not in pct]
     foot = [y for y, r in enumerate(rows) if "weakest" in r or "no topic selected" in r]
     if len(pct) != 1:
         problems.append(f"keep slider rows: {len(pct)}")
@@ -284,6 +288,59 @@ if index and index.topics:
     hit = [r for r in rows if index.topics[0] in r]
     check("a topic row shows its sample size", bool(hit) and "tokens" not in hit[0] and any(
         c.isdigit() for c in hit[0].split()[-1]), hit[0] if hit else "row not found")
+
+# --- the gate verdict, on the screen ----------------------------------------
+# A user choosing "Backend" is choosing a keep-set that has been measured, and
+# the measurement has to be on the row with the name. These checks are on the
+# topic catalogue, because a profile only resolves against a keep-set that
+# carries its topics.
+for h, w in SIZES:
+    if h < T.MIN_H or w < T.MIN_W:
+        continue
+    st = T.State(host, topic_index, topic_stats, 0.39, 32768, "cb3", [],
+                 rank="maxmin", source="saliency")
+    rows = [render(st, h, w).row(y) for y in range(h)]
+    body = "\n".join(rows)
+    bad = []
+    if "strict" not in body:
+        bad.append("no gate verdict on any row")
+    if "gated 2026-09-" not in body:
+        bad.append("no gate date on any row")
+    if "keep 36 %" not in body and "keep 40 %" not in body:
+        bad.append("no gated keep fraction on any row")
+    if any(len(r) > w for r in rows):
+        bad.append("a row is wider than the window")
+    check(f"the profile screen carries the gate at {w}x{h}", not bad, "; ".join(bad))
+    # The sub-line and the scroll marker share row 3. The marker is written at
+    # a fixed column, so the sub-line has to stop before it rather than be
+    # overwritten mid-word: `…the topic-by-topic vi5 more below` is the failure
+    # this catches, and the check is that the column in front of the marker is
+    # blank.
+    sub = rows[3].ljust(w)
+    if "more below" in sub:
+        check(f"  the sub-line stops before the scroll marker at {w}x{h}",
+              sub[w - 15] == " ", repr(sub))
+
+# which keep fraction holds a filled 256k is a fact, and the screen has to carry
+# it where the context length is being chosen -- on both screens
+for view, seq in (("easy", 262144), ("easy", 32768), ("advanced", 262144)):
+    st = T.State(host, topic_index, topic_stats, 0.36, seq, "cb3",
+                 sorted(topic_index.topics)[:3], rank="maxmin", source="saliency")
+    st.view = view
+    body = "\n".join(render(st, 40, 140).row(y) for y in range(40))
+    check(f"the {view} screen names the 256k keep fraction at {seq // 1024}k",
+          "36 %" in body and "256k" in body, body[:0])
+
+# a profile from a file has no gate, and must not borrow the row above's
+NOGATE = [("No gate", "topics that were never gated together",
+           sorted(topic_index.topics)[:3], None, "results/keepsets/profiles.json", None)]
+st = T.State(host, topic_index, topic_stats, 0.39, 32768, "cb3", [], user_profiles=NOGATE,
+             rank="maxmin", source="saliency")
+st.pcursor = len(T.PROFILES)
+rows = [render(st, 40, 140).row(y) for y in range(40)]
+at = next(i for i, r in enumerate(rows) if "No gate" in r)
+check("a profile with no gate reads untested", "untested" in rows[at])
+check("  and gets no gate line of its own", "gated" not in rows[at + 2], repr(rows[at + 2]))
 
 print()
 print(f"{len(fails)} failed" if fails else "all checks passed")

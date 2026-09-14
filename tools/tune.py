@@ -25,6 +25,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,8 +49,12 @@ BLOCKS = " ▏▎▍▌▋▊▉█"
 # into the range where long output falls apart, and the prose inside an HTML
 # page is English. Adding it back costs the markup topics about five points of
 # coverage and buys English forty-five.
-# The fourth field is whether the profile has been through the generation gate.
-# None of them has yet, and the screen says so, because coverage cannot see a
+#
+# The fourth field is the directory under results/keepsets/ that holds this
+# profile's generation-gate record, and every shipped profile has one now
+# (2026-09-13/14). It is not a flag: the counts, the date and the keep fraction
+# are read back out of that GATE.md at startup, so a fresh gate run changes what
+# the screen says by being run. The gate is there because coverage cannot see a
 # gap in the topic CATALOGUE -- only a gap in the selection. The Chat profile
 # scored 0.85 or better on all five of its topics and still reasoned in circles
 # on a two-train arithmetic question, because no topic in the catalogue carries
@@ -75,26 +80,28 @@ PROFILES = [
     # Under maxmin the two cost the other topics about 0.01 of coverage each.
     ("Frontend", "HTML, CSS, JavaScript, TypeScript, config, and the English around them",
      ["html", "css", "javascript", "typescript", "english", "technical", "config",
-      "reasoning", "reasoning_code", "reasoning_design"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_design"], "frontend", "maxmin"),
     ("Backend", "Python, Go, Java, SQL, configuration files, technical prose",
      ["python", "go", "java", "sql", "config", "technical", "english",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "backend", "maxmin"),
     # "Programming, broadly" carried fifteen topics and passed 4 of 16 on its gate (2026-09-13):
     # at this box's budget a profile that wide serves nothing. Its registers are now two
     # profiles of nine -- the web half is Frontend above, the systems half is this.
     ("Systems programming", "Rust, C++, Go, Java, SQL, config, and the prose around them",
      ["rust", "cpp", "go", "java", "sql", "config", "technical", "english",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "systems_programming", "maxmin"),
     ("Chat and explanation", "Everyday questions, essays, summaries, technical explanation",
      ["english", "technical", "academic", "journalism", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "chat_and_explanation", "maxmin"),
     ("Medicine", "Clinical and pharmacological register, with academic prose",
-     ["medical", "academic", "technical", "english", "reasoning", "reasoning_code"], False, "maxmin"),
+     ["medical", "academic", "technical", "english", "reasoning", "reasoning_code"],
+     "medicine", "maxmin"),
     ("Law and finance", "Contracts, statutes, filings, financial reporting",
-     ["legal", "finance", "academic", "english", "reasoning", "reasoning_code"], False, "maxmin"),
+     ["legal", "finance", "academic", "english", "reasoning", "reasoning_code"],
+     "law_and_finance", "maxmin"),
     ("Data and research", "Python, R, SQL, LaTeX, notebooks and config, academic writing",
      ["python", "rlang", "sql", "latex", "academic", "technical", "english", "config",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "data_and_research", "maxmin"),
     # "Many languages" carried fourteen topics and passed 2 of 15 on its gate (2026-09-13) --
     # every natural-language prompt failed. Split by script family into two profiles of nine.
     # With thinking off every one of these languages came out clean on the same keep-set; with it
@@ -107,13 +114,13 @@ PROFILES = [
     # Thinking on in a non-English language remains the weakest row; thinking off is served.
     ("European languages", "English, German, French, Spanish, Italian, Portuguese, translation",
      ["english", "german", "french", "spanish", "italian", "portuguese", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "european_languages", "maxmin"),
     ("World languages", "English, Arabic, Chinese, Japanese, Russian, Turkish, translation",
      ["english", "arabic", "chinese", "japanese", "russian", "turkish", "translation",
-      "reasoning", "reasoning_code", "reasoning_lang"], False, "maxmin"),
+      "reasoning", "reasoning_code", "reasoning_lang"], "world_languages", "maxmin"),
     ("Writing", "Journalism, marketing copy, essays, translation",
      ["english", "journalism", "marketing", "academic", "translation",
-      "reasoning", "reasoning_code"], False, "maxmin"),
+      "reasoning", "reasoning_code"], "writing", "maxmin"),
     # "Everything" -- all 37 topics -- passed 4 of 39 on its gate (2026-09-13). It is not a
     # profile this box can serve and is no longer offered as one; the topic screen still lets a
     # user select every topic by hand, and the screen will show what that costs.
@@ -124,14 +131,27 @@ CTX_STEPS = [4096, 8192, 16384, 32768, 65536, 131072, 262144]
 # value: 0.85 is where the shipped keep-sets sit for the domains they were
 # built for, and generation starts to degrade well below 0.7.
 #
-# It was calibrated on `sum` numbers, and so were the status thresholds on the
-# profile screen. `maxmin` spends the same budget on the worst-served topic, so
-# it reads LOWER at the top of the range and higher at the bottom: a coding
-# bundle that showed 0.59 on its weakest topic and 0.82 on its strongest shows
-# 0.68-0.74 on all of them. Both numbers describe the same keep-set; only a
-# generation gate can say which side of the trade holds together, so the
-# thresholds are left where they are until one has been run on maxmin.
+# It was calibrated on `counts` numbers under `sum`, and so were the status
+# words this tool used to compute for a profile. Neither survives a change of
+# either knob. `maxmin` spends the same budget on the worst-served topic, so it
+# reads flatter; and `saliency` -- which is what the box is run with now -- puts
+# every topic in the shipped catalogue above 0.85 at keep 0.12, three times
+# below the smallest keep fraction any generation gate has ever been run at.
+# The number is still a true measurement of routing. What it is not, under this
+# pair, is a recommendation: 0.85 of the routing mass can be resident and the
+# output can still come apart, which is the whole reason the gate exists.
+#
+# So a shipped profile is budgeted and described by its gate record, not by
+# this target (see GATED below), and this target is left doing the two jobs it
+# can still do honestly: colouring the bars, and answering `m`.
 COVERAGE_TARGET = float(os.environ.get("DSV41_COVERAGE_TARGET", "0.85"))
+
+# The keep fraction that was measured to hold a FILLED 256k context: 0.36, arena
+# 81 GB. 0.40 serves every short prompt and was killed by the memory watchdog on
+# a 195k-token prefill (RESULTS.md, 2026-09-13 22:50 addendum; env.example says
+# the same). It is a fact about this box and this checkpoint, and the screen
+# says it wherever the context length is the thing being chosen.
+SAFE_256K_KEEP = 0.36
 
 
 def bar(frac: float, width: int, solid: bool = True) -> str:
@@ -149,6 +169,27 @@ def bar(frac: float, width: int, solid: bool = True) -> str:
         return ("▒" * full).ljust(width, "·")
     s = "█" * full + (BLOCKS[rem] if rem and full < width else "")
     return s.ljust(width, "·")
+
+
+def clip(s: str, width: int) -> str:
+    """A description cut to fit, at a word rather than mid-token. `Rust, C++,
+    Go, Java, SQL, config, and the p` reads like a typo; `Rust, C++, Go, Java,
+    SQL…` reads like a list that goes on."""
+    if width <= 1 or len(s) <= width:
+        return s[:max(0, width)]
+    cut = s[:width - 1]
+    at = max(cut.rfind(", "), cut.rfind(" "))
+    return (cut[:at].rstrip(",; ") if at >= width // 2 else cut.rstrip()) + "…"
+
+
+def fits(forms, width: int) -> str:
+    """The longest of several phrasings of the same fact that fits. The last one
+    is the fallback and is used even when it does not, because saying it clipped
+    beats saying nothing."""
+    for f in forms:
+        if len(f) <= width:
+            return f
+    return forms[-1]
 
 
 def short_path(path: str | None) -> str:
@@ -190,6 +231,173 @@ def find_stats(explicit: str | None, source: str = B.SOURCE_DEFAULT) -> str | No
     return best
 
 
+# --- the generation gate ----------------------------------------------------
+# Coverage measures routing. Whether the output holds together is a different
+# question, and the two come apart: a profile can score above the coverage
+# target on every topic it names and still reason in circles, corrupt an
+# identifier or never leave the think block. What settles it is a generation
+# run -- tools/gate_profile.py -- and every shipped profile has one, appended
+# to results/keepsets/<record>/GATE.md with the run time in the heading.
+#
+# The screen reads those files rather than carrying their numbers in Python, so
+# a fresh gate run changes what the screen says by being run, and a number on
+# the screen can always be read back at its source.
+#
+# One thing a gate card written before 2026-09-14 does not say is WHICH
+# keep-set it measured: it carried the server, the prompts and the thinking
+# settings, and not PRUNE_KEEP. tools/gate_profile.py records that now. For the
+# runs already written, results/keepsets/gates.json names, per profile, the run
+# that is its current record and the configuration that run used, each with the
+# RESULTS.md section that says so. tools/test_tune_profiles.py checks every
+# entry against the file it points at -- that the run exists, that its topics
+# are the profile's, and that nothing newer supersedes it -- so the index
+# cannot drift away from the records quietly.
+
+GATE_BASENAME = "GATE.md"
+GATE_HEAD = "# Generation gate — "
+GATES_INDEX = ("results", "keepsets", "gates.json")
+
+
+def _card(lines: list, key: str) -> str | None:
+    """One row of a gate card: `| key | value |`."""
+    want = f"| {key} |"
+    for ln in lines:
+        if ln.startswith(want):
+            return ln.split("|")[2].strip()
+    return None
+
+
+def _config_row(value: str | None) -> dict:
+    """`PRUNE_KEEP=0.36, DSV41_PRUNE_RANK=maxmin, DSV41_PRUNE_SOURCE=saliency`
+    as the three fields the screen needs, ignoring anything else in the row."""
+    out = {"keep": None, "rank": None, "source": None}
+    at = {"PRUNE_KEEP": "keep", "DSV41_PRUNE_RANK": "rank", "DSV41_PRUNE_SOURCE": "source"}
+    for part in (value or "").split(","):
+        k, _, v = part.strip().partition("=")
+        if k in at and v.strip():
+            out[at[k]] = v.strip()
+    if out["keep"] is not None:
+        try:
+            out["keep"] = float(out["keep"])
+        except ValueError:
+            out["keep"] = None
+    return out
+
+
+def _counts(lines: list) -> tuple:
+    """(runs, strict, finished) out of the two verdict sentences.
+
+    `strict` is the gate: a run passes only when the thing the prompt asked for
+    is in the output, the think block included. `finished` is the second
+    sentence -- the strict passes plus the runs whose only fault was a repeated
+    window inside the deliberation, which finished the answer anyway. Both are
+    worth reading and neither is the other: on 2026-09-14 Backend was 3 of 10
+    strict and 10 of 10 finished.
+    """
+    runs = strict = finished = None
+    for ln in lines:
+        if ln.startswith("**Verdict: PASS**"):
+            m = re.search(r"all (\d+) runs", ln)
+            if m:
+                runs = strict = int(m.group(1))
+        elif ln.startswith("**Verdict: FAIL**"):
+            m = re.search(r"(\d+) of (\d+) runs failed", ln)
+            if m:
+                runs, strict = int(m.group(2)), int(m.group(2)) - int(m.group(1))
+        else:
+            m = re.match(r"(\d+) of (\d+) finished a correct answer", ln)
+            if m:
+                finished, runs = int(m.group(1)), runs or int(m.group(2))
+    return runs, strict, finished
+
+
+def read_gate(path: str) -> list:
+    """Every gate section in one GATE.md, oldest first. A file that is not a
+    gate log at all -- results/keepsets/general/GATE.md is a hand-written note
+    -- simply yields nothing, which is the same answer as no file."""
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return []
+    out = []
+    for chunk in text.split(GATE_HEAD)[1:]:
+        lines = chunk.splitlines()
+        run = lines[0].strip()
+        topics = [t.strip() for t in (_card(lines, "topics") or "").split(",") if t.strip()]
+        runs, strict, finished = _counts(lines)
+        if not topics or strict is None:
+            continue
+        cfg = _config_row(_card(lines, "keep-set"))
+        out.append({"run": run, "topics": topics, "runs": runs, "strict": strict,
+                    "finished": finished,
+                    # A `| only |` row means named prompts were re-run. It says
+                    # those pass and nothing about the ones that were not run,
+                    # so it is never a profile's record.
+                    "filtered": _card(lines, "only") is not None, **cfg})
+    return out
+
+
+_GATES_CACHE = {}
+
+
+def read_gates_index(root: str = None) -> dict:
+    """{(record, run): {keep, rank, source}} out of results/keepsets/gates.json.
+    Missing or malformed costs the keep fractions of the older runs and nothing
+    else: the counts and the dates come from the GATE.md files either way.
+
+    Read once per path: the footer asks for it on every frame, and the screen
+    redraws once a second."""
+    path = os.path.join(root or ROOT, *GATES_INDEX)
+    if path in _GATES_CACHE:
+        return _GATES_CACHE[path]
+    try:
+        raw = json.load(open(path))
+    except (OSError, ValueError):
+        _GATES_CACHE[path] = {}
+        return {}
+    out = {}
+    for e in raw.get("runs", []) if isinstance(raw, dict) else []:
+        if isinstance(e, dict) and e.get("record") and e.get("run"):
+            out[(e["record"], e["run"])] = {"keep": e.get("keep"), "rank": e.get("rank"),
+                                            "source": e.get("source")}
+    _GATES_CACHE[path] = out
+    return out
+
+
+def gate_for(record: str | None, topics, index: dict = None, root: str = None) -> dict | None:
+    """This profile's gate record: the newest full run in its GATE.md whose
+    topic list is exactly the profile's.
+
+    Exactly, not loosely, because a run on a different bundle is a different
+    measurement -- `reasoning_lang` moved European languages from 6 of 10 to 3
+    of 10 and World languages from 3 of 10 to 6 of 10, on the same keep-set and
+    the same night (RESULTS.md, 2026-09-14). A profile that ships without a
+    topic must not show the number the run WITH it produced.
+    """
+    if not record:
+        return None
+    path = os.path.join(root or ROOT, "results", "keepsets", record, GATE_BASENAME)
+    want = sorted(topics)
+    runs = [g for g in read_gate(path) if not g["filtered"] and sorted(g["topics"]) == want]
+    if not runs:
+        return None
+    g = dict(runs[-1])
+    g["record"] = os.path.relpath(path, root or ROOT)
+    if g["keep"] is None:
+        g.update({k: v for k, v in (index or read_gates_index(root)).get(
+            (record, g["run"]), {}).items() if v is not None})
+    return g
+
+
+def gate_floor(index: dict = None) -> float | None:
+    """The smallest keep fraction any gate in the index was run at. Below it the
+    tool is extrapolating: no keep-set that small has ever been asked to
+    generate anything."""
+    keeps = [v["keep"] for v in (index or read_gates_index()).values()
+             if isinstance(v.get("keep"), (int, float))]
+    return min(keeps) if keeps else None
+
+
 # --- profiles a user writes -------------------------------------------------
 # PROFILES above is what ships. Two JSON files extend it, so a selection that
 # turned out well can be kept without editing Python:
@@ -203,11 +411,13 @@ def find_stats(explicit: str | None, source: str = B.SOURCE_DEFAULT) -> str | No
 # profile kept there survives a re-clone and leaves the working tree clean.
 #
 # A user profile is a name, one line of description and a list of topic names.
-# It is never gated. The gate is a generation run on a keep-set, not a property
-# of a name and a list, so a profile from a file reads as untested exactly as
-# the shipped ones do until somebody runs one. It names no ranking rule either,
-# and applying one therefore leaves the rule alone rather than resetting it:
-# whatever --rank or DSV41_PRUNE_RANK asked for is what it is budgeted with.
+# It owns no gate record. The gate is a generation run on a keep-set, not a
+# property of a name and a list, so a profile from a file reads `untested` where
+# a shipped one shows the counts its own run produced -- and it is budgeted from
+# the coverage target instead of from a measured keep fraction, because there is
+# no measured one. It names no ranking rule either, and applying one therefore
+# leaves the rule alone rather than resetting it: whatever --rank or
+# DSV41_PRUNE_RANK asked for is what it is budgeted with.
 
 PROFILES_BASENAME = "profiles.json"
 CONFIG_DIRNAME = "deepseek-v41-flash-spark"
@@ -286,7 +496,7 @@ def read_profiles(path: str) -> tuple:
             if t not in seen:
                 seen.add(t)
                 want.append(t)
-        out.append((" ".join(name.split()), " ".join(desc.split()), want, False, where, None))
+        out.append((" ".join(name.split()), " ".join(desc.split()), want, None, where, None))
     return out, problems
 
 
@@ -304,9 +514,11 @@ def merge_profiles(built_in, user) -> list:
     """The shipped profiles in their own order, with a user profile of the same
     name replacing one in place rather than appearing twice below it.
 
-    (name, description, topics, gated, source, rank) either way -- the rank last
-    so that a shipped profile and one from a file are read the same way, with
-    None for "this one does not ask for a ranking rule"."""
+    (name, description, topics, record, source, rank) either way -- the rank
+    last so that a shipped profile and one from a file are read the same way,
+    with None for "this one does not ask for a ranking rule". `record` is the
+    directory under results/keepsets/ holding this profile's gate log, and None
+    for a profile from a file, which has none."""
     out = [(n, b, t, g, BUILT_IN, r) for n, b, t, g, r in built_in]
     at = {n.lower(): i for i, n in enumerate(x[0] for x in out)}
     for pr in user:
@@ -429,7 +641,7 @@ class State:
         """Take a just-saved profile without re-reading the file, so the screen
         shows it, with its budget, on the next frame."""
         self.user_profiles = [p for p in self.user_profiles if p[0].lower() != name.lower()]
-        self.user_profiles.append((name, blurb, sorted(topics), False,
+        self.user_profiles.append((name, blurb, sorted(topics), None,
                                    short_path(self.profiles_path), None))
         self._profiles = None
 
@@ -441,59 +653,88 @@ class State:
         out = []
         have = set(self.index.topics) if self.index else set()
 
-        def fits(k):
+        def loads(k):
             return B.plan(self.host, None, (), k, self.max_seq, fmt=self.fmt,
                           transient_slots=self.transient_slots,
                           keep_free_gb=self.keep_free_gb).verdict != "over"
 
-
         # The largest STEP that fits, not the continuous ceiling: keep_n rounds
         # the per-layer count up, so a plan at the continuous maximum is already
         # over it. Walk down until one actually fits.
-        ceiling = next((k for k in reversed(KEEP_STEPS) if fits(k)), KEEP_STEPS[0])
+        ceiling = next((k for k in reversed(KEEP_STEPS) if loads(k)), KEEP_STEPS[0])
 
-        for name, blurb, topics, gated, source, rank in self.profile_defs():
+        gates = read_gates_index()
+        for name, blurb, topics, record, source, rank in self.profile_defs():
             want = list(self.index.topics) if (topics is None and self.index) else (topics or [])
             avail = [t for t in want if t in have]
             missing = [t for t in want if t not in have]
             rank = rank or self.rank
+            # The gate record only describes a run of the WHOLE bundle. With a
+            # topic of it missing from the loaded keep-set, what this screen is
+            # about to budget is not what was gated, and saying otherwise would
+            # be the most confident wrong number on the screen.
+            gate = gate_for(record, want, gates) if (avail and not missing) else None
             need = (self.index.keep_for(tuple(sorted(avail)), COVERAGE_TARGET, rank=rank)
                     if avail else None)
             keep = ceiling
-            if need is not None:
+            if gate and gate.get("keep"):
+                # The keep fraction this profile was MEASURED at, clamped to what
+                # this box can hold. It is a measurement where the coverage
+                # target is a rule of thumb calibrated on another ranking pair,
+                # and under the shipped pair that rule of thumb asks for a third
+                # of it (see COVERAGE_TARGET).
+                want_step = next((k for k in KEEP_STEPS if k >= gate["keep"] - 1e-9),
+                                 KEEP_STEPS[-1])
+                keep = min(want_step, ceiling)
+            elif need is not None:
                 # smallest step that reaches the target, then clamp to what fits
                 want_step = next((k for k in KEEP_STEPS if k >= need), KEEP_STEPS[-1])
                 keep = min(want_step, ceiling)
-            capped = need is None or need > keep + 1e-9
+            # what this box cannot hold: the keep fraction the gate was run at
+            under_gate = bool(gate and gate.get("keep") and keep < gate["keep"] - 1e-9)
             p = B.plan(self.host, self.index, tuple(sorted(avail)), keep, self.max_seq, fmt=self.fmt,
                        transient_slots=self.transient_slots, keep_free_gb=self.keep_free_gb,
                        rank=rank)
             # What differs between profiles is not whether they load -- most of
-            # them land on the same ceiling -- but how well the budget covers
-            # the weakest topic in the bundle. Say that, in words.
+            # them land on the same ceiling -- but how the generation gate went,
+            # and for a profile nobody has gated, how well the budget covers the
+            # weakest topic in the bundle. Say whichever of those is known.
             worst = min((p.coverage.get(t, 0.0) for t in avail), default=0.0)
-            # The bands are the sum rule's (see COVERAGE_TARGET): under maxmin a
-            # bundle reads flatter and lower at the top, so a profile that said
-            # "good" on sum's strongest topic can say "uneven" on the same
-            # keep-set. Left as they are until a generation gate is run on it.
             if not avail:
                 status, tone = "not in this keep-set", "bad"
             elif p.verdict == "over":
                 status, tone = "needs a bigger box", "bad"
-            elif worst >= COVERAGE_TARGET:
-                status, tone = "serves all of it", "good"
-            elif worst >= 0.75:
-                status, tone = "good", "good"
-            elif worst >= 0.65:
-                status, tone = "uneven", "warn"
+            elif gate:
+                # Both counts, because they measure different things and the
+                # profiles disagree about which is flattering: on 2026-09-14
+                # Backend was 3 of 10 strict and 10 of 10 finished, Frontend 7
+                # and 9. The tone follows `finished` where it was counted --
+                # producing the answer the prompt asked for is the property a
+                # user is choosing a profile for -- and the strict count
+                # otherwise.
+                status = f"{gate['strict']} of {gate['runs']} strict"
+                if gate["finished"] is not None:
+                    status += f" · {gate['finished']} finished"
+                r = (gate["finished"] if gate["finished"] is not None else gate["strict"]) / max(
+                    1, gate["runs"])
+                tone = "good" if r >= 0.8 else ("warn" if r >= 0.5 else "bad")
             else:
-                status, tone = "spread thin", "bad"
-            out_worst = worst
-            if not gated and avail:
+                # The bands are the `counts`/`sum` rule's (see COVERAGE_TARGET)
+                # and they read differently under any other pair, which is why
+                # they are now only the fallback for a profile with no gate.
+                if worst >= COVERAGE_TARGET:
+                    status, tone = "serves all of it", "good"
+                elif worst >= 0.75:
+                    status, tone = "good", "good"
+                elif worst >= 0.65:
+                    status, tone = "uneven", "warn"
+                else:
+                    status, tone = "spread thin", "bad"
                 status, tone = status + " · untested", "warn"
             out.append({"name": name, "blurb": blurb, "topics": avail, "missing": missing,
                         "keep": keep, "plan": p, "status": status, "tone": tone,
-                        "capped": capped, "worst": out_worst, "gated": gated, "rank": rank,
+                        "worst": worst, "gate": gate, "record": record,
+                        "under_gate": under_gate, "rank": rank,
                         "source": source, "mine": source != BUILT_IN})
         self._profiles = out
         return out
@@ -577,6 +818,37 @@ def put(w, y, x, s, attr=0, maxw=None):
 MIN_H, MIN_W = 20, 70
 
 
+def gate_line(pr, st: "State", width: int) -> str:
+    """The third row of a profile: where its number on the right came from.
+
+    A count with no date and no keep fraction beside it is not a measurement a
+    reader can check or reproduce, and the keep fraction in particular is the
+    thing that moved between the runs -- Backend went 5 of 10 at keep 0.40 to 3
+    of 10 strict and 10 of 10 finished at 0.36. When the ranking pair the gate
+    used is not the pair this screen is set to, that is said in every form of
+    the line, short ones included: it means the bars above and the counts on
+    the right describe two different keep-sets.
+    """
+    g = pr["gate"]
+    date = g["run"].split()[0]
+    keep = f" at keep {g['keep'] * 100:.0f} %" if g.get("keep") else ""
+    pair = (f"{g['rank']}/{g['source']}"
+            if g.get("rank") and g.get("source") else "")
+    same = not pair or (g["rank"] == pr["rank"] and g["source"] == st.source)
+    on = "" if same else f" on {pair}"
+    fin = (f" · {g['finished']} of {g['runs']} finished"
+           if g["finished"] is not None else "")
+    forms = [f"gated {date}{keep}{on}{fin} a correct answer" if fin
+             else f"gated {date}{keep}{on}",
+             f"gated {date}{keep}{on}{fin}",
+             f"gated {date}{keep}{on}",
+             f"gated {date}{on}"]
+    line = fits(forms, width - (24 if pr["under_gate"] else 0))
+    if pr["under_gate"]:
+        line += f" — this box holds only {pr['keep'] * 100:.0f} %"
+    return line
+
+
 def draw_easy(w, st: State):
     """Name the job, not the experts. Each row is a bundle of topics with the
     budget it needs on this box, computed from the coverage file in use."""
@@ -596,13 +868,33 @@ def draw_easy(w, st: State):
     put(w, 2, 1, sp("WHAT SHOULD THIS BOX BE GOOD AT?"), C["accent"] | curses.A_BOLD)
     n_top = len(st.index.topics) if st.index else 0
     ctx = f"{st.max_seq // 1024}k" if st.max_seq >= 1024 else str(st.max_seq)
-    put(w, 3, 1, f"{n_top} topics · context ◂ {ctx} ▸ · v switches to the topic-by-topic view",
-        C["muted"])
+    profs = st.profiles()
+    # Three rows of content each. The fourth is white space, and it is what
+    # makes ten of these scannable rather than a wall; it is spent only when
+    # four profiles still fit without it.
+    top = 5
+    per = 4 if h - top - 4 >= 16 else 3
+    rows = max(1, (h - top - 4) // per)
+    # `N more below` is written into this row further down, so the sub-line has
+    # to leave room for it rather than be overwritten mid-word.
+    scroll_mark = 14 if len(profs) > rows else 0
+    head, k256 = f"{n_top} topics · context ◂ {ctx} ▸", f"{SAFE_256K_KEEP * 100:.0f} %"
+    # Which keep fraction holds a FILLED 256k is the fact a user needs at the
+    # moment they are choosing the context length, and it is not derivable from
+    # anything else on this screen -- the KV cache is 800 MB at 256k and the
+    # prefill is what actually runs out (RESULTS.md, 2026-09-13 22:50).
+    if st.max_seq >= 262144:
+        forms = [f"{head} · keep {k256} is the one measured to hold a filled 256k · "
+                 f"v switches to the topic-by-topic view",
+                 f"{head} · keep {k256} holds a filled 256k · v switches to the topic view",
+                 f"{head} · keep {k256} holds a filled 256k", head]
+    else:
+        forms = [f"{head} · 256k needs keep {k256} · v switches to the topic-by-topic view",
+                 f"{head} · 256k needs keep {k256} · v switches to the topic view",
+                 f"{head} · 256k needs keep {k256}", head]
+    put(w, 3, 1, fits(forms, W - 2 - scroll_mark), C["muted"], maxw=max(1, W - 2 - scroll_mark))
     put(w, 4, 1, "─" * (W - 2), C["muted"])
 
-    profs = st.profiles()
-    top, per = 5, 3
-    rows = max(1, (h - top - 4) // per)
     if st.pcursor < st.pscroll:
         st.pscroll = st.pcursor
     if st.pcursor >= st.pscroll + rows:
@@ -623,17 +915,26 @@ def draw_easy(w, st: State):
         put(w, y, max(3, W - len(st_txt) - 2), st_txt, tone[pr["tone"]] | (curses.A_BOLD if here else 0))
         # The profile names its own ranking rule; the histogram family it ranks is the screen's,
         # so both are here -- the pair is what decides which experts the keep fraction holds.
-        cost = (f"{pr['keep'] * 100:.0f} % of experts · {pr['rank']} · {st.source} · "
-                f"{st.max_seq // 1024}k context" if pr["topics"] else "")
-        put(w, y + 1, 3, pr["blurb"][:max(10, W - len(cost) - 6)], C["muted"])
+        # Shortened before the description is: a description clipped to two
+        # words says less than the rule spelled out with a slash in it does.
+        k_, ctx_ = f"{pr['keep'] * 100:.0f} %", f"{st.max_seq // 1024}k"
+        cost = fits([f"{k_} of experts · {pr['rank']} · {st.source} · {ctx_} context",
+                     f"{k_} of experts · {pr['rank']}/{st.source} · {ctx_}",
+                     f"{k_} · {pr['rank']}/{st.source} · {ctx_}"],
+                    max(20, W - 40)) if pr["topics"] else ""
+        put(w, y + 1, 3, clip(pr["blurb"], max(10, W - len(cost) - 6)), C["muted"])
         if cost:
             put(w, y + 1, max(3, W - len(cost) - 2), cost, C["muted"])
         # A profile that names topics this keep-set does not carry still applies
         # -- with the rest. Which ones went missing has to be on the screen, or
-        # a selection two topics short looks exactly like one that applied.
+        # a selection two topics short looks exactly like one that applied, and
+        # it outranks the gate line below because in that state the gate record
+        # describes a bundle this screen is not about to build.
         if pr["topics"] and pr["missing"]:
             miss = f"not in this keep-set: {', '.join(pr['missing'])}"
             put(w, y + 2, 3, miss, C["warn"], maxw=max(10, W - 5))
+        elif pr["gate"]:
+            put(w, y + 2, 3, gate_line(pr, st, W - 5), C["muted"], maxw=max(10, W - 5))
     if len(profs) > rows:
         below = len(profs) - rows - st.pscroll
         if below > 0:
@@ -843,16 +1144,23 @@ def draw(w, st: State):
     ctx = f"{st.max_seq // 1024}k" if st.max_seq >= 1024 else str(st.max_seq)
     put(w, sy + 5, 1, f"◂ {ctx:>5} ▸", (C["bright"] | curses.A_BOLD) if cf else C["muted"])
     room = max(0.0, p.free_after_load - p.floor) * B.GB / B.KV_BYTES_PER_TOKEN
-    fits = f"{room / 1e6:.1f}M" if room >= 1e6 else f"{room / 1000:.0f}k"
+    holds = f"{room / 1e6:.1f}M" if room >= 1e6 else f"{room / 1000:.0f}k"
+    validated = B.VALIDATED_MAX_SEQ // 1024
     if st.max_seq <= B.VALIDATED_MAX_SEQ:
-        msg = f"run to {B.VALIDATED_MAX_SEQ // 1024}k here; the cache alone has room for {fits}"
-        if len(msg) > split - 12:
-            msg = f"cache has room for {fits}"
+        msg = fits([f"run to {validated}k here; the cache alone has room for {holds}",
+                    f"cache has room for {holds}"], split - 12)
         put(w, sy + 5, 12, msg, C["muted"], maxw=split - 12)
     else:
-        msg = f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here — prefill is the limit, not the cache"
-        if len(msg) > split - 12:
-            msg = f"past the {B.VALIDATED_MAX_SEQ // 1024}k run here"
+        # Past the length this engine has actually prefilled from. The cache is
+        # not what runs out -- 800 MB at 256k -- the prefill is, and the keep
+        # fraction is the lever: 0.36 held a filled 256k and 0.40 was killed by
+        # the memory watchdog on a 195k-token prefill (RESULTS.md, 2026-09-13).
+        k256 = f"{SAFE_256K_KEEP * 100:.0f} %"
+        msg = fits([f"past the {validated}k run here — prefill is the limit; keep {k256} "
+                    f"held a filled 256k",
+                    f"past the {validated}k run — keep {k256} held a filled 256k",
+                    f"keep {k256} held a filled 256k",
+                    f"past the {validated}k run here"], split - 12)
         put(w, sy + 5, 12, msg, C["warn"], maxw=split - 12)
 
     # --- the one line that matters
@@ -883,9 +1191,25 @@ def draw(w, st: State):
             put(w, fy, min(45, W - len(rec) - 2), rec, C["warn"])
         elif need and abs(need - st.keep) > 0.005:
             verb = "raise to" if need > st.keep else "enough at"
-            rec = (f"{verb} {need * 100:.0f} % for {COVERAGE_TARGET:.2f} on every one"
-                   if W >= 96 else f"{verb} {need * 100:.0f} %")
-            put(w, fy, min(45, W - len(rec) - 2), rec, C["muted"])
+            head_ = f"{verb} {need * 100:.0f} %"
+            full = f"{head_} for {COVERAGE_TARGET:.2f} on every one"
+            # The coverage target is a rule of thumb calibrated on the `counts`
+            # histograms under `sum`. Under `saliency` it is reached three times
+            # below the smallest keep fraction anything has ever been generated
+            # at, and a screen that answers "2 %" to a question about a keep-set
+            # owes the reader the fact that no keep-set that small has been
+            # asked to write anything. That fact outranks the tail of the
+            # sentence it qualifies, so it is kept while the tail is dropped.
+            floor = gate_floor()
+            low = bool(floor and need < floor - 1e-9)
+            if low:
+                mark = f"{floor * 100:.0f} %"
+                rec = fits([f"{full} — nothing below {mark} has been gated",
+                            f"{head_} — nothing below {mark} has been gated",
+                            f"{head_} — no gate below {mark}"], W - 47)
+            else:
+                rec = full if W >= 96 else head_
+            put(w, fy, min(45, W - len(rec) - 2), rec, C["warn"] if low else C["muted"])
     elif st.index and st.index.topics:
         put(w, fy, 1, "no topic selected — the keep-set would use all of them", C["muted"])
     if st.asking:
@@ -1080,8 +1404,14 @@ def loop(w, st: State) -> str | None:
                 if st.keep < need:
                     st.keep = step(KEEP_STEPS, st.keep, 1)
                 what = "every selected topic" if st.sel else "every topic in this keep-set"
+                floor = gate_floor()
                 if st.plan().verdict == "over":
                     st.msg = f"{COVERAGE_TARGET:.2f} on {what} needs {need:.0%}, which this box cannot hold"
+                elif floor and st.keep < floor - 1e-9:
+                    # the same caveat the footer carries, on the keypress that
+                    # actually moves the slider there
+                    st.msg = (f"fitted to {st.keep:.0%} for {COVERAGE_TARGET:.2f} coverage — "
+                              f"no keep-set below {floor:.0%} has been through a generation gate")
             elif st.index and st.index.topics:
                 st.msg = f"nothing reaches {COVERAGE_TARGET:.2f} on all of them, even at 100 %"
             else:
@@ -1512,11 +1842,11 @@ def brief(st: State) -> str:
     para(f"""
         So after the new topic is in, run free generation on it and on domains the corpus does
         not contain, at the keep fraction you intend to serve at, and write both results down
-        next to the profile the way the shipped `GATE.md` files do. The measure used here is
-        the distinct-token ratio of the generated text, where 0.15 or below is degenerate
-        (`RESULTS.md`). Until that is done, a profile built on the new topic is untested, which
-        is exactly what `./tune.sh` will call it: user profiles are never marked gated, because
-        the gate is a generation run, not a name and a list of topics.""")
+        next to the profile the way the shipped `GATE.md` files do -- `tools/gate_profile.py`
+        appends one dated section per run and records the keep fraction and the ranking pair it
+        measured. Until that is done, a profile built on the new topic is untested, which is
+        exactly what `./tune.sh` will call it where a shipped profile shows the counts its own
+        run produced: the gate is a generation run, not a name and a list of topics.""")
     para("""
         Keep the selection that passes as a profile, with `s` on the topic screen or with
         `--save-profile`, so that the next person gets the set rather than the search:""")
@@ -1722,6 +2052,18 @@ def main() -> int:
                       f"{n_t} topic{'' if n_t == 1 else 's'}")
             if pr["topics"] and pr["missing"]:
                 print(f"  {'':<22} not in this keep-set: {', '.join(pr['missing'])}")
+            elif pr["gate"]:
+                g = pr["gate"]
+                fin = (f", {g['finished']} of {g['runs']} finished a correct answer"
+                       if g["finished"] is not None else "")
+                cfg = (f" at keep {g['keep'] * 100:.0f} % on {g['rank']}/{g['source']}"
+                       if g.get("keep") else "")
+                if pr["under_gate"]:
+                    cfg += f" — this box holds only {pr['keep'] * 100:.0f} %"
+                print(f"  {'':<22} gated {g['run']}{cfg}{fin}")
+                print(f"  {'':<22} {g['record']}")
+            elif pr["topics"]:
+                print(f"  {'':<22} no generation gate has been run on these topics")
             print()
         return 0
 

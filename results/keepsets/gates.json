@@ -1,0 +1,94 @@
+{
+  "note": [
+    "Which generation-gate run is the current record for each shipped profile, and the",
+    "keep-set that run measured. The counts, the dates and the per-prompt rows are in the",
+    "GATE.md this points at and are not repeated here; what is here is the one thing a gate",
+    "card written before 2026-09-14 does not carry, which is PRUNE_KEEP and the ranking pair.",
+    "tools/gate_profile.py records those in the card itself now, so this index only has to",
+    "cover the runs already written. `measured_in` is the section of RESULTS.md that states",
+    "the configuration. ./tune.sh reads this file; tools/test_tune_profiles.py checks every",
+    "entry against the record it names, so the two cannot drift apart quietly."
+  ],
+  "runs": [
+    {
+      "record": "frontend",
+      "run": "2026-09-14 01:22",
+      "keep": 0.36,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md, 2026-09-14 06:20 and 07:20 addenda to §5"
+    },
+    {
+      "record": "backend",
+      "run": "2026-09-14 03:36",
+      "keep": 0.36,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md, 2026-09-14 06:20 addendum to §5"
+    },
+    {
+      "record": "systems_programming",
+      "run": "2026-09-13 21:28",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md §5.1, the recipe; 154 experts a layer"
+    },
+    {
+      "record": "chat_and_explanation",
+      "run": "2026-09-13 19:08",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md §5.2, the recipe column"
+    },
+    {
+      "record": "medicine",
+      "run": "2026-09-13 19:26",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md §5.2, the recipe column"
+    },
+    {
+      "record": "law_and_finance",
+      "run": "2026-09-13 19:44",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md §5.2, the recipe column"
+    },
+    {
+      "record": "data_and_research",
+      "run": "2026-09-14 03:56",
+      "keep": 0.36,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md, 2026-09-14 06:20 addendum to §5"
+    },
+    {
+      "record": "european_languages",
+      "run": "2026-09-13 22:05",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md, 2026-09-14 02:55 addendum to §5 (the 0.40 record without reasoning_lang)"
+    },
+    {
+      "record": "world_languages",
+      "run": "2026-09-14 02:29",
+      "keep": 0.36,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md, 2026-09-14 03:40 addendum to §5"
+    },
+    {
+      "record": "writing",
+      "run": "2026-09-13 20:45",
+      "keep": 0.40,
+      "rank": "maxmin",
+      "source": "saliency",
+      "measured_in": "RESULTS.md §5.2, the recipe column"
+    }
+  ]
+}

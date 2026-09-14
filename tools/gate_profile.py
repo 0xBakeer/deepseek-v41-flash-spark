@@ -906,7 +906,12 @@ def load_profiles() -> list:
 
 
 def slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    """A profile name as the directory its record lives in. Underscores, because
+    that is what the directories in results/keepsets/ are named: `Chat and
+    explanation` is `chat_and_explanation`, and a hyphen here would have sent
+    its next gate run to a second, empty directory instead of appending to the
+    record that is already there."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def find_profile(want: str):
@@ -1093,6 +1098,17 @@ def report(rows, name, topics, silent, args, card) -> str:
         out.append(f"| only | `{args.only}` — a filtered re-run, not a full gate |")
     if silent:
         out.append(f"| no prompts for | {', '.join(silent)} — these topics were NOT gated |")
+    # WHICH keep-set this was. Without it a gate result is a count with no
+    # configuration attached, and the counts move with the configuration: the
+    # same Backend prompts went 5 of 10 at keep 0.40 and 3 of 10 strict with 10
+    # of 10 finished at 0.36. Read from the environment the run was launched
+    # with, which is the same .env the engine read.
+    cfg = ", ".join(f"{k}={os.environ[k]}" for k in
+                    ("PRUNE_KEEP", "DSV41_PRUNE_RANK", "DSV41_PRUNE_SOURCE")
+                    if os.environ.get(k, "").strip())
+    out.append(f"| keep-set | {cfg} |" if cfg else
+               "| keep-set | not recorded — PRUNE_KEEP and the ranking pair were not in the "
+               "environment of this run |")
     out += ["",
             "| prompt | thinking | finish | reasoning | answer | s | | why |",
             "|---|---|---|---|---|---|---|---|"]

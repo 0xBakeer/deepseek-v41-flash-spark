@@ -170,6 +170,11 @@ Until now that was two numbers in a file and a three-minute wait to find out.
   [`docs/keep-sets.md`](docs/keep-sets.md#why-coverage-predicts-whether-long-generations-hold-together).
 
 ### Fixed
+- **The gate tool's default output directory did not name the directories the records are in.**
+  `tools/gate_profile.py:slug` turned `Chat and explanation` into `chat-and-explanation` where the
+  record lives in `chat_and_explanation`, so the next run of that profile's gate would have started
+  a second, empty directory beside a record it was meant to append to. Checked now, against the
+  directories in the checkout.
 - **`EXPERT_TOPICS` had never worked.** `expert_topics` was read inside `V41Engine.__init__` and
   passed by the engine's own CLI, but was never a parameter of it, so every launch through
   `start.sh` raised `TypeError` three minutes in, with the weights already on the GPU.
@@ -178,6 +183,32 @@ Until now that was two numbers in a file and a three-minute wait to find out.
   is tagged from that file, so every image built from 0.2.0 onward carried the wrong version.
 
 ### Changed
+- **`./tune.sh` shows the generation gate, and budgets a profile from it** (2026-09-14). Every one
+  of the ten shipped profiles has been through `tools/gate_profile.py` since 2026-09-13, and the
+  screen now reads each result back out of `results/keepsets/<record>/GATE.md` as it draws: the
+  strict count at the right edge of the name row, and under the description the date of the run,
+  the keep fraction it measured and — from 2026-09-14 on — how many of its prompts produced a
+  correct answer despite the repeat rule. `Backend · 3 of 10 strict · 10 finished` says more than
+  either number alone. A profile's record is the newest full run on exactly its topics; a filtered
+  re-run and a run on a different bundle are never it. Where every profile used to read `untested`,
+  only a profile from a file does now.
+  Consequently a shipped profile is budgeted at **the keep fraction its gate ran at** rather than
+  at the smallest one that reaches the coverage target. That target was calibrated on the `counts`
+  histograms under `sum`; under the `saliency`/`maxmin` pair the box is run with, every topic in
+  the shipped keep-set is above it at keep 0.12 — a third of the smallest keep fraction anything
+  has ever been generated at. `--profile backend --print` now emits the configuration Backend was
+  measured in. Coverage remains a true measurement of routing and is no longer read as a
+  recommendation: where the coverage target asks for a keep fraction below anything gated, the
+  screen says so.
+- **The screen says which keep fraction holds a filled 256k**, on both views, because that is a
+  fact about this box that nothing else on the screen implies — the KV cache is 1.0 GB at 256k and
+  the prefill is what runs out.
+- **`tools/gate_profile.py` records the keep-set it measured** in the card it appends —
+  `PRUNE_KEEP`, `DSV41_PRUNE_RANK` and `DSV41_PRUNE_SOURCE` from the environment of the run — so a
+  gate result carries its own configuration. For the runs written before that,
+  `results/keepsets/gates.json` names each profile's current record and the configuration it used,
+  with the `RESULTS.md` section that states it; `tools/test_tune_profiles.py` checks every entry
+  against the record it points at.
 - The recommended keep fraction on a 121 GiB box drops to **42 %**. One prefill chunk needs about
   10 GB on top of everything resident, and the engine's own pre-flight does not know that — it runs
   before the drafter experts, the KV cache and any prefill exist. A 98 GB arena passes it, reports

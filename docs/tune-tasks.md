@@ -77,10 +77,13 @@ Two things to know before relying on one:
   carries `html`. Against one that does not, it applies with the rest of its topics, and the
   profile screen prints `not in this keep-set: html` underneath so that a selection which is
   quietly a topic short does not look like one that worked.
-* **A saved profile is untested and says so.** The screen marks every profile `untested` until a
-  generation gate has been run on it, and a profile from a file is never marked otherwise. Coverage
-  is a measurement; whether a selection generates sound long output is not. Step 7 of
-  [adding a topic](#add-a-topic-of-your-own) is how that gate is run.
+* **A saved profile is untested and says so.** Where a shipped profile shows the counts its own
+  generation run produced — `7 of 10 strict · 9 finished`, with the date and the keep fraction under
+  it — a profile from a file shows `untested`, and is budgeted from the coverage target because
+  there is no measured keep fraction for it. Coverage is a measurement; whether a selection
+  generates sound long output is not. Step 7 of [adding a topic](#add-a-topic-of-your-own) is how
+  that gate is run, and the result belongs in `results/keepsets/<name>/GATE.md` beside the shipped
+  ones.
 
 ## Read the verdict
 
@@ -169,8 +172,8 @@ python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
 
 `--print-topic-flags` emits one `--topic NAME:KIND:PATH[:lang]` per file already in `topics/`, with
 `KIND` being `code` or `prose`. It only ever emits what `fetch_topics.py` itself wrote, so a
-hand-written topic — `reasoning`, `reasoning_code` — is silently absent from a corpus built from it
-alone; add those flags next to the substitution:
+hand-written topic — `reasoning`, `reasoning_code`, `reasoning_design`, `reasoning_lang` — is
+silently absent from a corpus built from it alone; add those flags next to the substitution:
 
 ```bash
 python3 corpus/make_corpus.py --tokenizer $MODEL_DIR --target 3000 \
@@ -296,9 +299,13 @@ across the two shipped trace corpora, 95 sequences, 85 with `</think>` adjacent 
 with it after real content (`corpus/make_corpus.py`, `wrap_think`'s docstring). The experts that
 fire on "the deliberation is finished, close it, begin the answer" were therefore never ranked and
 never resident, and at temperature 0 the server writes "I'll write the code now." and then repeats
-"Let me write." to the token cap with an answer of length zero. `reasoning_code` (8 hand-written
-records, 3,543 tokens) was traced on 2026-09-12 to close that gap. **Whether it closes it is not
-known** — no gate has been run on a keep-set containing it.
+"Let me write." to the token cap with an answer of length zero. `reasoning_code` (hand-written
+deliberation that closes a block it actually filled) was traced on 2026-09-12 to close that gap,
+and every shipped profile now carries it. It helped and it did not finish the job: on the gate runs
+of 2026-09-13 and 2026-09-14 the think-exit went from a common failure to a rare one — Backend and
+Data and research recorded none at all at keep 0.36 — while a fragment redrafted three to ten times
+inside a long think block became the dominant remaining miss (`RESULTS.md` §5.2 and the 2026-09-14
+addenda).
 
 `--brief` writes that whole task out, as Markdown, from the keep-set that is loaded:
 

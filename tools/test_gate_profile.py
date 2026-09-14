@@ -700,6 +700,38 @@ MD = G.report(KIND_ROWS, "frontend", ["html"], [], _args,
 check("the GATE.md verdict still leads with the strict count",
       "**Verdict: FAIL** — 5 of 6 runs failed" in MD)
 check("the GATE.md section carries the second sentence", SENTENCE in MD)
+# A count with no keep fraction beside it is a result with no configuration
+# attached, and the counts move with the configuration -- the same Backend
+# prompts went 5 of 10 at keep 0.40 and 3 of 10 strict at 0.36. The card takes
+# it from the environment the run was launched with, which is the .env the
+# engine read.
+_saved = {k: os.environ.get(k) for k in
+          ("PRUNE_KEEP", "DSV41_PRUNE_RANK", "DSV41_PRUNE_SOURCE")}
+try:
+    os.environ.update({"PRUNE_KEEP": "0.36", "DSV41_PRUNE_RANK": "maxmin",
+                       "DSV41_PRUNE_SOURCE": "saliency"})
+    WITH = G.report(KIND_ROWS, "frontend", ["html"], [], _args, {"id": "k", "max_model_len": 1})
+    for k in _saved:
+        os.environ.pop(k, None)
+    WITHOUT = G.report(KIND_ROWS, "frontend", ["html"], [], _args, {"id": "k", "max_model_len": 1})
+finally:
+    for k, v in _saved.items():
+        os.environ.pop(k, None)
+        if v is not None:
+            os.environ[k] = v
+check("the card records the keep-set the run measured",
+      "| keep-set | PRUNE_KEEP=0.36, DSV41_PRUNE_RANK=maxmin, DSV41_PRUNE_SOURCE=saliency |"
+      in WITH)
+check("  and says so rather than inventing one when it is not in the environment",
+      "| keep-set | not recorded" in WITHOUT)
+
+# The default --out is results/keepsets/<slug>/GATE.md, and a gate result is
+# appended to the record that is already there. A slug that does not name the
+# existing directory starts a second, empty one beside it.
+for _name in ("Chat and explanation", "Systems programming", "Law and finance"):
+    check(f"{_name!r} names the directory its record is already in",
+          os.path.isdir(os.path.join(ROOT, "results", "keepsets", G.slug(_name))),
+          G.slug(_name))
 
 # =============================================================================
 # the suite

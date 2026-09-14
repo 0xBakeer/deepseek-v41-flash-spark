@@ -27,7 +27,7 @@ job, a bare `./tune.sh` behaves as `--print`.
 |---|---|---|
 | `--stats PATH` | see below | the `coverage.json` to read topics and histograms from |
 | `--topics a,b` | `EXPERT_TOPICS` | the selection to start from, comma separated |
-| `--keep F` | `PRUNE_KEEP`, else `0.39` | the fraction of each layer's 384 routed experts that stays resident |
+| `--keep F` | `PRUNE_KEEP`, else `0.39` | the fraction of each layer's 384 routed experts that stays resident. Applying a profile replaces it: a shipped one sets the keep fraction its generation gate ran at, a profile from a file the smallest one that reaches the coverage target |
 | `--max-seq N` | `MAX_SEQ`, else `32768` | context length the KV cache is sized for |
 | `--format cb3\|fp4` | `EXPERT_FORMAT`, else `cb3` | the arena's expert layout, which sets the slot size |
 | `--rank sum\|max\|maxmin` | `DSV41_PRUNE_RANK`, else `sum` | how several selected topics are combined into one ranking of the same budget, which decides *which* experts the keep fraction holds. Shown on both screens next to the keep fraction, and written out with it. Applying a shipped profile sets it to `maxmin`; a profile from a file names no rule and leaves it alone |
@@ -39,8 +39,8 @@ job, a bare `./tune.sh` behaves as `--print`.
 | `--list` | — | print the topics with their coverage at `--keep` and their traced token counts, then exit |
 | `--print` | — | print the environment the current settings imply, then exit |
 | `--write` | — | write those settings into `./.env` and exit |
-| `--profiles` | — | print the ready-made profiles with what each one needs, then exit |
-| `--profile NAME` | — | start from that profile's topics and the keep fraction they need. Matched case-insensitively on the start of the name, and an ambiguous match exits 2 |
+| `--profiles` | — | print the ready-made profiles with what each one needs and how its generation gate went, then exit |
+| `--profile NAME` | — | start from that profile's topics and its keep fraction — the one its gate was run at for a shipped profile, the one the coverage target needs for a profile from a file. Matched case-insensitively on the start of the name, and an ambiguous match exits 2 |
 | `--profiles-file PATH` | `DSV41_TUNE_PROFILES` | read user profiles from this file instead of the two default locations, and save to it |
 | `--save-profile NAME` | — | keep the current selection under that name in the user profiles file, then exit |
 | `--describe TEXT` | the topic names | the one-line description `--save-profile` writes |
@@ -87,7 +87,7 @@ After `r` in the interactive screen the exit code is `./start.sh`'s.
 | `/` | start typing a filter; `Enter` keeps it, `Esc` clears it |
 | `Tab`, `Shift-Tab` | cycle the focused pane: topics, resident experts, context |
 | `←` `→` | adjust the focused slider. Context steps 4k, 8k, 16k, 32k, 64k, 128k, 256k; every other pane steps the keep fraction by 2 points between 6 % and 60 % |
-| `m` | snap the keep fraction to the smallest one at which every selected topic reaches the coverage target |
+| `m` | snap the keep fraction to the smallest one at which every selected topic reaches the coverage target. It says so on the key line when that lands below the smallest keep fraction any generation gate has been run at |
 | `f` | switch the arena format between `cb3` and `fp4` |
 | `s` | keep this selection as a profile: type a name on the key line, `Enter` saves it, `Esc` cancels |
 | `r` | write `.env` and run `./start.sh` |
@@ -141,9 +141,10 @@ A bare JSON list of the same objects is accepted as well. A profile is a `name`,
 `description` (optional) and a non-empty list of `topics`. Whitespace in the name and the
 description is collapsed, so both stay one line on the screen, and a topic named twice counts once:
 the ranking gives every selected topic one vote per layer, and writing it twice does not mean two.
-Any other field is ignored, `gated` included: **a profile from a file is never gated** and the
+Any other field is ignored, `gated` included: **a profile from a file owns no gate record** and the
 screen says `untested` for it, because the gate is a generation run on a keep-set and not a
-property of a name and a list of topics. See
+property of a name and a list of topics. It is budgeted from the coverage target for the same
+reason — there is no measured keep fraction for it to use. See
 [`docs/keep-sets.md`](keep-sets.md) for what the gate is and
 [`results/keepsets/*/GATE.md`](../results/keepsets/) for what one looks like written down.
 
@@ -276,7 +277,10 @@ so it moves while the screen is open.
 * at or below `VALIDATED_MAX_SEQ`, `run to 128k here; the cache alone has room for X` — where `X` is
   `(free after load − keep-free floor) / 3,200 bytes`, the tokens the cache could hold if nothing
   else wanted the memory;
-* above it, `past the 128k run here — prefill is the limit, not the cache`, in amber.
+* above it, `past the 128k run here — prefill is the limit; keep 36 % held a filled 256k`, in
+  amber. The cache is not what runs out up there — it is 1.0 GB at 256k — the prefill is, and the
+  keep fraction is the lever: 0.36 held a filled 256k and 0.40 was killed by the memory watchdog on
+  a 195k-token prefill (`RESULTS.md`, 2026-09-13 22:50).
 
 That length is `tools/budget.py` `VALIDATED_MAX_SEQ`, and on 2026-09-12 it became **131,072** — the
 longest context this engine has actually loaded and prefilled from. (It read 32,768 until then; the
@@ -299,6 +303,9 @@ One line, in priority order:
      larger than `max_keep`;
    * `raise to NN % for 0.85 on every one` or `enough at NN % …` when the needed fraction differs
      from the current one by more than half a point. Below 96 columns only the percentage is shown.
+   * when that needed fraction is below the smallest one any gate in `gates.json` was run at, the
+     sentence becomes `enough at 12 % — nothing below 36 % has been gated` and turns amber: the
+     coverage target is reachable there and nothing that small has been asked to generate anything.
 3. `no topic selected — the keep-set would use all of them`.
 
 The bottom line carries the key hints, or a message from the last keypress, or the prompt `s`
@@ -307,16 +314,74 @@ where `b` says where it wrote the brief, and where `r` says why it refused.
 
 ### Profile screen
 
-Three rows per profile: the name, with `· yours` after it when the profile came from a file and the
-status at the right edge; the description, with the budget the profile needs at the right edge; and,
-only when this keep-set is missing some of the profile's topics, `not in this keep-set: ...`.
+Three rows per profile, and a fourth of white space when the window is at least 25 rows tall:
 
-The status is computed from the worst coverage among the topics this keep-set actually has, at the
-keep fraction the profile needs: `serves all of it` at or above the coverage target, then `good` at
-0.75, `uneven` at 0.65, `spread thin` below that, `needs a bigger box` when no keep fraction that
-fits reaches it, and `not in this keep-set` when none of its topics is in the file at all. Every
-profile that resolves to topics also carries `· untested`, which is the gate flag and is never set
-for a profile from a file.
+1. the name, with `· yours` after it when the profile came from a file, and the **gate verdict** at
+   the right edge;
+2. the description, with the budget the profile needs at the right edge — `36 % of experts · maxmin
+   · saliency · 32k context`, shortened before the description is when the window is narrow;
+3. `not in this keep-set: ...` when this keep-set is missing some of the profile's topics, and
+   otherwise the **gate line**.
+
+The sub-line under the heading reads `N topics · context ◂ 32k ▸`, plus which keep fraction holds a
+filled 256k context, plus `v switches to the topic-by-topic view` — as much of that as fits, in that
+order of preference, always stopping short of the `N more below` marker that shares the row.
+
+#### The gate verdict and the gate line
+
+Every shipped profile has been through `tools/gate_profile.py` and the screen reads the result back
+out of `results/keepsets/<record>/GATE.md` while it draws. A profile's record is the **newest full
+run in that file whose topic list is exactly the profile's** — a filtered re-run (`| only |` in its
+card) is never a record, because it says the prompts it ran pass and nothing about the ones it did
+not, and neither is a run on a different bundle.
+
+| what is shown | where it comes from |
+|---|---|
+| `7 of 10 strict` | the runs the gate passed outright, out of `**Verdict:**` in that section |
+| `· 9 finished` | the strict passes plus the runs whose only fault was a repeated window and which produced the correct answer anyway. Counted from 2026-09-14 on; older records show the strict count alone |
+| `gated 2026-09-14` | the date in the section heading |
+| `at keep 36 %` | `\| keep-set \|` in the card, and for runs recorded before that row existed, `results/keepsets/gates.json` |
+| `on maxmin/saliency` | the same, and shown **only** when that pair is not the one the screen is set to — the bars and the counts then describe two different keep-sets |
+| `— this box holds only 38 %` | the gated keep fraction does not fit here, so what `r` would start is not what was measured |
+
+Colour follows `finished` where it was counted and `strict` otherwise: green at 0.8 of the runs or
+better, amber at 0.5, red below.
+
+A profile with no record — one from a file, or a shipped one whose topics this keep-set does not
+all carry — shows no gate line and its status is the coverage wording instead: `serves all of it`
+at or above the coverage target, then `good` at 0.75, `uneven` at 0.65, `spread thin` below that,
+each followed by `· untested`; `needs a bigger box` when no keep fraction that fits reaches it, and
+`not in this keep-set` when none of its topics is in the file at all.
+
+#### Which keep fraction a profile is budgeted at
+
+A profile with a gate record is budgeted at **the keep fraction that record was measured at**,
+clamped to the largest step this box can hold. One without is budgeted at the smallest step that
+reaches the coverage target, clamped the same way.
+
+The difference matters because the coverage target was calibrated on the `counts` histograms under
+`sum`. Under `saliency` — what `env.example` ships and what every gate run used — every topic in
+the shipped keep-set is above 0.85 at keep 0.12, which is a third of the smallest keep fraction any
+generation has ever been run at. Coverage is still a true measurement of routing; it is not a
+recommendation under that pair, and the gate record is.
+
+## The gate index, `results/keepsets/gates.json`
+
+One entry per shipped profile: the record directory, the run that is its current record, and the
+`keep`, `rank` and `source` that run used, each with the `RESULTS.md` section that states them.
+
+```json
+{"runs": [{"record": "backend", "run": "2026-09-14 03:36",
+           "keep": 0.36, "rank": "maxmin", "source": "saliency",
+           "measured_in": "RESULTS.md, 2026-09-14 06:20 addendum to §5"}]}
+```
+
+It exists only because a gate card written before 2026-09-14 does not say which keep-set it
+measured. `tools/gate_profile.py` now writes a `| keep-set |` row into the card from
+`PRUNE_KEEP`, `DSV41_PRUNE_RANK` and `DSV41_PRUNE_SOURCE` in the environment of the run, and that
+row wins over this file when it is there, so new runs need no entry. A missing or malformed
+`gates.json` costs the keep fractions of the older runs and nothing else: the counts and the dates
+come from the `GATE.md` files either way.
 
 ## Non-interactive output
 
@@ -331,6 +396,22 @@ results/keepsets/general/coverage.json — 2 topics, coverage at keep 39%
 Coverage is computed with every topic in the file selected, which is what the engine does when
 `EXPERT_TOPICS` is unset. Unlike the interactive bars these are always drawn solid; a thinly traced
 topic is marked by a trailing `thin` instead.
+
+### `--profiles`
+
+Every profile, in screen order, with the same facts the screen carries and the path of the record
+they came from:
+
+```
+  Backend                3 of 10 strict · 10 finished
+                         Python, Go, Java, SQL, configuration files, technical prose
+                         36% of experts · rank maxmin · saliency · 80 GB · 18 GB free · 9 topics
+                         gated 2026-09-14 03:36 at keep 36 % on maxmin/saliency, 10 of 10 finished a correct answer
+                         results/keepsets/backend/GATE.md
+```
+
+A profile with no record says `no generation gate has been run on these topics` in place of the
+last two lines; one this keep-set is missing topics for says which ones instead.
 
 ### `--print` and `--write`
 
@@ -351,6 +432,20 @@ KEEP_FREE_GB=6
 TRACE_STATS=results/keepsets/general/coverage.json
 EXPERT_TOPICS=coding
 # 6,000 experts resident (39.1%), 102.0 GB resident, 15.0 GB free after load — ok
+```
+
+With `--profile` instead of `--topics`, the keep fraction and the ranking pair are the ones that
+profile's gate record was measured at, so the block below reproduces a measured configuration
+rather than one derived from a coverage target:
+
+```
+$ ./tune.sh --profile backend --print
+PRUNE_KEEP=0.36
+DSV41_PRUNE_RANK=maxmin
+DSV41_PRUNE_SOURCE=saliency
+MAX_SEQ=32768
+ARENA_GB=81
+...
 ```
 
 `ARENA_GB` is `ceil` of the arena the panel shows, and the engine floors it back into slots.
