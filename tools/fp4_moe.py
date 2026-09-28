@@ -146,18 +146,42 @@ prmt.b32 $3, t2, t3, 0x7632;
 """)
 
 
+# The PTX decoder only exists on sm_100a/120a/121a. On ROCm (or with DSV41_FP4_DECODE=portable) the same
+# E2M1 -> fp16 conversion is done with integer ops that build the fp16 bit pattern directly: exact, since
+# every E2M1 value is representable in fp16.
+_FP4_PORTABLE = tl.constexpr(
+    torch.version.hip is not None or os.environ.get("DSV41_FP4_DECODE", "").lower() == "portable"
+)
+
+
+# Portable decode: the three magnitude bits (e1 e0 m) of an E2M1 nibble shifted to bit 9 of an fp16 ARE an
+# fp16 whose value is exactly 2^-14 times the E2M1 value -- e > 0 lands as 2^(e-15) * (1 + m/2), e = 0 as the
+# subnormal m * 2^-15 -- so a nibble costs a mask, a shift and an or, and the 2^14 goes into the UE8M0 scale
+# (exact: a power of two). On gfx1151 this took the MoE step from 7.6 to 4.5 ms at T=6 over 36 experts: the
+# earlier where()-based decode made the up kernel ALU-bound.
+_FP4_EXP_BIAS = tl.constexpr(14 if _FP4_PORTABLE.value else 0)
+
+
 @triton.jit
 def _fp4_decode(packed):
-    """uint8 tile [..., 16] -> (even fp16 tile, odd fp16 tile), same shape; values in the E2M1 grid."""
-    return tl.inline_asm_elementwise(
-        _FP4_DECODE_ASM, "=r,=r,=r,=r,r", [packed], dtype=(tl.float16, tl.float16), is_pure=True, pack=4
-    )
+    """uint8 tile [..., 16] -> (even fp16 tile, odd fp16 tile), same shape; values in the E2M1 grid
+    (times 2^-14 on the portable path, which _ue8m0 compensates)."""
+    if _FP4_PORTABLE:
+        p = packed.to(tl.int32)
+        ev = ((p & 0x07) << 9) | ((p & 0x08) << 12)
+        od = ((p & 0x70) << 5) | ((p & 0x80) << 8)
+        return ev.to(tl.uint16).to(tl.float16, bitcast=True), od.to(tl.uint16).to(tl.float16, bitcast=True)
+    else:
+        return tl.inline_asm_elementwise(
+            _FP4_DECODE_ASM, "=r,=r,=r,=r,r", [packed], dtype=(tl.float16, tl.float16), is_pure=True, pack=4
+        )
 
 
 @triton.jit
 def _ue8m0(scale_u8):
-    """UE8M0 byte -> fp32 2^(b-127), exactly, by building the float bit pattern."""
-    return (scale_u8.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+    """UE8M0 byte -> fp32 2^(b-127) (times 2^14 on the portable decode path), exactly, by building the
+    float bit pattern."""
+    return ((scale_u8.to(tl.int32) + _FP4_EXP_BIAS) << 23).to(tl.float32, bitcast=True)
 
 
 @triton.jit
@@ -405,6 +429,12 @@ def _pick_bm(P: int) -> int:
 # (BN, num_warps, num_stages) per kernel and BM, from the sweep on GB10 (tools/test_fp4_moe.py)
 _UP_CFG = {16: (256, 4, 1), 32: (128, 4, 1), 64: (64, 4, 1)}
 _DOWN_CFG = {16: (128, 8, 3), 32: (128, 4, 3), 64: (128, 8, 3)}
+if torch.version.hip is not None:
+    # gfx1151 (Radeon 8060S, 64 KB LDS, wave32), swept with tools/sweep_fp4_moe.py after the portable
+    # decode above: at T=6 over 36 distinct experts this table runs up + down in 4.5 ms (~150 GB/s of
+    # expert bytes). The BM=32/64 rows were swept at T=12..64 and T=512.
+    _UP_CFG = {16: (32, 2, 1), 32: (32, 4, 2), 64: (32, 8, 1)}
+    _DOWN_CFG = {16: (64, 2, 2), 32: (128, 4, 1), 64: (64, 8, 1)}
 
 
 def moe_forward(

@@ -153,6 +153,29 @@ def host_available_bytes():
     return None
 
 
+def host_total_bytes():
+    """MemTotal from /proc/meminfo, or 0 off Linux."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
+def device_memory_is_unified(device_total: int) -> bool:
+    """True when the GPU draws on the host's own pool (GB10: device total ~= MemTotal). A device
+    whose memory is much smaller than MemTotal -- or larger, as with a carve-out that leaves the host
+    little -- has its own pool. DSV41_UNIFIED_MEM=0/1 overrides the guess."""
+    forced = os.environ.get("DSV41_UNIFIED_MEM")
+    if forced in ("0", "1"):
+        return forced == "1"
+    host = host_total_bytes()
+    return host == 0 or abs(device_total - host) < 0.15 * host
+
+
 class FixedStore:
     """DSpark experts: 3 x 128, all resident, slot = k * 128 + e."""
 
@@ -495,6 +518,13 @@ class V41Engine:
         # hard floor of `keep_free_gb` under it: this box hard-resets if MemAvailable goes negative.
         free, total = torch.cuda.mem_get_info()
         host_avail = host_available_bytes()
+        if not device_memory_is_unified(total):
+            # Carve-out VRAM (e.g. Strix Halo with 96 GB assigned to the GPU and ~30 GB left to the
+            # host): the arena lives in device memory, so size and check it against what the device
+            # reports free. The host watchdog below still guards the (small) host side.
+            log(f"device memory is not unified with the host (device {total / 2**30:.1f} GiB, host "
+                f"MemTotal {host_total_bytes() / 2**30:.1f} GiB): sizing the arena from device free memory")
+            host_avail = free
         budget = float(max(free, host_avail or 0))
         # A prefill chunk is the largest transient this process ever holds; the indexer's
         # score tiles grow with the compressed cache, hence the max_seq term.

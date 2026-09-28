@@ -102,6 +102,29 @@ so there is no measured long generation and no thinking-mode figure in this repo
 The earlier bring-up figures in `NOTES.md` taken on a 20 GB debug arena (6.9 % of the
 routed experts) are a measurement of that arena, not of the recipe — do not quote them.
 
+## Unreleased — AMD Strix Halo (ROCm)
+
+The engine runs on AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`). Nothing changes on the GB10:
+every change is gated on `torch.version.hip` or an explicit switch, and the GB10 kernel tests
+(`tools/test_fp4_moe.py`, `engine/test_kernels.py`, `tools/test_cb3_moe.py`) pass with the same
+bandwidth as before. Details and numbers in [`docs/amd.md`](docs/amd.md).
+
+- **Portable FP4 decode** (`tools/fp4_moe.py`): E2M1 nibbles become fp16 by a shift, the 2^14 goes
+  into the UE8M0 scale. Used on ROCm, or anywhere with `DSV41_FP4_DECODE=portable`.
+- **Portable FP8 kernels** (`tools/fp8_linear.py`): e4m3 → bf16 by a shift, one dot per 32-wide
+  K group; row pitch padded to K + 128 when K is a multiple of 256. `DSV41_FP8_PORTABLE=0/1`.
+- **Device-memory arena sizing** (`engine/v41_engine.py`): a GPU whose memory is not the host's is
+  sized from device free memory. `DSV41_UNIFIED_MEM=0/1` overrides.
+- **`pread` fallback for safetensors** (`engine/model.py`) when the shard cannot be mapped.
+- **CB3 on ROCm** (`tools/cb3_moe.py`): the v3 entry point runs the v2 integer kernels. Correct,
+  ~2x slower than FP4 there. CB2 stays PTX-only.
+- **Tools**: `tools/test_kernels_synth.py`, `tools/test_fp4_portable.py`,
+  `tools/sweep_fp4_moe.py`, `engine/profile_rocprof.py` + `tools/rocprof_summary.py`.
+  `engine/profile_fast.py` reads `MODEL_DIR` and `TS` from the environment.
+
+Measured 2026-09-28 at FP4 keep 0.31, arena 78 GB: 12.2 tok/s `code`, 10.3 tok/s `prose`,
+verify step 214–225 ms (GB10 145 ms), prefill 157 tok/s at 6,453 tokens (GB10 245).
+
 ## 0.5.0 — 2026-09-14
 
 **Choosing what the box is good at becomes a thing you can see.** About 40 % of the routed experts

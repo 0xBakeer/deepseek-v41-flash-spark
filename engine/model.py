@@ -38,6 +38,49 @@ RING = int(os.environ.get("DSV41_RING", 4096))
 # gathered window+compressed KV of one layer is ~2.7 GB.
 MAX_CHUNK = int(os.environ.get("DSV41_PREFILL_CHUNK", 2048))
 
+
+class PreadSafetensors:
+    """Read single tensors of a safetensors file with pread, without mapping the file.
+
+    `safe_open` maps the whole shard. The two Engram shards are 101.5 GB each, and on a host whose
+    RAM + swap is smaller than that (Strix Halo: ~30 GB host, the rest carved out as VRAM) the
+    kernel's heuristic overcommit refuses the mapping with ENOMEM. Only a few small tensors of those
+    shards are loaded here, so reading them by offset costs nothing."""
+
+    _DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I8": torch.int8,
+           "U8": torch.uint8, "I32": torch.int32, "I64": torch.int64, "F8_E4M3": torch.float8_e4m3fn,
+           "F8_E8M0": getattr(torch, "float8_e8m0fnu", torch.uint8)}
+
+    def __init__(self, path):
+        import json
+        import struct
+        self.fd = os.open(path, os.O_RDONLY)
+        n = struct.unpack("<Q", os.pread(self.fd, 8, 0))[0]
+        self.header = json.loads(os.pread(self.fd, n, 8))
+        self.base = 8 + n
+
+    def get_tensor(self, name):
+        h = self.header[name]
+        a, b = h["data_offsets"]
+        buf = bytearray(b - a)
+        mv, got = memoryview(buf), 0
+        while got < len(buf):
+            k = os.preadv(self.fd, [mv[got:]], self.base + a + got)
+            if k <= 0:
+                raise IOError(f"short read of {name}")
+            got += k
+        t = torch.frombuffer(buf, dtype=torch.uint8) if buf else torch.empty(0, dtype=torch.uint8)
+        return t.view(self._DT[h["dtype"]]).reshape(h["shape"])
+
+
+def open_safetensors(path):
+    try:
+        return safe_open(path, "pt", device="cpu")
+    except RuntimeError as e:
+        if "mmap" not in str(e):
+            raise
+        return PreadSafetensors(path)
+
 # Chunk invariance requires every GEMM to give the same row whatever the batch length M. cuBLAS
 # picks split-K kernels for small M and, with this flag on, reduces the K-splits in bf16, so
 # F.linear(x[:6], w) != F.linear(x, w)[:6] by ~2.4e-3 for the N=512 wkv projection -- which the
@@ -88,7 +131,7 @@ class Weights:
                     # engram shard not (yet) on disk: the small non-table tensors fetched by tools/engram_rows.py
                     L = name.split(".")[1]
                     path = os.path.join(engram_dir or "engram_rows", f"layer{L}_weights.safetensors")
-                handles[f] = safe_open(path, "pt", device="cpu")
+                handles[f] = open_safetensors(path)
             return handles[f].get_tensor(name)
 
         t0 = time.time()

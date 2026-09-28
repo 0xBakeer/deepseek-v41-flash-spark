@@ -1,0 +1,41 @@
+"""rocprofv3-friendly variant of profile_fast.py: 5 graphed verify steps inside an roctx range "STEPS".
+The torch profiler mis-attributes kernel times inside HIP graph replays on ROCm; rocprofv3 does not.
+    rocprofv3 --kernel-trace --marker-trace --output-format csv -d /tmp/rp -- python engine/profile_rocprof.py
+    python tools/rocprof_summary.py /tmp/rp"""
+"""Kernel-level profile of one graphed verify step (all experts resident, pruned keep=0.25)."""
+import os, sys, time, torch
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.join(HERE, ".."))
+from engine.v41_engine import V41Engine, log
+md = os.environ.get("MODEL_DIR") or os.path.expanduser("~/models/DeepSeek-V4.1-Flash")
+eng = V41Engine(md, max_seq=8192, trace_stats=os.environ.get("TS", "results/trace-full-20260910/stats/coverage.json"), spec=True,
+                prune_keep=float(os.environ.get("PK", "0.31")), arena_gb=float(os.environ.get("AG", "90.5")),
+                transient_slots=int(os.environ.get("TRANSIENT_SLOTS", "8")),
+                keep_free_gb=float(os.environ.get("KEEP_FREE_GB", "10")),
+                expert_format=os.environ.get("EXPERT_FORMAT", "fp4"))
+print("config:", {k: eng.config()[k] for k in ("expert_format", "prune_keep", "arena_slots", "dense_fp4")})
+sys.path.insert(0, os.path.join(md, "encoding")); from encoding import encode_messages
+pr = encode_messages([{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number, with tests."}], thinking_mode="chat")
+ids = eng.tokenizer.encode(pr if isinstance(pr, str) else pr[0], add_special_tokens=False)
+for _ in eng.generate(ids, max_tokens=40, temperature=0.0): pass
+m, fd = eng.model, eng.fast
+pos = m.c.len; tok = 128799
+d, q = fd.draft(tok, pos - 1, 0.0)
+block = torch.cat([torch.tensor([tok], device="cuda"), d.clone()])
+hashes = m.hash_state(block[None], pos)[0]
+rows = {L: eng.tables[L].rows(hashes[:, li, :]) for li, L in enumerate(eng.args.engram_layer_ids)}
+def one():
+    m.c.len = pos; fd.step(block, pos, rows)
+one(); torch.cuda.synchronize()
+t = {}
+for name, fn in (("step", one), ("draft", lambda: fd.draft(tok, pos - 1, 0.0))):
+    torch.cuda.synchronize(); t0 = time.perf_counter()
+    for _ in range(5): fn()
+    torch.cuda.synchronize(); t[name] = (time.perf_counter() - t0) / 5 * 1000
+print("wall ms:", {k: round(v, 1) for k, v in t.items()}, "resolve_s/step:", round(fd.stats.get("resolve_s", 0) / max(1, fd.stats["steps"]) * 1000, 1))
+torch.cuda.synchronize()
+torch.cuda.nvtx.range_push("STEPS")
+t0 = time.perf_counter()
+for _ in range(5): one()
+torch.cuda.synchronize()
+torch.cuda.nvtx.range_pop()
+print("5 steps wall ms/step:", round((time.perf_counter() - t0) / 5 * 1000, 1), flush=True)
