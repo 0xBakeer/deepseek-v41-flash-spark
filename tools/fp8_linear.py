@@ -10,9 +10,14 @@ Accumulation is fp32; the block scale is applied to the fp32 partial of each 32-
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+# RDNA (gfx11xx) has 64 KB of LDS per workgroup; the 3-stage pipeline tuned on GB10 needs 65 KB.
+_STAGES = 2 if torch.version.hip is not None else 3
 
 
 @triton.jit
@@ -83,12 +88,94 @@ def _fp8_grouped_kernel(X, W, S, Y, T, R, K,
              mask=m_mask[:, None] & n_mask[None, :])
 
 
+# ------------------------------------------------------------------ portable path (ROCm / RDNA)
+# gfx11 has no fp8 conversion instruction, and Triton's emulated `fp8 -> bf16` made the kernels above
+# ALU-bound on gfx1151 (23-122 GB/s). Here the seven magnitude bits of an e4m3 byte are shifted to bit 4
+# of a bf16, which is exactly 2^-120 times the e4m3 value (normals and subnormals alike). Every 32-wide
+# K group gets its own bf16 dot, and the group's UE8M0 scale times 2^120 -- applied as two exact
+# power-of-two factors so that no fp32 intermediate overflows -- scales that fp32 partial. Activations
+# stay bf16: an fp16 variant of this kernel overflowed on the DSpark drafter's un-normalised hidden
+# state (acceptance 5.9 -> 1.0 on a counting prompt) while the target model's outputs looked fine.
+_PORTABLE = (torch.version.hip is not None) if os.environ.get("DSV41_FP8_PORTABLE") is None \
+    else os.environ["DSV41_FP8_PORTABLE"] == "1"
+
+
+@triton.jit
+def _e4m3_bf16_x2m120(b):
+    """e4m3 tile (as loaded) -> bf16 tile holding value * 2^-120, exactly."""
+    b = b.to(tl.uint8, bitcast=True).to(tl.int32)
+    return (((b & 0x7F) << 4) | ((b & 0x80) << 8)).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+
+
+@triton.jit
+def _fp8_group_dots(acc, xrow, wrow, srow, k0, K, m_mask, n_mask, BLOCK_K: tl.constexpr):
+    rk = tl.arange(0, 32)
+    for gi in tl.static_range(BLOCK_K // 32):
+        kk = k0 + gi * 32 + rk
+        x = tl.load(xrow + kk[None, :], mask=m_mask[:, None] & (kk[None, :] < K), other=0.0)
+        w = _e4m3_bf16_x2m120(tl.load(wrow + kk[None, :], mask=n_mask[:, None] & (kk[None, :] < K), other=0.0))
+        sb = tl.load(srow + (k0 // 32 + gi), mask=n_mask & (k0 + gi * 32 < K), other=127).to(tl.int32)
+        sc = ((sb + 60) << 23).to(tl.float32, bitcast=True)  # 2^(s-127) * 2^60; the other 2^60 below
+        acc += (tl.dot(x, tl.trans(w), out_dtype=tl.float32) * 1.152921504606846976e18) * sc[None, :]
+    return acc
+
+
+@triton.jit
+def _fp8_linear_kernel_p(X, W, S, Y, M, N, K,
+                         stride_xm, stride_wn, stride_sn, stride_ym,
+                         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_mask = rm < M
+    n_mask = rn < N
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        acc = _fp8_group_dots(acc, X + rm[:, None] * stride_xm, W + rn[:, None] * stride_wn,
+                              S + (rn // 32) * stride_sn, k0, K, m_mask, n_mask, BLOCK_K)
+    tl.store(Y + rm[:, None] * stride_ym + rn[None, :], acc.to(tl.bfloat16), mask=m_mask[:, None] & n_mask[None, :])
+
+
+@triton.jit
+def _fp8_grouped_kernel_p(X, W, S, Y, T, R, K,
+                          stride_xt, stride_xg, stride_wn, stride_sn, stride_yt, stride_yg,
+                          BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    g = tl.program_id(2)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_mask = rm < T
+    n_mask = rn < R
+    wrow = g * R + rn
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        acc = _fp8_group_dots(acc, X + g * stride_xg + rm[:, None] * stride_xt, W + wrow[:, None] * stride_wn,
+                              S + (wrow // 32) * stride_sn, k0, K, m_mask, n_mask, BLOCK_K)
+    tl.store(Y + rm[:, None] * stride_yt + g * stride_yg + rn[None, :], acc.to(tl.bfloat16),
+             mask=m_mask[:, None] & n_mask[None, :])
+
+
+def _pad_rows(w: torch.Tensor) -> torch.Tensor:
+    """On the portable path, give a [N, K] fp8 weight a row stride of K + 128 bytes when K is a multiple
+    of 256, returned as a [N, K] view. Rows 4096 or 8192 bytes apart all start on the same LPDDR5X
+    channel, so the 32 rows a program walks in lockstep queue on one channel: on gfx1151 a [5120, 8192]
+    weight streamed at 80 GB/s, the same weight 128 bytes per row further apart at 195-212 GB/s. A stride
+    that is 128 mod 256 has no power-of-two factor above 2^7. Costs K/(K+128) of memory (~3 %)."""
+    if not _PORTABLE or w.size(1) % 256:
+        return w
+    buf = torch.empty(w.size(0), w.size(1) + 128, dtype=w.dtype, device=w.device)
+    buf[:, : w.size(1)].copy_(w)
+    return buf[:, : w.size(1)]
+
+
 class FP8Weight:
     """Holds a dense weight in the stored format (fp8 e4m3 + ue8m0 32x32 block scales)."""
 
     def __init__(self, weight_fp8: torch.Tensor, scale_e8m0: torch.Tensor):
         assert weight_fp8.dtype == torch.float8_e4m3fn and weight_fp8.dim() == 2
-        self.w = weight_fp8.contiguous()
+        self.w = _pad_rows(weight_fp8.contiguous())
         self.s = scale_e8m0.view(torch.uint8).contiguous()
         self.N, self.K = self.w.shape
         assert self.s.shape == ((self.N + 31) // 32, (self.K + 31) // 32), (self.s.shape, self.w.shape)
@@ -156,9 +243,15 @@ def fp8_linear(x: torch.Tensor, W: FP8Weight) -> torch.Tensor:
     BLOCK_M = 16 if M <= 16 else 64
     BLOCK_N = 128
     BLOCK_K = 128 if W.K % 128 == 0 else 64
+    if _PORTABLE:
+        grid = (triton.cdiv(W.N, 32), triton.cdiv(M, BLOCK_M))
+        _fp8_linear_kernel_p[grid](x2, W.w, W.s, y, M, W.N, W.K, x2.stride(0), W.w.stride(0), W.s.stride(0),
+                                   y.stride(0), BLOCK_M=BLOCK_M, BLOCK_N=32, BLOCK_K=BLOCK_K,
+                                   num_warps=2 if W.N > 512 else 4, num_stages=2)
+        return y.view(*shape[:-1], W.N)
     grid = (triton.cdiv(W.N, BLOCK_N), triton.cdiv(M, BLOCK_M))
     _fp8_linear_kernel[grid](x2, W.w, W.s, y, M, W.N, W.K, x2.stride(0), W.w.stride(0), W.s.stride(0), y.stride(0),
-                             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=4, num_stages=3)
+                             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=4, num_stages=_STAGES)
     return y.view(*shape[:-1], W.N)
 
 
@@ -173,7 +266,7 @@ class FP8GroupedWeight:
 
     def __init__(self, weight_fp8: torch.Tensor, scale_e8m0: torch.Tensor, groups: int, rank: int):
         assert weight_fp8.dtype == torch.float8_e4m3fn and weight_fp8.dim() == 2
-        self.w = weight_fp8.contiguous()
+        self.w = _pad_rows(weight_fp8.contiguous())
         self.s = scale_e8m0.view(torch.uint8).contiguous()
         N, self.K = self.w.shape
         assert N == groups * rank, (N, groups, rank)
@@ -209,12 +302,19 @@ def fp8_grouped_linear(x: torch.Tensor, W: FP8GroupedWeight) -> torch.Tensor:
     BLOCK_M = 16 if T <= 16 else 64
     BLOCK_N = 128
     BLOCK_K = 128 if W.K % 128 == 0 else 64
+    if _PORTABLE:
+        grid = (triton.cdiv(W.R, 32), triton.cdiv(T, BLOCK_M), W.G)
+        _fp8_grouped_kernel_p[grid](x, W.w, W.s, y, T, W.R, W.K,
+                                    x.stride(0), x.stride(1), W.w.stride(0), W.s.stride(0),
+                                    y.stride(0), y.stride(1),
+                                    BLOCK_M=BLOCK_M, BLOCK_N=32, BLOCK_K=BLOCK_K, num_warps=2, num_stages=2)
+        return y
     grid = (triton.cdiv(W.R, BLOCK_N), triton.cdiv(T, BLOCK_M), W.G)
     _fp8_grouped_kernel[grid](x, W.w, W.s, y, T, W.R, W.K,
                               x.stride(0), x.stride(1), W.w.stride(0), W.s.stride(0),
                               y.stride(0), y.stride(1),
                               BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                              num_warps=4, num_stages=3)
+                              num_warps=4, num_stages=_STAGES)
     return y
 
 

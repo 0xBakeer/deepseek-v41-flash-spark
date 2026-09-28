@@ -516,6 +516,26 @@ def _grp_packed_ptx(Lk, Hm, A, B, ASM: tl.constexpr):
                                      dtype=tl.uint8, is_pure=True, pack=4)
 
 
+# On ROCm (no PTX) the same group is rebuilt by the v2 integer path `_grp_packed`, and `_cb_ab` hands
+# over the row's codebook as one 32-bit nibble word instead of the two prmt source tiles.
+_CB3_PORTABLE = F4._FP4_PORTABLE
+
+
+@triton.jit
+def _grp(Lk, Hm, A, B, SH: tl.constexpr, HB: tl.constexpr):
+    """One scale group's packed-FP4 byte tile; (SH, HB) = the lo-bit shift and hi-bit position."""
+    if _CB3_PORTABLE:
+        return _grp_packed(Lk, Hm, A, SH, HB)  # A is the [BN, 1] codebook word here
+    elif SH == 0 and HB == 0:
+        return _grp_packed_ptx(Lk, Hm, A, B, _ASM_00)
+    elif SH == 4 and HB == 2:
+        return _grp_packed_ptx(Lk, Hm, A, B, _ASM_42)
+    elif SH == 0 and HB == 4:
+        return _grp_packed_ptx(Lk, Hm, A, B, _ASM_04)
+    else:
+        return _grp_packed_ptx(Lk, Hm, A, B, _ASM_46)
+
+
 @triton.jit
 def _split16(s, BN: tl.constexpr):
     a, b, c, d = _split4(s, BN, 4)
@@ -535,11 +555,11 @@ def _pair_dot(x_base, xk, mask_m, Lk, Hm, A, B, sA, sB, KPAR: tl.constexpr):
     """The two scale groups that share one 16-byte lo sub-tile (k), using the low or the high half
     of its hi sub-tile's bits depending on k's parity."""
     if KPAR == 0:
-        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_00)
-        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_42)
+        p0 = _grp(Lk, Hm, A, B, 0, 0)
+        p1 = _grp(Lk, Hm, A, B, 4, 2)
     else:
-        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_04)
-        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_46)
+        p0 = _grp(Lk, Hm, A, B, 0, 4)
+        p1 = _grp(Lk, Hm, A, B, 4, 6)
     acc = _chunk_dot(x_base, xk, mask_m, p0, sA)
     acc += _chunk_dot(x_base + 32, xk, mask_m, p1, sB)
     return acc
@@ -583,11 +603,23 @@ def _cb3v3_block_dot(x_base, xk, mask_m, lo_ptr, hi_ptr, s_ptr, A, B,
 
 
 @triton.jit
-def _cb_ab(cb_ptr, BN: tl.constexpr):
+def _cb_ab_ptx(cb_ptr, BN: tl.constexpr):
     """The row's codebook as two [BN, 16] uint8 tiles: every 4-element group is entries 0..3 / 4..7,
     so pack=4 delivers them to prmt as two source registers. One (L1-served) load per program."""
     j = tl.arange(0, 16)[None, :]
     return tl.load(cb_ptr + (j % 4)), tl.load(cb_ptr + 4 + (j % 4))
+
+
+@triton.jit
+def _cb_ab_word(cb_ptr, BN: tl.constexpr):
+    """Portable twin of _cb_ab_ptx: the row's codebook as one [BN, 1] nibble word (twice, same shape
+    of call), which is what the integer path `_grp_packed` indexes."""
+    cb = tl.load(cb_ptr + tl.arange(0, 8)[None, :]).to(tl.int32)  # [BN, 8]
+    cw = tl.sum(cb << (tl.arange(0, 8) * 4)[None, :], axis=1)[:, None]
+    return cw, cw
+
+
+_cb_ab = _cb_ab_word if _CB3_PORTABLE.value else _cb_ab_ptx
 
 
 @triton.jit
@@ -694,6 +726,37 @@ CB3_UP_CFG = {16: (32, 4, 3), 32: (32, 4, 3), 64: (32, 4, 3)}
 CB3_DOWN_CFG = {16: (32, 4, 3), 32: (32, 4, 3), 64: (32, 4, 3)}
 
 
+# ROCm: the v3 kernels' 32-byte-wide tiles are split in registers, which RDNA does through LDS (20.7 ms
+# at T=6 over 21 experts on gfx1151 against 6.0 for v2). So the v3 entry point runs the v2 kernels there,
+# with the graph-capturable small routing at decode sizes. Tuned on gfx1151 at T=6 over 36 experts:
+# 9.87 ms with the GB10 table, 8.98 ms with this one (~2x the FP4 kernel on the same box).
+CB3_V2_ROCM_CFG = {16: ((64, 4, 1), (64, 4, 2)), 32: ((64, 4, 1), (64, 4, 2)), 64: ((64, 4, 1), (64, 4, 2))}
+
+
+def _moe_forward_v2_portable(x, slots, weights, arena, swiglu_limit, BM, cfg_up=None, cfg_down=None):
+    T, K = slots.shape
+    P = T * K
+    dev = x.device
+    (bn1, nw1, ns1), (bn2, nw2, ns2) = cfg_up or CB3_V2_ROCM_CFG[BM][0], cfg_down or CB3_V2_ROCM_CFG[BM][1]
+    if P <= 64:
+        block_slot, block_pair, NB = build_routing_small(slots, BM)
+    else:
+        block_slot, block_pair, NB = build_routing(slots, arena.slots, BM)
+    wgt = weights.reshape(-1)
+    if wgt.dtype != torch.float32 or not wgt.is_contiguous():
+        wgt = wgt.float().contiguous()
+    h = torch.empty((P, INTER), dtype=torch.bfloat16, device=dev)
+    parts = torch.empty((P, DIM), dtype=torch.float32, device=dev)
+    _cb3v2_up_kernel[(NB, INTER // bn1)](
+        x, arena.w1_lo, arena.w1_hi, arena.w1_cb, arena.s1, arena.w3_lo, arena.w3_hi, arena.w3_cb, arena.s3, h,
+        wgt, block_slot, block_pair, x.stride(0), h.stride(0), float(swiglu_limit),
+        TOPK=K, N=INTER, K=DIM, BM=BM, BN=bn1, num_warps=nw1, num_stages=ns1)
+    _cb3v2_down_kernel[(NB, DIM // bn2)](
+        h, arena.w2_lo, arena.w2_hi, arena.w2_cb, arena.s2, parts, block_slot, block_pair,
+        h.stride(0), parts.stride(0), TOPK=K, N=DIM, K=INTER, BM=BM, BN=bn2, NTOK=T, num_warps=nw2, num_stages=ns2)
+    return parts.view(K, T, DIM).sum(dim=0).to(torch.bfloat16)
+
+
 def moe_forward_v3(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, arena: CB3ArenaV2,
                    swiglu_limit: float = 10.0, block_m: int | None = None,
                    cfg_up=None, cfg_down=None) -> torch.Tensor:
@@ -704,6 +767,8 @@ def moe_forward_v3(x: torch.Tensor, slots: torch.Tensor, weights: torch.Tensor, 
         return moe_forward_prefill(x, slots, weights, arena, swiglu_limit)
     dev = x.device
     BM = block_m or _pick_bm(P)
+    if _CB3_PORTABLE.value:
+        return _moe_forward_v2_portable(x, slots, weights, arena, swiglu_limit, BM, cfg_up, cfg_down)
     bn1, nw1, ns1 = cfg_up or CB3_UP_CFG[BM]
     bn2, nw2, ns2 = cfg_down or CB3_DOWN_CFG[BM]
     if P <= 64:  # decode-sized call: pure-torch routing (static shapes, graph-capturable)
@@ -740,11 +805,11 @@ def _unpack_pair(out_base, Lk, Hm, A, B, KPAR: tl.constexpr, BN: tl.constexpr, K
     """Store the two scale groups of one lo sub-tile as 2 x 16 packed-FP4 bytes."""
     j = tl.arange(0, 16)[None, :]
     if KPAR == 0:
-        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_00)
-        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_42)
+        p0 = _grp(Lk, Hm, A, B, 0, 0)
+        p1 = _grp(Lk, Hm, A, B, 4, 2)
     else:
-        p0 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_04)
-        p1 = _grp_packed_ptx(Lk, Hm, A, B, _ASM_46)
+        p0 = _grp(Lk, Hm, A, B, 0, 4)
+        p1 = _grp(Lk, Hm, A, B, 4, 6)
     tl.store(out_base + j, p0)
     tl.store(out_base + 16 + j, p1)
 

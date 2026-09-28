@@ -242,6 +242,15 @@ and `./results` at `/app/results`, and sets the three flags that are not optiona
 all`, `--ipc=host`, `--ulimit memlock=-1`). **Do not set `--memory`**: on unified memory that
 caps GPU allocations too and the arena auto-sizer will quietly shrink to fit it.
 
+### AMD Strix Halo (ROCm) — experimental
+
+The same server also runs on a Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`) box, inside a
+ROCm torch container: portable FP4/FP8 decode, an arena sized from device memory, and kernels
+tuned for RDNA. Measured there at FP4 keep 0.31 (the 96 GiB carve-out does not hold keep 0.40):
+12.2 tok/s `code`, 10.3 tok/s `prose`, a 214–225 ms verify step against the GB10's 145 ms.
+Setup, the numbers and the limits are in [`docs/amd.md`](docs/amd.md). Every change is gated on
+ROCm; the GB10 path is unchanged.
+
 ### Check it is alive
 
 ```bash
@@ -374,6 +383,7 @@ docs/                 install · architecture · openai-api · benchmarking · g
 | [`docs/keep-sets.md`](docs/keep-sets.md) | what a keep-set, a topic and coverage are, and why coverage predicts degeneration |
 | [`docs/memory-budget.md`](docs/memory-budget.md) | every memory term with its provenance, and the two gates a configuration must pass |
 | [`docs/install.md`](docs/install.md) | host prerequisites, the checkpoint, both run paths, first start |
+| [`docs/amd.md`](docs/amd.md) | running on AMD Strix Halo (ROCm, gfx1151): setup, what changed, measured numbers, limits |
 | [`docs/architecture.md`](docs/architecture.md) | how the engine is put together |
 | [`docs/openai-api.md`](docs/openai-api.md) | endpoints, thinking/effort, streaming, Open WebUI |
 | [`docs/benchmarking.md`](docs/benchmarking.md) | how to take a row that means something |
